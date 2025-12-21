@@ -2085,15 +2085,14 @@ def visualize_reconstruction(image: np.ndarray, params: List[Dict],
         config: Optional Config for axis labels and energy conversion
         true_params: Dictionary with true simulation parameters
             Expected keys: E_centers, Betas, branching_ratios, sigma_laser
-        image_3d: Optional 3D distribution image before Abel projection.
-            If provided, this will be shown in the bottom-right panel instead
-            of the parameter comparison text. This should be a 2D slice through
-            the 3D velocity distribution (e.g., XY projection).
+        image_3d: Deprecated parameter, no longer used.
         rbasex_params: Optional list of reconstructed parameters from rBasex method.
-            If provided, rBasex results will be included in the beta comparison plot.
+            If provided, rBasex results will be included in the beta comparison plot
+            and used to generate the bottom-right panel reconstruction image.
         rbasex_metadata: Optional metadata from rBasex reconstruction.
             If provided, the rBasex radial profile will be included in the
-            radial distribution comparison plot.
+            radial distribution comparison plot. If 'recon_image' key is present,
+            it will be displayed in the bottom-right panel.
         save_path: Path to save figure
     """
     n_pixels = image.shape[0]
@@ -2238,29 +2237,27 @@ def visualize_reconstruction(image: np.ndarray, params: List[Dict],
     ax5.legend()
     ax5.grid(True, alpha=0.3)
     
-    # Bottom-right panel: 3D distribution image OR parameter summary
+    # Bottom-right panel: rBasex reconstruction result
     ax6 = axes[1, 2]
     
-    if image_3d is not None:
-        # Show the 3D distribution image before Abel projection
-        # This is the "real" distribution that gets projected to create the detector image
-        if config is not None:
-            extent_3d = [-config.detector_size_mm/2, config.detector_size_mm/2,
-                        -config.detector_size_mm/2, config.detector_size_mm/2]
-        else:
-            extent_3d = None
-        
-        im6 = ax6.imshow(image_3d.T, origin='lower', extent=extent_3d, cmap='hot')
-        ax6.set_title("3D Distribution Before Projection\n(True velocity distribution)")
-        if config is not None:
-            ax6.set_xlabel('X (mm)')
-            ax6.set_ylabel('Y (mm)')
-        else:
-            ax6.set_xlabel('X (pixels)')
-            ax6.set_ylabel('Y (pixels)')
-        plt.colorbar(im6, ax=ax6, fraction=0.046, label='Counts')
+    if rbasex_metadata is not None and 'recon_image' in rbasex_metadata:
+        # Show the rBasex reconstructed 3D distribution slice
+        rbasex_recon = rbasex_metadata['recon_image']
+        im6 = ax6.imshow(rbasex_recon, cmap='hot')
+        ax6.set_title("rBasex Reconstructed 3D Distribution")
+        ax6.set_xlabel('X (pixels)')
+        ax6.set_ylabel('Y (pixels)')
+        plt.colorbar(im6, ax=ax6, fraction=0.046, label='Intensity')
+    elif rbasex_params is not None:
+        # Reconstruct 2D slice from rBasex parameters
+        rbasex_2d = reconstruct_2d_from_params(rbasex_params, n_pixels)
+        im6 = ax6.imshow(rbasex_2d, cmap='hot')
+        ax6.set_title("rBasex Reconstructed 3D Distribution")
+        ax6.set_xlabel('X (pixels)')
+        ax6.set_ylabel('Y (pixels)')
+        plt.colorbar(im6, ax=ax6, fraction=0.046, label='Intensity')
     else:
-        # Fall back to parameter summary table if no 3D image provided
+        # Fall back to parameter summary table if no rBasex data provided
         ax6.axis('off')
         
         summary = "PARAMETER COMPARISON\n"

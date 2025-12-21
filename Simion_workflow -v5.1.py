@@ -10,29 +10,37 @@ Optimized SIMION Workflow - v5.1py
 # Import the Utilis module containing all utility functions for SIMION data processing and simulation
 import os
 import Utilis
-import delete_temp
 import numpy as np
+from collections import defaultdict
+
 # Configuration parameters for the SIMION simulation workflow
 # These define the parameter sweep ranges and simulation settings
 
+# ============================================================================
+# SKIP SIMULATION SWITCH
+# Set to True to skip run_optimized_simulations_with_ke_parallel and directly
+# run energy_resolution_analysis with parameter-based processed_data
+# ============================================================================
+SKIP_INITIAL_SIMULATION = True  # Set to True to skip initial SIMION simulations
+
 KE_MIN = 1  # Minimum kinetic energy in eV
-KE_MAX = 8  # Maximum kinetic energy in eV
-NUM_KE_POINTS = 2  # Number of kinetic energy points for sweep
+KE_MAX = 10  # Maximum kinetic energy in eV
+NUM_KE_POINTS = 37  # Number of kinetic energy points for sweep
 
 electron_energy_sequence = np.linspace(KE_MIN, KE_MAX, NUM_KE_POINTS)  # Sequence of kinetic energies
 if KE_MIN >= KE_MAX:
     electron_energy_sequence = np.array([KE_MIN])
 Theta=0*2*np.pi/360 # roataion for the particles DEGREE
 
-FIELD_MIN = 100  # Minimum field gradient in V/cm for parameter sweep
-FIELD_MAX = 100  # Maximum field gradient in V/cm for parameter sweep
-NUM_POINTS = 1   # Number of field gradient points to simulate (reduced from v2's 20 for faster testing)
+FIELD_MIN = 50  # Minimum field gradient in V/cm for parameter sweep
+FIELD_MAX = 500  # Maximum field gradient in V/cm for parameter sweep
+NUM_POINTS = 21   # Number of field gradient points to simulate (reduced from v2's 20 for faster testing)
 
 LENS_MIN = 1    # Minimum lens focusing factor (lens_VMI), adjusted from v2's 1.38
-LENS_MAX = 3  # Maximum lens focusing factor (lens_VMI)
-NUM_LENS_POINTS = 2  # Number of lens points to simulate (reduced from v2's 20)
+LENS_MAX = 5  # Maximum lens focusing factor (lens_VMI)
+NUM_LENS_POINTS = 21  # Number of lens points to simulate (reduced from v2's 20)
 
-NUM_GROUPS = 200  # Number of particle groups to generate (each group has 8 trajectorr54ies, reduced from v2's 10)
+NUM_GROUPS = 2  # Number of particle groups to generate (each group has 8 trajectories, reduced from v2's 10)
 
 X_SCAN_RANGE = (73.0, 166.0)  # Range of x-planes to scan for focus analysis (in mm)
 X_STEP = 0.25  # Step size for the x-plane scan
@@ -52,30 +60,66 @@ param = Utilis.compute_vmi_parameters(
     save_to_file=False, filename='parameters.mat',mode='velocity_imaging',  # Don't save to file, keep in memory
 )
 
-# Clear content of OUT_FILE and INPUT_FILE before simulations
-Utilis.clear_file_contents(OUT_FILE, INPUT_FILE)
+if not SKIP_INITIAL_SIMULATION:
+    # Clear content of OUT_FILE and INPUT_FILE before simulations
+    Utilis.clear_file_contents(OUT_FILE, INPUT_FILE)
 
-# Step 2: Run SIMION simulations for each kinetic energy
-# For each ke, generate particles, then run simulations over all parameter combinations (fg, lens)
-# Particle generation depends on ke, parameters are independent of ke
-for ke in electron_energy_sequence:
-    # Generate particle definitions for SIMION with current ke
-    Utilis.generate_particles_fly2(num_groups=NUM_GROUPS, filename=OUTPUT_FILENAME_FLY2, x_range=(-0.5, 0.5), y_range=(-0.5, 0.5), z_range=(-0.5, 0.5), ke=ke,theta=Theta)
+    # Step 2: Run SIMION simulations for each kinetic energy
+    # For each ke, generate particles, then run simulations over all parameter combinations (fg, lens)
+    # Particle generation depends on ke, parameters are independent of ke
+    for ke in electron_energy_sequence:
+        # Generate particle definitions for SIMION with current ke
+        Utilis.generate_particles_fly2(num_groups=NUM_GROUPS, filename=OUTPUT_FILENAME_FLY2, x_range=(-0.5, 0.5), y_range=(-0.5, 0.5), z_range=(-0.5, 0.5), ke=ke,theta=Theta)
 
-    # Run optimized SIMION simulations with parallel Lua generation and sequential SIMION runs
-    Utilis.run_optimized_simulations_with_ke_parallel(param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, OUT_FILE)
+        # Run optimized SIMION simulations with parallel Lua generation and sequential SIMION runs
+        Utilis.run_optimized_simulations_with_ke_parallel(param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, OUT_FILE)
 
-# Call the function to delete temp files in the current directory
-delete_temp.delete_temp_files()
+    # Call the function to delete temp files in the current directory
+    Utilis.delete_temp_files()
 
-# Step 4: Process simulation data to find focus points
-# Parses out.txt, calculates final position statistics, analyzes beam across x-planes, and finds focus
-processed_data = Utilis.process_data(
-    x_range=X_SCAN_RANGE,  # Range of x-planes to analyze
-    file_path=INPUT_FILE,  # SIMION output file
-    focus_axis=FOCUS_CRITERION,  # Axis for focus evaluation
-    fly2_file=OUTPUT_FILENAME_FLY2  # Particle file for emission angles
-                                         )
+    # Step 4: Process simulation data to find focus points
+    # Parses out.txt, calculates final position statistics, analyzes beam across x-planes, and finds focus
+    processed_data = Utilis.process_data(
+        x_range=X_SCAN_RANGE,  # Range of x-planes to analyze
+        file_path=INPUT_FILE,  # SIMION output file
+        focus_axis=FOCUS_CRITERION,  # Axis for focus evaluation
+        fly2_file=OUTPUT_FILENAME_FLY2  # Particle file for emission angles
+                                             )
+else:
+    # Skip initial simulation and create minimal processed_data structure
+    # This structure contains only the parameters needed for energy_resolution_analysis
+    print("SKIP_INITIAL_SIMULATION is enabled. Creating parameter-based processed_data...")
+    
+    # Create processed_data structure with all fg, lens_vmi, ke combinations
+    # The structure needs: processed_data[fg][lens_vmi][ke]['global'] with focus_points_y/z
+    # Since we're skipping simulation, we create placeholder focus points that will pass focus_filtering
+    processed_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: {'global': {}, 'local': {}})))
+    
+    # Get unique field gradients and lens values from param
+    unique_fgs = np.unique(param['field_gradient'])
+    unique_lens = np.unique(param['lens_VMI'])
+    
+    for fg in unique_fgs:
+        for lens_vmi in unique_lens:
+            for ke in electron_energy_sequence:
+                # Create placeholder global data with empty focus points
+                # focus_filtering will pass these through since we set valid_xz and valid_xy to True
+                # when focus_points are empty (see focus_filtering function logic)
+                processed_data[fg][lens_vmi][ke]['global'] = {
+                    'focus_points_y': [],
+                    'focus_points_z': [],
+                    'counts_y': np.array([]),
+                    'bins_y': np.array([]),
+                    'counts_z': np.array([]),
+                    'bins_z': np.array([]),
+                    'std_dev_y': 0.0,
+                    'std_dev_z': 0.0,
+                    'dr': 0.0,
+                    'M_square': 0.0,
+                    'M_rectangle': 0.0
+                }
+    
+    print(f"Created processed_data with {len(unique_fgs)} field gradients, {len(unique_lens)} lens values, {len(electron_energy_sequence)} kinetic energies")
 
 #Utilis.para_2d_landscape(processed_data, target='dr', ke_sequence=electron_energy_sequence)
 

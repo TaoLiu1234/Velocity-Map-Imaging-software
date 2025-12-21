@@ -1,4 +1,5 @@
 import os
+import glob
 import random
 import re
 import traceback
@@ -3533,14 +3534,14 @@ def focus_filtering(processed_data, tolerable_offset=2.0):
                 if True:
                     #focus_points_y and len(focus_points_y) > 1:
                     # Extract x positions and z coordinates for Petzval fitting
-                    xs_y = np.array([item[0] for item in focus_points_y])
-                    zs = np.array([item[2] for item in focus_points_y])
-                    z2s = zs ** 2
+                    # xs_y = np.array([item[0] for item in focus_points_y])
+                    # zs = np.array([item[2] for item in focus_points_y])
+                    # z2s = zs ** 2
                     
                     try:
                         # Fit Petzval field curvature: X = intercept + slope * z²
-                        coeffs_xz = np.polyfit(z2s, xs_y, 1)
-                        intercept_xz = coeffs_xz[1]
+                        # coeffs_xz = np.polyfit(z2s, xs_y, 1)
+                        # intercept_xz = coeffs_xz[1]
                         
                         # Check if intercept is within tolerance
                         if True:
@@ -3555,14 +3556,14 @@ def focus_filtering(processed_data, tolerable_offset=2.0):
                 if True:
                     #focus_points_z and len(focus_points_z) > 1:
                     # Extract x positions and y coordinates for Petzval fitting
-                    xs_z = np.array([item[0] for item in focus_points_z])
-                    ys = np.array([item[1] for item in focus_points_z])
-                    y2s = ys ** 2
+                    # xs_z = np.array([item[0] for item in focus_points_z])
+                    # ys = np.array([item[1] for item in focus_points_z])
+                    # y2s = ys ** 2
                     
                     try:
                         # Fit Petzval field curvature: X = intercept + slope * y²
-                        coeffs_xy = np.polyfit(y2s, xs_z, 1)
-                        intercept_xy = coeffs_xy[1]
+                        # coeffs_xy = np.polyfit(y2s, xs_z, 1)
+                        # intercept_xy = coeffs_xy[1]
                         
                         # Check if intercept is within tolerance
                         if True:
@@ -4535,3 +4536,27 @@ def plot_energy_resolution_vs_ke(processed_data, figsize=(14, 10)):
     # Initial plot
     update()
     plt.show()
+
+
+def delete_temp_files():
+    """
+    Delete all .tmp files in the current directory.
+    
+    This function finds and removes all files with the .tmp extension
+    in the current working directory.
+    
+    Returns:
+        None
+    """
+    # Get the current directory
+    current_dir = os.getcwd()
+
+    # Find all .tmp files in the current directory
+    temp_files = glob.glob(os.path.join(current_dir, '*.tmp'))
+
+    # Delete each temp file
+    for file in temp_files:
+        os.remove(file)
+        #print(f"Deleted: {file}")
+
+    print(f"Total temp files deleted: {len(temp_files)}")
