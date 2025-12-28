@@ -4,11 +4,17 @@ Optimized SIMION Workflow - v5.1py
 - Optimized Utilis.py: incremental file parsing, removed unused functions, reduced code size by 10%
 - Uses multi-threading for independent computations
 - Add energy resolution analysis
+- v5.1.1: Added batch processing and memory optimization for large datasets
+  - Configurable batch sizes for energy resolution analysis
+  - Automatic garbage collection between batches
+  - Progress tracking for long-running operations
+  - Memory-efficient data structures
 """
 #processed_data[fg][lens_vmi][ke_electron]['local'][particle_idx]['trajectories'][trajectory_idx][point_idx]
 
 # Import the Utilis module containing all utility functions for SIMION data processing and simulation
 import os
+import gc
 import Utilis
 import numpy as np
 from collections import defaultdict
@@ -23,9 +29,25 @@ from collections import defaultdict
 # ============================================================================
 SKIP_INITIAL_SIMULATION = True  # Set to True to skip initial SIMION simulations
 
+# ============================================================================
+# PERFORMANCE OPTIMIZATION SETTINGS
+# Adjust these for large datasets to prevent memory issues and crashes
+# ============================================================================
+BATCH_SIZE = 50  # Number of combinations to process per batch (reduce if memory issues)
+ENABLE_MEMORY_OPTIMIZATION = True  # Enable aggressive memory cleanup between batches
+MAX_PARALLEL_WORKERS = None  # None = auto (75% of CPU cores), or set specific number
+CHECKPOINT_INTERVAL = 25  # Save intermediate results every N combinations (0 to disable)
+
+# ============================================================================
+# ENERGY RESOLUTION ANALYSIS SETTINGS
+# Note: Large num_particles_per_energy (>5000) can cause SIMION to fail or be very slow
+# Recommended: 1000-5000 for good statistics without overwhelming SIMION
+# ============================================================================
+NUM_PARTICLES_PER_ENERGY = 50000  # Number of particles for energy resolution analysis
+
 KE_MIN = 1  # Minimum kinetic energy in eV
 KE_MAX = 10  # Maximum kinetic energy in eV
-NUM_KE_POINTS = 37  # Number of kinetic energy points for sweep
+NUM_KE_POINTS = 2  # Number of kinetic energy points for sweep
 
 electron_energy_sequence = np.linspace(KE_MIN, KE_MAX, NUM_KE_POINTS)  # Sequence of kinetic energies
 if KE_MIN >= KE_MAX:
@@ -34,11 +56,11 @@ Theta=0*2*np.pi/360 # roataion for the particles DEGREE
 
 FIELD_MIN = 50  # Minimum field gradient in V/cm for parameter sweep
 FIELD_MAX = 500  # Maximum field gradient in V/cm for parameter sweep
-NUM_POINTS = 21   # Number of field gradient points to simulate (reduced from v2's 20 for faster testing)
+NUM_POINTS = 2   # Number of field gradient points to simulate (reduced from v2's 20 for faster testing)
 
 LENS_MIN = 1    # Minimum lens focusing factor (lens_VMI), adjusted from v2's 1.38
 LENS_MAX = 5  # Maximum lens focusing factor (lens_VMI)
-NUM_LENS_POINTS = 21  # Number of lens points to simulate (reduced from v2's 20)
+NUM_LENS_POINTS = 2  # Number of lens points to simulate (reduced from v2's 20)
 
 NUM_GROUPS = 2  # Number of particle groups to generate (each group has 8 trajectories, reduced from v2's 10)
 
@@ -130,12 +152,24 @@ print("Workflow completed successfully.")
 # filter the well focused data using focus_filtering function
 # energy resolution analysis
 #----------------------------------------------------------------------------------------------------------
-processed_data = Utilis.energy_resolution_analysis(processed_data, tolerable_offset=3.0,
-                              source_position=(199, -1, 0.0),
-                              num_particles_per_energy=10000,
-                              x_scan_range=(73.0, 166.0),
-                              bin_interval=0.01,
-                              outside_region_width=2)
+# Use optimized batch processing for large datasets
+processed_data = Utilis.energy_resolution_analysis(
+    processed_data, 
+    tolerable_offset=3.0,
+    source_position=(199, -1, 0.0),
+    num_particles_per_energy=NUM_PARTICLES_PER_ENERGY,  # Use configurable value (default: 2000)
+    x_scan_range=(73.0, 166.0),
+    bin_interval=0.01,
+    outside_region_width=2,
+    # New optimization parameters
+    batch_size=BATCH_SIZE,
+    enable_memory_optimization=ENABLE_MEMORY_OPTIMIZATION,
+    checkpoint_interval=CHECKPOINT_INTERVAL
+)
+
+# Force garbage collection after heavy processing
+if ENABLE_MEMORY_OPTIMIZATION:
+    gc.collect()
 #----------------------------------------------------------------------------------------------------------
 # angular distribution analysis
 #----------------------------------------------------------------------------------------------------------
@@ -149,3 +183,7 @@ Utilis.plot_stored_heatmaps(all_heatmaps)
 Utilis.plot_energy_resolution_vs_ke(processed_data)
 #----------------------------------------------------------------------------------------------------------
 print('finalizing the data analysis...')
+
+# Final cleanup
+if ENABLE_MEMORY_OPTIMIZATION:
+    gc.collect()

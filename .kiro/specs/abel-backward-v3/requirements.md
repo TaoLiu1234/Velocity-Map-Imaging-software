@@ -137,3 +137,35 @@
 3. WHEN computing square roots THEN the system SHALL ensure arguments are non-negative
 4. WHEN the input image has very low counts THEN the system SHALL handle gracefully without crashing
 5. WHEN the input image has very high counts THEN the system SHALL handle gracefully without overflow
+
+### Requirement 9: 正交性能测试 - 寿命展宽 (Lifetime Broadening)
+
+**User Story:** 作为物理学家，我希望算法能正确处理不同激发态寿命导致的洛伦兹展宽（Voigt 线型），以便准确重建真实实验数据。
+
+#### Acceptance Criteria
+
+1. WHEN testing with non-zero lifetime τ THEN the system SHALL correctly reconstruct peak parameters from Voigt profile data (Gaussian + Lorentzian)
+2. WHEN lifetime τ = 0 (no Lorentzian broadening) THEN the system SHALL achieve r0 error < 1%, σ error < 5%, β error < 0.1
+3. WHEN lifetime τ = 50 fs (significant Lorentzian, γ=0.0066 eV) THEN the system SHALL achieve r0 error < 2%, σ error < 30%, β error < 0.15 (Note: σ tolerance relaxed due to Voigt profile physics)
+4. WHEN lifetime τ = 100 fs (moderate Lorentzian, γ=0.0033 eV) THEN the system SHALL achieve r0 error < 2.5%, σ error < 20%, β error < 0.18
+5. WHEN lifetime τ = 200 fs (weak Lorentzian, γ=0.0016 eV) THEN the system SHALL achieve r0 error < 3%, σ error < 15%, β error < 0.2
+6. WHEN different peaks have different lifetimes (τ₁ ≠ τ₂) THEN the system SHALL correctly extract parameters for each peak independently with cross-talk error < 5%
+7. WHEN the orthogonal test suite runs THEN the system SHALL include lifetime as an independent test dimension alongside r0, β, σ, and peak separation
+
+### Requirement 10: 正交测试框架完整性
+
+**User Story:** 作为开发者，我希望有一套完整的正交测试框架，系统地测试算法在所有独立参数维度上的性能。
+
+#### Acceptance Criteria
+
+1. WHEN running orthogonal tests THEN the system SHALL test the following independent dimensions:
+   - Number of peaks: 1, 2, 3, 4, 5
+   - Radial position: inner (3mm), middle (10mm), outer (17mm)
+   - Beta values: -1, -0.5, 0, 0.5, 1, 1.5, 2
+   - Peak width (sigma): narrow (0.1mm), medium (0.4mm), wide (1.0mm)
+   - Peak separation: close (2σ), medium (4σ), well (6σ)
+   - Lifetime: τ = 0 fs, 50 fs, 100 fs, 200 fs
+   - Event count: 1e4, 1e5, 1e6, 1e7
+2. WHEN a single peak test fails THEN the system SHALL report detailed diagnostics including ground truth vs reconstructed values
+3. WHEN a two-peak test fails THEN the system SHALL report which peak(s) failed and the specific error metrics
+4. WHEN all orthogonal tests pass THEN the system SHALL be considered validated for production use

@@ -3158,6 +3158,7 @@ class AbelReconstructorV3:
                  sigma_psf: float = 0.0,
                  sigma_pixel: float = 0.4,
                  sigma_interp: float = 0.55,
+                 mask_radius: int = MASK_RADIUS_DEFAULT,
                  polarization_axis: str = 'vertical'):
         """
         Args:
@@ -3165,19 +3166,22 @@ class AbelReconstructorV3:
             sigma_psf: PSF 展宽
             sigma_pixel: 像素化展宽
             sigma_interp: 插值展宽
+            mask_radius: 中心遮罩半径（像素），排除中心区域的峰检测
             polarization_axis: 偏振轴方向 ('vertical' 或 'horizontal')
         """
         self.config = config
         self.polarization_axis = polarization_axis
+        self.mask_radius = mask_radius
         
         # 初始化子模块
         self.cleaner = DataCleaner()
         self.transformer = PolarTransformer()
-        self.seed_finder = SeedFinder()
+        self.seed_finder = SeedFinder(mask_radius=mask_radius)
         self.fitter = ForwardFitter(
             sigma_psf=sigma_psf,
             sigma_pixel=sigma_pixel,
             sigma_interp=sigma_interp,
+            mask_radius=mask_radius,
             polarization_axis=polarization_axis
         )
         self.br_calculator = BRCalculator()

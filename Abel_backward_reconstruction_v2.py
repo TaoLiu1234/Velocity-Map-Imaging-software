@@ -36,7 +36,8 @@ class PhysicsBasedFitterV2:
                  C_laser: float = None,
                  sigma_psf: float = 0.0,
                  sigma_pixel: float = 0.4,
-                 sigma_interp: float = 0.55):
+                 sigma_interp: float = 0.55,
+                 mask_radius: int = 25):
         """
         Args:
             n_pixels: 图像尺寸
@@ -44,8 +45,10 @@ class PhysicsBasedFitterV2:
             sigma_psf: PSF的sigma（像素单位）
             sigma_pixel: 像素化的sigma（像素单位，~0.4）
             sigma_interp: xy→rθ插值的sigma（像素单位，3阶样条~0.55）
+            mask_radius: 中心遮罩半径（像素），排除中心区域的峰检测
         """
         self.n = n_pixels
+        self.mask_radius = mask_radius
         self.radius = n_pixels // 2
         self.r_grid_1d = np.arange(self.radius + 1, dtype=float)
 
@@ -719,11 +722,18 @@ class PhysicsBasedFitterV2:
         return valid_peaks
 
     def _phase1_estimate_sigma(self, profile: np.ndarray, r_center: int,
-                               mask_radius: int = 15) -> Tuple[int, float, float]:
+                               mask_radius: int = 15,
+                               use_input_r: bool = False) -> Tuple[int, float, float]:
         """估计sigma和r位置。
         
         使用高斯拟合估计sigma（低计数时更稳定），
         r位置用整数peak位置（最准确）。
+        
+        Args:
+            profile: 径向分布
+            r_center: 峰中心位置（初始猜测）
+            mask_radius: 中心遮罩半径
+            use_input_r: 如果为 True，使用 r_center 作为峰位置，不重新找峰
         
         返回: (r, sigma, amp)
         """
@@ -741,12 +751,23 @@ class PhysicsBasedFitterV2:
         baseline = (local[0] + local[-1]) / 2
         local_corrected = local - baseline
         
-        pk_idx = np.argmax(local_corrected)
-        pk_val = local_corrected[pk_idx]
-        pk_r = r_local[pk_idx]  # 整数peak位置（最准确）
+        if use_input_r:
+            # 使用输入的 r_center 作为峰位置
+            pk_r = r_center
+            pk_idx = r_center - r_start
+            if 0 <= pk_idx < len(local_corrected):
+                pk_val = local_corrected[pk_idx]
+            else:
+                pk_val = np.max(local_corrected)
+                pk_idx = np.argmax(local_corrected)
+        else:
+            # 在局部区域找最大值
+            pk_idx = np.argmax(local_corrected)
+            pk_val = local_corrected[pk_idx]
+            pk_r = r_local[pk_idx]  # 整数peak位置（最准确）
         
         if pk_val <= 0:
-            return pk_r, 3.0, local[pk_idx]
+            return pk_r, 3.0, local[pk_idx] if pk_idx < len(local) else 0.0
         
         # 高斯拟合估计sigma
         def gaussian(x, amp, x0, sigma, offset):
@@ -791,7 +812,6 @@ class PhysicsBasedFitterV2:
         sigma = max(fwhm / 2.355, 0.3)
         
         return float(pk_r), float(sigma), float(pk_val)
-        return float(pk_r), float(sigma), float(corrected_amp)
 
     def _fit_global_sigma_laser(self, peaks: List[Dict]) -> float:
         """
@@ -823,7 +843,7 @@ class PhysicsBasedFitterV2:
         print("\nPhase 1: Radial Analysis (PSF already removed in Cartesian)")
         print("=" * 60)
         
-        mask_radius = 15
+        mask_radius = self.mask_radius
         
         # Step 1: 角向平均得到投影面profile（高SNR）
         print("  [Step 1] Angular average -> projection profile")
@@ -854,8 +874,11 @@ class PhysicsBasedFitterV2:
         
         for pk in peaks:
             r_center = pk['r']
+            # 使用投影面上检测到的峰位置，不在 Abel 逆变换后重新找峰
+            # 因为 Abel 逆变换可能会改变峰的相对强度，导致找到错误的峰
             pk_r, sigma_measured, amp = self._phase1_estimate_sigma(
-                abel_profile, r_center, mask_radius=mask_radius
+                abel_profile, r_center, mask_radius=mask_radius,
+                use_input_r=True  # 使用输入的 r_center 作为峰位置
             )
             
             # 只需要去除插值展宽（很小的校正）

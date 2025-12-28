@@ -49,14 +49,16 @@ class PhysicsBasedFitter:
         _shared_radial_profile: Radial profile of input image
     """
     
-    def __init__(self, n_pixels: int):
+    def __init__(self, n_pixels: int, mask_radius: int = 25):
         """
         Initialize the fitter with image dimensions.
         
         Args:
             n_pixels: Size of the square image in pixels
+            mask_radius: Center mask radius (pixels) to exclude from peak detection
         """
         self.n = n_pixels
+        self.mask_radius = mask_radius
         self.radius = n_pixels // 2
         self.r_grid_1d = np.arange(self.radius + 1, dtype=float)
         
@@ -588,7 +590,7 @@ class PhysicsBasedFitter:
         print("Phase 1: Radial Analysis")
         print("=" * 60)
         
-        mask_radius = 15
+        mask_radius = self.mask_radius
         
         # -----------------------------------------------------------------
         # Step 1.1: 使用共享噪声参数

@@ -76,6 +76,7 @@ class Config:
     img_res: int = 512               # Image resolution (pixels)
     pixel_size: float = 0.05         # Pixel size (mm)
     psf_fwhm: float = 0.2            # Point spread function FWHM (mm)
+    dld_resolution: float = 0.005    # DLD digitization resolution (mm), 0 = no quantization
     supersample_factor: int = 4      # Deprecated, kept for compatibility
     
     # Electronics parameters
@@ -501,7 +502,8 @@ class CameraElectronics:
 def run_simulation(config: Config, 
                    add_noise: bool = True,
                    add_background: bool = True,
-                   return_particles: bool = False) -> Tuple[np.ndarray, dict]:
+                   return_particles: bool = False,
+                   output_mode: str = 'image') -> Tuple[np.ndarray, dict]:
     """
     Run complete VMI forward simulation.
     
@@ -510,9 +512,21 @@ def run_simulation(config: Config,
         add_noise: Whether to add electronic noise
         add_background: Whether to add background gas
         return_particles: If True, include particle data in metadata
+        output_mode: 
+            'image' - 返回像素化图像（默认），完整链路
+            'xy_ideal' - 返回理想 XY 坐标（无任何展宽，理论极限）
+            'xy_dld' - 返回模拟 DLD 输出的 XY 坐标（PSF + DLD量化）
     
     Returns:
-        (image, metadata) tuple
+        output_mode='image': (image, metadata) tuple
+        output_mode='xy_ideal' or 'xy_dld': (xy_coords, metadata) tuple
+    
+    数据流：
+        真实位置 → [PSF展宽] → 连续位置 → [DLD量化] → DLD输出坐标 → [histogram] → 图像
+        
+        xy_ideal: 真实位置（无展宽）
+        xy_dld: DLD输出坐标（有PSF+量化，无histogram）
+        image: 最终图像（完整链路）
     """
     physics = PhysicsSource(config)
     instrument = VMIInstrument(config)
@@ -520,26 +534,119 @@ def run_simulation(config: Config,
     
     # Generate and project particles
     origins, velocities, level_indices = physics.generate_particles()
-    image_ideal = instrument.process(origins, velocities)
     
-    # Add noise
-    final_image = camera.process(image_ideal, add_background) if add_noise else image_ideal
+    # 投影到探测器平面，得到理想的 XY 坐标
+    hits_ideal = instrument.project_to_detector(origins, velocities)
     
-    # Metadata
-    metadata = {
-        'N_events': config.N_events,
-        'E_centers': config.E_centers,
-        'Betas': config.Betas,
-        'image_ideal_sum': float(np.sum(image_ideal)),
-        'image_final_sum': float(np.sum(final_image)),
-    }
+    if output_mode == 'xy_ideal':
+        # 直接返回理想 XY 坐标（无任何展宽）
+        # 这是"真实"位置，实际探测器无法达到
+        metadata = {
+            'N_events': config.N_events,
+            'E_centers': config.E_centers,
+            'Betas': config.Betas,
+            'output_mode': 'xy_ideal',
+            'note': 'Ideal XY coordinates without any broadening (theoretical limit)'
+        }
+        if return_particles:
+            metadata['origins'] = origins
+            metadata['velocities'] = velocities
+            metadata['level_indices'] = level_indices
+        return hits_ideal, metadata
     
-    if return_particles:
-        metadata['origins'] = origins
-        metadata['velocities'] = velocities
-        metadata['level_indices'] = level_indices
+    elif output_mode in ['xy_dld', 'xy_with_psf']:  # xy_with_psf 保留兼容
+        # 模拟完整的 DLD 输出：PSF 展宽 + DLD 数字化量化 + 背景噪声
+        hits_processed = hits_ideal.copy()
+        
+        # Step 1: PSF 展宽（MCP + 延迟线的空间分辨率）
+        psf_sigma = config.psf_sigma
+        if psf_sigma > 0:
+            noise_x = np.random.normal(0, psf_sigma, len(hits_ideal))
+            noise_y = np.random.normal(0, psf_sigma, len(hits_ideal))
+            hits_processed = hits_processed + np.column_stack([noise_x, noise_y])
+        
+        # Step 2: DLD 数字化量化（TDC 时间分辨率 → 位置精度）
+        dld_res = config.dld_resolution
+        if dld_res > 0:
+            hits_processed = np.round(hits_processed / dld_res) * dld_res
+        
+        # Step 3: 添加高斯背景噪声（类似图像模式）
+        # 噪声区域比实际数据区域大，模拟真实探测器的背景噪声
+        n_bg_events = int(config.N_events * config.bg_rate) if config.bg_rate > 0 else 0
+        
+        if n_bg_events > 0:
+            # 计算数据的实际范围
+            data_r_max = np.sqrt(np.max(hits_processed[:, 0]**2 + hits_processed[:, 1]**2))
+            
+            # 背景噪声区域比数据区域大 50%（覆盖更大范围）
+            bg_extent = data_r_max * 1.5
+            
+            # 生成均匀分布的背景噪声点（在圆形区域内）
+            # 使用极坐标采样确保均匀分布
+            bg_r = np.sqrt(np.random.uniform(0, 1, n_bg_events)) * bg_extent
+            bg_theta = np.random.uniform(0, 2 * np.pi, n_bg_events)
+            bg_x = bg_r * np.cos(bg_theta)
+            bg_y = bg_r * np.sin(bg_theta)
+            bg_hits = np.column_stack([bg_x, bg_y])
+            
+            # 对背景噪声也应用 PSF 展宽
+            if psf_sigma > 0:
+                bg_noise_x = np.random.normal(0, psf_sigma, n_bg_events)
+                bg_noise_y = np.random.normal(0, psf_sigma, n_bg_events)
+                bg_hits = bg_hits + np.column_stack([bg_noise_x, bg_noise_y])
+            
+            # 对背景噪声也应用 DLD 量化
+            if dld_res > 0:
+                bg_hits = np.round(bg_hits / dld_res) * dld_res
+            
+            # 合并信号和背景
+            hits_processed = np.vstack([hits_processed, bg_hits])
+        
+        # 计算等效展宽
+        sigma_dld = dld_res / np.sqrt(12) if dld_res > 0 else 0
+        
+        metadata = {
+            'N_events': config.N_events,
+            'N_signal': len(hits_ideal),
+            'N_background': n_bg_events,
+            'E_centers': config.E_centers,
+            'Betas': config.Betas,
+            'output_mode': 'xy_dld',
+            'psf_sigma_mm': psf_sigma,
+            'dld_resolution_mm': dld_res,
+            'sigma_dld_mm': sigma_dld,
+            'bg_rate': config.bg_rate,
+            'note': 'Simulated DLD output: PSF broadening + digitization + background noise'
+        }
+        if return_particles:
+            metadata['origins'] = origins
+            metadata['velocities'] = velocities
+            metadata['level_indices'] = level_indices
+        return hits_processed, metadata
     
-    return final_image, metadata
+    else:  # output_mode == 'image'
+        # 原来的行为：生成像素化图像
+        image_ideal = instrument.process(origins, velocities)
+        
+        # Add noise
+        final_image = camera.process(image_ideal, add_background) if add_noise else image_ideal
+        
+        # Metadata
+        metadata = {
+            'N_events': config.N_events,
+            'E_centers': config.E_centers,
+            'Betas': config.Betas,
+            'output_mode': 'image',
+            'image_ideal_sum': float(np.sum(image_ideal)),
+            'image_final_sum': float(np.sum(final_image)),
+        }
+        
+        if return_particles:
+            metadata['origins'] = origins
+            metadata['velocities'] = velocities
+            metadata['level_indices'] = level_indices
+        
+        return final_image, metadata
 
 
 

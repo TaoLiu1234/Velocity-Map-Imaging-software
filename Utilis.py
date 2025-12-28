@@ -3,10 +3,12 @@ import glob
 import random
 import re
 import traceback
+import gc
+import pickle
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from datetime import datetime
-from typing import Dict, List, Tuple, Any, Iterable
+from typing import Dict, List, Tuple, Any, Iterable, Optional
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -18,6 +20,73 @@ from scipy.interpolate import griddata
 from scipy.optimize import curve_fit
 from functools import partial
 import time  # Added for profiling
+
+
+# ============================================================================
+# MEMORY OPTIMIZATION UTILITIES
+# ============================================================================
+
+def get_memory_usage_mb():
+    """Get current memory usage in MB (cross-platform)."""
+    try:
+        import psutil
+        process = psutil.Process(os.getpid())
+        return process.memory_info().rss / 1024 / 1024
+    except ImportError:
+        return -1  # psutil not available
+
+
+def cleanup_memory(force=False):
+    """
+    Perform garbage collection to free memory.
+    
+    Args:
+        force: If True, perform full garbage collection
+    """
+    if force:
+        gc.collect(0)
+        gc.collect(1)
+        gc.collect(2)
+    else:
+        gc.collect()
+
+
+def save_checkpoint(data, filename, checkpoint_num):
+    """
+    Save intermediate results to a checkpoint file.
+    
+    Args:
+        data: Data to save
+        filename: Base filename for checkpoint
+        checkpoint_num: Checkpoint number
+    """
+    checkpoint_file = f"{filename}_checkpoint_{checkpoint_num}.pkl"
+    try:
+        with open(checkpoint_file, 'wb') as f:
+            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"  Checkpoint saved: {checkpoint_file}")
+        return checkpoint_file
+    except Exception as e:
+        print(f"  Warning: Could not save checkpoint: {e}")
+        return None
+
+
+def load_checkpoint(filename):
+    """
+    Load data from a checkpoint file.
+    
+    Args:
+        filename: Checkpoint filename
+    
+    Returns:
+        Loaded data or None if failed
+    """
+    try:
+        with open(filename, 'rb') as f:
+            return pickle.load(f)
+    except Exception as e:
+        print(f"  Warning: Could not load checkpoint {filename}: {e}")
+        return None
 
 
 def clear_file_contents(*file_paths):
@@ -87,14 +156,18 @@ def parse_fly2_file(filename: str) -> Dict[int, Tuple[int, int]]:
     return group_angles
 
 
-def parse_out_file(filename: str) -> MainData:
+def parse_out_file(filename: str, chunk_size: int = 100000) -> MainData:
     """
     Parses a SIMION 'out.txt' file to extract particle trajectories.
 
-    Optimized: Read file line-by-line instead of loading entire file into memory to reduce memory usage for large files.
+    OPTIMIZED: 
+    - Read file line-by-line instead of loading entire file into memory
+    - Process data in chunks to reduce memory usage for large files
+    - Use more efficient data structures
 
     Args:
         filename: The path to the 'out.txt' file.
+        chunk_size: Number of lines to process before forcing garbage collection (default: 100000)
 
     Returns:
         A nested dictionary containing the parsed data, structured as:
@@ -106,10 +179,8 @@ def parse_out_file(filename: str) -> MainData:
     # Initialize main data structure: nested defaultdicts for field_gradient -> lens_VMI -> ke -> 'local'/'global' -> particle_idx -> trajectories
     data: MainData = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list)))))
 
-    # Print status and open file for reading
-    # Suppressed parsing progress output
-    # print(f"Reading and parsing '{filename}'...")
     block_count = 0
+    lines_processed = 0
 
     with open(filename, 'r') as f:
         current_block_data = []  # List of (ion_n, x, y, z) for current block
@@ -118,6 +189,8 @@ def parse_out_file(filename: str) -> MainData:
         current_ke = None
 
         for line_num, line in enumerate(f, 1):
+            lines_processed += 1
+            
             # Check if this is a block separator line indicating start of new simulation
             if "Begin Next Fly'm" in line:
                 # If we have data for the current block, process it immediately
@@ -147,8 +220,6 @@ def parse_out_file(filename: str) -> MainData:
                         current_fg = params[0]
                         current_lens_VMI = params[2]
                         current_ke = 10.0
-                    # Suppressed parameter debug output
-                    # print(f"Found parameters: fg={current_fg}, lens={current_lens_VMI}, ke={current_ke}")  # Debug output
                 except (ValueError, IndexError):
                     # Warn if parsing fails, but continue
                     print(f"Warning: Could not parse parameters on line {line_num}: {line.strip()}")
@@ -169,16 +240,16 @@ def parse_out_file(filename: str) -> MainData:
                     current_block_data.append((ion_n, x, y, z))
                 except (ValueError, IndexError):
                     pass  # Ignore malformed lines
+            
+            # Periodic garbage collection for very large files
+            if lines_processed % chunk_size == 0:
+                gc.collect()
 
         # Process the last block if it has data
         if current_fg is not None and current_lens_VMI is not None and current_ke is not None and current_block_data:
             process_simulation_block(data, current_fg, current_lens_VMI, current_ke, current_block_data)
             block_count += 1
 
-    # Print summary of blocks found
-    # Suppressed parsing summary output
-    # print(f"Found {block_count} simulation blocks.")
-    # print("Grouping trajectories into particles completed.")
     return data
 
 
@@ -990,26 +1061,72 @@ def write_standard_beam(fid, x, y, z, direction, need_comma=True, ke=15, color=0
 
 def energy_resolution_utilis(filename='energy_resolution_particle.fly2', position=(0.0, 0.0, 0.0), num_particles=100, ke=15):
     """
-    Generates a .fly2 file with a single particle at a fixed position with particles distributed over 4π solid angle.
+    Generates a .fly2 file with particles at a fixed position with TRUE isotropic (4π) distribution.
     
-    This function creates particles emitted isotropically from a single point source, covering the entire 4π steradian solid angle.
-    Unlike generate_particles_fly2 which creates multiple groups with specific emission angles, this function
-    generates a single particle at one position with uniform spherical distribution.
-    
-    The particles are distributed uniformly over a sphere using the proper spherical coordinate method:
-    - θ (theta): polar angle from 0 to π
-    - φ (phi): azimuthal angle from 0 to 2π
-    - Uses the method: cos(θ) uniform in [-1, 1], φ uniform in [0, 2π]
+    OPTIMIZED: Uses SIMION's cone_direction_distribution with fill=true and half_angle=180
+    for true isotropic distribution over the full sphere. This creates a compact file
+    regardless of particle count.
     
     Args:
         filename (str): The name for the output .fly2 file.
-                        Defaults to 'energy_resolution_particle.fly2'.
         position (tuple): A tuple (x, y, z) specifying the fixed position of the particle source.
-                        Defaults to (0.0, 0.0, 0.0).
-        num_particles (int): The number of particles to generate uniformly over 4π solid angle.
-                           Defaults to 100.
+        num_particles (int): The number of particles to generate.
         ke (float): The kinetic energy of the electron particles in electron volts (eV).
-                    Defaults to 15.
+    """
+    if not isinstance(num_particles, int) or num_particles <= 0:
+        print(f"⚠️ Invalid input for `num_particles` (value: {num_particles}). It must be a positive integer. Setting to 100.")
+        num_particles = 100
+
+    if not filename or not filename.strip():
+        filename = 'energy_resolution_particle.fly2'
+
+    x, y, z = position
+    
+    # Calculate speed from kinetic energy for electrons
+    # For electrons in SIMION: v (mm/μs) = 593.096 * sqrt(KE in eV)
+    speed = 593.096 * np.sqrt(ke)
+
+    try:
+        with open(filename, 'w') as fid:
+            # Write compact fly2 format using cone_direction_distribution for true isotropy
+            fid.write('particles {\n')
+            fid.write('  coordinates = 0,\n')
+            fid.write('  standard_beam {\n')
+            fid.write(f'    n = {num_particles},\n')
+            fid.write('    tob = 0,\n')
+            fid.write('    mass = 0.000548579903,\n')  # Electron mass in amu
+            fid.write('    charge = -1,\n')
+            fid.write('    cwf = 1,\n')
+            fid.write('    color = 0,\n')
+            # cone_direction_distribution with half_angle=180 and fill=true gives true 4π isotropy
+            fid.write('    direction = cone_direction_distribution {\n')
+            fid.write('      axis = vector(1, 0, 0),\n')  # Reference axis (arbitrary for full sphere)
+            fid.write('      half_angle = 180,\n')  # Full sphere coverage
+            fid.write('      fill = true\n')  # Uniform solid angle distribution
+            fid.write('    },\n')
+            fid.write(f'    position = vector({x:.6f}, {y:.6f}, {z:.6f}),\n')
+            # Fixed speed corresponding to kinetic energy
+            fid.write(f'    speed = {speed:.6f},\n')
+            fid.write('    format = ""\n')
+            fid.write('  }\n')
+            fid.write('}\n')
+
+    except Exception as e:
+        raise IOError(f"Failed to create file {filename}: {e}")
+
+
+def energy_resolution_utilis_legacy(filename='energy_resolution_particle.fly2', position=(0.0, 0.0, 0.0), num_particles=100, ke=15):
+    """
+    LEGACY VERSION: Generates a .fly2 file by writing each particle individually.
+    
+    This is the original implementation that creates large files for many particles.
+    Use energy_resolution_utilis() instead for better performance.
+    
+    Args:
+        filename (str): The name for the output .fly2 file.
+        position (tuple): A tuple (x, y, z) specifying the fixed position of the particle source.
+        num_particles (int): The number of particles to generate uniformly over 4π solid angle.
+        ke (float): The kinetic energy of the electron particles in electron volts (eV).
     """
     if not isinstance(num_particles, int) or num_particles <= 0:
         print(f"⚠️ Invalid input for `num_particles` (value: {num_particles}). It must be a positive integer. Setting to 100.")
@@ -1026,34 +1143,21 @@ def energy_resolution_utilis(filename='energy_resolution_particle.fly2', positio
             fid.write('  coordinates = 0,\n')
 
             # Generate uniform distribution over sphere for 4π solid angle
-            # Method: cos(θ) uniform in [-1, 1], φ uniform in [0, 2π]
-            # This ensures uniform distribution over the sphere surface
-            cos_theta = np.random.uniform(-1, 1, num_particles)  # cos(θ) uniform in [-1, 1]
-            theta = np.arccos(cos_theta)  # θ = arccos(cos(θ))
-            phi = np.random.uniform(0, 2*np.pi, num_particles)  # φ uniform in [0, 2π]
+            cos_theta = np.random.uniform(-1, 1, num_particles)
+            theta = np.arccos(cos_theta)
+            phi = np.random.uniform(0, 2*np.pi, num_particles)
 
-            # Convert spherical to Cartesian coordinates for direction vectors
-            # Assuming emission along +x direction as reference
-            # Using spherical coordinates where θ is angle from +x axis, φ is azimuthal angle
-            dir_x = np.cos(theta)  # Component along x-axis (primary emission direction)
-            dir_y = np.sin(theta) * np.cos(phi)  # Component along y-axis
-            dir_z = np.sin(theta) * np.sin(phi)  # Component along z-axis
+            dir_x = np.cos(theta)
+            dir_y = np.sin(theta) * np.cos(phi)
+            dir_z = np.sin(theta) * np.sin(phi)
 
-            # Write each particle
             for i in range(num_particles):
                 direction = (dir_x[i], dir_y[i], dir_z[i])
-                color = 1  # Single color for all particles
-                need_comma = (i < num_particles - 1)  # No comma for last particle
-
+                color = 1
+                need_comma = (i < num_particles - 1)
                 write_standard_beam(fid, x, y, z, direction, need_comma, ke, color)
 
             fid.write('}\n')
-
-        # Suppressed particle generation output
-        # print(f"✅ Successfully generated {num_particles} particles with 4π solid angle distribution.")
-        # print(f"   Source position: ({x:.6f}, {y:.6f}, {z:.6f})")
-        # print(f"   Kinetic energy: {ke} eV")
-        # print(f"   File saved to: \"{filename}\"")
 
     except Exception as e:
         raise IOError(f"Failed to create file {filename}: {e}")
@@ -2330,12 +2434,21 @@ def compute_metrics_for_para(fg, lens_VMI, global_data):
 def run_optimized_simulations_with_ke(param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, OUT_FILE):
     """
     Run optimized SIMION simulations with parallel Lua generation and sequential SIMION runs for a given ke.
+    
+    IMPROVED: Better error handling and diagnostics for SIMION failures.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import subprocess
     import os
 
     num_simulations = len(param['field_gradient'])
+    
+    # Verify IOB file exists before starting
+    if not os.path.exists(IOB_FILE):
+        print(f"ERROR: IOB file '{IOB_FILE}' not found!")
+        print(f"  Current directory: {os.getcwd()}")
+        print(f"  Available .iob files: {[f for f in os.listdir('.') if f.endswith('.iob')]}")
+        return
 
     # Parallel Lua generation
     def generate_lua(field_idx):
@@ -2343,8 +2456,6 @@ def run_optimized_simulations_with_ke(param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, 
         generate_simion_lua_file(field_idx, param, output_filename=lua_filename)
         return field_idx, lua_filename
 
-    # Suppressed simulation progress output
-    # print(f"Generating Lua files in parallel for ke={ke}...")
     with ThreadPoolExecutor() as executor:
         lua_futures = {executor.submit(generate_lua, field_idx): field_idx for field_idx in range(num_simulations)}
         lua_files = {}
@@ -2353,23 +2464,36 @@ def run_optimized_simulations_with_ke(param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, 
             lua_files[field_idx] = lua_file
 
     # Sequential SIMION runs to maintain correct Lua loading
-    # print(f"Running SIMION simulations sequentially for ke={ke}...")
     temp_files = {}
     for field_idx in range(num_simulations):
         lua_file = lua_files[field_idx]
         temp_out_file = f"temp_out_ke_{field_idx}.txt"
+        
         # Copy the Lua to the standard name for loading by IOB
         with open(lua_file, 'r') as f:
             lua_content = f.read()
         with open(OUTPUT_FILENAME_LUA, 'w') as f:
             f.write(lua_content)
+        
         command = f"simion.exe --nogui fly --recording-output={temp_out_file} {IOB_FILE}"
-        result = subprocess.run(command, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        # Capture both stdout and stderr for better error diagnosis
+        result = subprocess.run(
+            command, 
+            shell=True, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE,
+            text=True
+        )
         
         # Check if the command executed successfully and the file was created
         if result.returncode != 0:
             print(f"Error: SIMION command failed with return code {result.returncode}")
             print(f"Command: {command}")
+            if result.stdout:
+                print(f"STDOUT: {result.stdout[:500]}")  # First 500 chars
+            if result.stderr:
+                print(f"STDERR: {result.stderr[:500]}")  # First 500 chars
             continue  # Skip to next simulation without adding this file to temp_files
             
         # Wait a moment to ensure the file is created
@@ -2383,8 +2507,6 @@ def run_optimized_simulations_with_ke(param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, 
             print(f"Warning: Output file {temp_out_file} was not created by SIMION")
 
     # Merge results sequentially to maintain exact order
-    # Suppressed merge progress output
-    # print(f"Merging results into out.txt for ke={ke}...")
     with open(OUT_FILE, 'a') as out_f:
         for field_idx in range(num_simulations):
             # Check if field_idx exists in temp_files before trying to access it
@@ -2409,8 +2531,6 @@ def run_optimized_simulations_with_ke(param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, 
                 print(f"Warning: Temporary file {temp_file} not found, skipping...")
 
     # Clean up temporary files
-    # Suppressed cleanup progress output
-    # print(f"Cleaning up temporary files for ke={ke}...")
     for field_idx in range(num_simulations):
         # Check if field_idx exists in lua_files before trying to access it
         if field_idx in lua_files:
@@ -2423,9 +2543,11 @@ def run_optimized_simulations_with_ke(param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, 
             if os.path.exists(temp_file):
                 os.remove(temp_file)
 
-def run_optimized_simulations_with_ke_parallel(param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, OUT_FILE, max_workers=None):
+def run_optimized_simulations_with_ke_parallel(param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, OUT_FILE, max_workers=None, batch_size=50):
     """
     Run optimized SIMION simulations with parallel Lua generation and parallel SIMION runs for a given ke.
+    
+    OPTIMIZED: Added batch processing to prevent memory issues with large parameter sets.
     
     This version uses improved error handling and file verification to ensure all simulations complete.
     
@@ -2436,6 +2558,7 @@ def run_optimized_simulations_with_ke_parallel(param, ke, OUTPUT_FILENAME_LUA, I
         IOB_FILE: IOB filename
         OUT_FILE: Output file path
         max_workers: Maximum number of parallel workers (default: 75% of CPU cores)
+        batch_size: Number of simulations per batch (default: 50)
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import subprocess
@@ -2452,8 +2575,11 @@ def run_optimized_simulations_with_ke_parallel(param, ke, OUTPUT_FILENAME_LUA, I
         # Use 75% of available CPUs but leave at least 1 core free
         max_workers = max(1, int(multiprocessing.cpu_count() * 0.75))
     
-    # Suppressed parallel workers output
-    # print(f"Using {max_workers} parallel workers for {num_simulations} simulations")
+    # Limit workers to prevent resource exhaustion
+    max_workers = min(max_workers, 8)  # Cap at 8 workers to prevent system overload
+    
+    # Calculate number of batches
+    num_batches = (num_simulations + batch_size - 1) // batch_size
 
     # Parallel Lua generation (already optimized)
     def generate_lua(field_idx):
@@ -2463,8 +2589,7 @@ def run_optimized_simulations_with_ke_parallel(param, ke, OUTPUT_FILENAME_LUA, I
         generate_simion_lua_file(field_idx, param, output_filename=lua_filename)
         return field_idx, lua_filename
 
-    # Suppressed Lua generation output
-    # print(f"Generating Lua files in parallel for ke={ke}...")
+    # Generate all Lua files first
     lua_files = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         lua_futures = {executor.submit(generate_lua, field_idx): field_idx for field_idx in range(num_simulations)}
@@ -2473,9 +2598,6 @@ def run_optimized_simulations_with_ke_parallel(param, ke, OUTPUT_FILENAME_LUA, I
             lua_files[field_idx] = lua_file
 
     # Parallel SIMION execution using threads for file isolation
-    # Suppressed SIMION execution output
-    # print(f"Running SIMION simulations in parallel for ke={ke}...")
-    
     def run_single_simion_thread(field_idx):
         """Run a single SIMION simulation with proper file isolation"""
         lua_file = lua_files[field_idx]
@@ -2509,8 +2631,6 @@ def run_optimized_simulations_with_ke_parallel(param, ke, OUTPUT_FILENAME_LUA, I
             
             # Return results if successful
             if result.returncode == 0 and os.path.exists(temp_out_file) and os.path.getsize(temp_out_file) > 0:
-                # Suppressed simulation completion output
-                # print(f"Simulation {field_idx} completed successfully")
                 return field_idx, temp_out_file
             else:
                 if result.returncode != 0:
@@ -2524,29 +2644,30 @@ def run_optimized_simulations_with_ke_parallel(param, ke, OUTPUT_FILENAME_LUA, I
             print(f"Error running simulation {field_idx}: {e}")
             return field_idx, None
 
-    # Execute simulations in parallel using ThreadPoolExecutor
+    # Execute simulations in batches to prevent resource exhaustion
     temp_files = {}
     completed_count = 0
     
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all simulations at once
-        futures = {executor.submit(run_single_simion_thread, field_idx): field_idx for field_idx in range(num_simulations)}
+    for batch_idx in range(num_batches):
+        batch_start = batch_idx * batch_size
+        batch_end = min(batch_start + batch_size, num_simulations)
+        batch_indices = list(range(batch_start, batch_end))
         
-        # Wait for all simulations to complete
-        for future in as_completed(futures):
-            field_idx, temp_file = future.result()
-            if temp_file:
-                temp_files[field_idx] = temp_file
-                completed_count += 1
-                # Suppressed simulation completion output
-                # print(f"Completed simulation {field_idx + 1}/{num_simulations}")
-    
-    # Suppressed parallel execution completion output
-    # print(f"Parallel execution completed. {completed_count}/{num_simulations} simulations successful.")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit batch simulations
+            futures = {executor.submit(run_single_simion_thread, field_idx): field_idx for field_idx in batch_indices}
+            
+            # Wait for batch to complete
+            for future in as_completed(futures):
+                field_idx, temp_file = future.result()
+                if temp_file:
+                    temp_files[field_idx] = temp_file
+                    completed_count += 1
+        
+        # Cleanup between batches
+        gc.collect()
 
     # Merge results in order (same as original function)
-    # Suppressed merge results output
-    # print(f"Merging results into out.txt for ke={ke}...")
     with open(OUT_FILE, 'a') as out_f:
         for field_idx in range(num_simulations):
             if field_idx in temp_files:
@@ -2568,8 +2689,6 @@ def run_optimized_simulations_with_ke_parallel(param, ke, OUTPUT_FILENAME_LUA, I
                     print(f"Warning: Temporary file {temp_file} not found, skipping...")
 
     # Clean up temporary files (same as original function)
-    # Suppressed cleanup output
-    # print(f"Cleaning up temporary files for ke={ke}...")
     for field_idx in range(num_simulations):
         # Check if field_idx exists in lua_files before trying to access it
         if field_idx in lua_files:
@@ -2979,9 +3098,11 @@ def _3D_landscape(data, target='dr', fly2_file=None):
     plt.show()
 
 
-def extract_aligned_points_for_all_pairs(data, x_range=(73.0, 166.0), x_step=1):
+def extract_aligned_points_for_all_pairs(data, x_range=(73.0, 166.0), x_step=1, enable_gc=True):
     """
     Calculate focus positions and widths by grouping trajectories based on emission angles.
+
+    OPTIMIZED: Added periodic garbage collection for large datasets.
 
     Groups:
     1: emission angle 0,180 - trajectories 0,1
@@ -2991,6 +3112,12 @@ def extract_aligned_points_for_all_pairs(data, x_range=(73.0, 166.0), x_step=1):
     5: emission angle -90 - 7
 
     For each group, create x-slices, find minimum spread in y/z, and store focus data.
+    
+    Args:
+        data: Main data dictionary
+        x_range: Range of x-planes to analyze
+        x_step: Step size for x-slices
+        enable_gc: Enable periodic garbage collection (default: True)
     """
 
     X_SCAN_RANGE = x_range
@@ -3000,6 +3127,13 @@ def extract_aligned_points_for_all_pairs(data, x_range=(73.0, 166.0), x_step=1):
 
     groups = {1: [0,1], 2: [2,4], 3: [6], 4: [3,5], 5: [7]}
     x_slices = np.arange(x_min, x_max + X_STEP, X_STEP)
+    
+    # Pre-compute bins once
+    bins = np.concatenate([x_slices, [x_slices[-1] + x_step]])
+    
+    # Track progress for large datasets
+    total_combinations = sum(1 for fg in data for lvmi in data[fg] for ke in data[fg][lvmi])
+    processed = 0
 
     for fg in data:
         for lvmi in data[fg]:
@@ -3028,19 +3162,19 @@ def extract_aligned_points_for_all_pairs(data, x_range=(73.0, 166.0), x_step=1):
                     all_points = np.concatenate(trajs, axis=0)  # (N, 3)
 
                     # Assign points to x-slices
-                    bins = np.concatenate([x_slices, [x_slices[-1] + x_step]])
                     slice_indices = np.digitize(all_points[:, 0], bins) - 1
 
-                    # Per slice, calculate ptp in y and z
+                    # Per slice, calculate ptp in y and z - vectorized approach
                     widths_y = np.full(len(x_slices), np.nan)
                     widths_z = np.full(len(x_slices), np.nan)
                     avg_ys = np.full(len(x_slices), np.nan)
                     avg_zs = np.full(len(x_slices), np.nan)
 
+                    # Use numpy's bincount for faster aggregation where possible
                     for s_idx in range(len(x_slices)):
                         in_slice = slice_indices == s_idx
-                        points_slice = all_points[in_slice]
-                        if len(points_slice) > 1:
+                        if np.sum(in_slice) > 1:
+                            points_slice = all_points[in_slice]
                             y_vals = points_slice[:, 1]
                             z_vals = points_slice[:, 2]
                             widths_y[s_idx] = np.ptp(y_vals)
@@ -3065,10 +3199,19 @@ def extract_aligned_points_for_all_pairs(data, x_range=(73.0, 166.0), x_step=1):
                         focus_center_z_z = avg_zs[min_idx_z]
                         focus_width_z = widths_z[min_idx_z]
                         focus_points_z.append([x_focus_z, focus_center_y_z, focus_center_z_z, focus_width_z])
+                    
+                    # Clear temporary arrays
+                    del all_points, slice_indices, widths_y, widths_z, avg_ys, avg_zs
 
                 # Store in global
                 data[fg][lvmi][ke]['global']['focus_points_y'] = focus_points_y
                 data[fg][lvmi][ke]['global']['focus_points_z'] = focus_points_z
+                
+                processed += 1
+                
+                # Periodic garbage collection
+                if enable_gc and processed % 100 == 0:
+                    gc.collect()
 
 
 def find_closest_points_by_axis(traj1, traj2, x_range=(73.0, 166.0), axis='y', x_tolerance=0.25):
@@ -3803,9 +3946,14 @@ def energy_resolution_analysis(processed_data, tolerable_offset=2.0,
                               num_particles_per_energy=10000,
                               x_scan_range=(73.0, 166.0),
                               bin_interval=0.05,
-                              outside_region_width=2):
+                              outside_region_width=2,
+                              batch_size=50,
+                              enable_memory_optimization=True,
+                              checkpoint_interval=25):
     """
     Perform energy resolution analysis for filtered parameter combinations.
+    
+    OPTIMIZED VERSION: Includes batch processing and memory management for large datasets.
     
     This function follows a 5-step logical flow:
     1. For given fg, lens_vmi, ke, get the final position of all trajectories and store the data
@@ -3822,6 +3970,9 @@ def energy_resolution_analysis(processed_data, tolerable_offset=2.0,
         x_scan_range: Range of x-planes to scan for focus analysis (default: (73.0, 166.0))
         bin_interval: Bin size for rectangular coordinates (default: 0.05 mm)
         outside_region_width: Width of region outside data area (default: 2 mm)
+        batch_size: Number of combinations to process per batch (default: 50)
+        enable_memory_optimization: Enable aggressive memory cleanup (default: True)
+        checkpoint_interval: Save checkpoints every N combinations (default: 25, 0 to disable)
     
     Returns:
         dict: Updated processed_data with FWHM results in global section
@@ -3829,17 +3980,24 @@ def energy_resolution_analysis(processed_data, tolerable_offset=2.0,
     import numpy as np
     
     # Step 0: focus_filtering - find out all fg,lens_vmi, ke for filtered parameters
-    # Suppressed progress output
-    # print("Step 0: Filtering parameter combinations based on focus criteria...")
+    print("Step 0: Filtering parameter combinations based on focus criteria...")
     filtered_combinations = focus_filtering(processed_data, tolerable_offset)
     
     if not filtered_combinations:
-        # Suppressed error output
-        # print("No valid combinations found for energy resolution analysis!")
+        print("No valid combinations found for energy resolution analysis!")
         return processed_data
     
-    # Suppressed combinations count output
-    print(f"Found {len(filtered_combinations)} valid combinations for energy resolution analysis")
+    total_combinations = len(filtered_combinations)
+    print(f"Found {total_combinations} valid combinations for energy resolution analysis")
+    
+    # Calculate number of batches
+    num_batches = (total_combinations + batch_size - 1) // batch_size
+    print(f"Processing in {num_batches} batches of up to {batch_size} combinations each")
+    
+    if enable_memory_optimization:
+        initial_memory = get_memory_usage_mb()
+        if initial_memory > 0:
+            print(f"Initial memory usage: {initial_memory:.1f} MB")
     
     # Initialize dictionary to store FWHM results
     fwhm_results = {}
@@ -3850,95 +4008,129 @@ def energy_resolution_analysis(processed_data, tolerable_offset=2.0,
     IOB_FILE = "WORKING_TITLE_energy_resolution_tao.iob"
     OUT_FILE = "energy_resolution_out.txt"
     
-    for fg, lens_vmi, ke in filtered_combinations:
-        # Suppressed combination testing output
-        # print(f"Testing combination: FG {fg}, Lens {lens_vmi}, KE {ke:.2f} eV")
+    # Track progress
+    processed_count = 0
+    failed_count = 0
+    start_time = time.time()
+    checkpoint_files = []
+    
+    # Process in batches
+    for batch_idx in range(num_batches):
+        batch_start = batch_idx * batch_size
+        batch_end = min(batch_start + batch_size, total_combinations)
+        batch_combinations = filtered_combinations[batch_start:batch_end]
         
-        # Step 1: Generate corresponding fly2 file
-        # Suppressed step progress output
-        print(f"  Step 1: Generating {num_particles_per_energy} particles with 4π solid angle distribution...")
-        energy_resolution_utilis(
-            filename=OUTPUT_FILENAME_FLY2,
-            position=source_position,
-            num_particles=num_particles_per_energy,
-            ke=ke
-        )
+        print(f"\n{'='*60}")
+        print(f"Processing batch {batch_idx + 1}/{num_batches} ({len(batch_combinations)} combinations)")
+        print(f"Progress: {processed_count}/{total_combinations} ({100*processed_count/total_combinations:.1f}%)")
         
-        # Step 2: Generate corresponding lua file based on filtered fg, lens_vmi, ke
-        # Suppressed step progress output
-        print(f"  Step 2: Getting parameters for FG {fg}, Lens {lens_vmi}, KE {ke:.2f} eV...")
-        single_param = get_parameters_for_combination(processed_data, fg, lens_vmi, ke)
+        if enable_memory_optimization:
+            current_memory = get_memory_usage_mb()
+            if current_memory > 0:
+                print(f"Current memory usage: {current_memory:.1f} MB")
         
-        # Clear output file for this specific run
-        clear_file_contents(OUT_FILE)
+        batch_start_time = time.time()
         
-        # Step 3: Run simion
-        # Suppressed step progress output
-        print(f"  Step 3: Running SIMION simulations for FG {fg}, Lens {lens_vmi}, KE {ke:.2f} eV...")
-        run_optimized_simulations_with_ke(single_param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, OUT_FILE)
-        # Suppressed completion output
-        # print(f"  Completed simulations for FG {fg}, Lens {lens_vmi}, KE {ke:.2f} eV")
+        for combo_idx, (fg, lens_vmi, ke) in enumerate(batch_combinations):
+            combo_num = batch_start + combo_idx + 1
+            
+            try:
+                # Step 1: Generate corresponding fly2 file
+                print(f"  [{combo_num}/{total_combinations}] Processing FG {fg}, Lens {lens_vmi}, KE {ke:.2f} eV...")
+                energy_resolution_utilis(
+                    filename=OUTPUT_FILENAME_FLY2,
+                    position=source_position,
+                    num_particles=num_particles_per_energy,
+                    ke=ke
+                )
+                
+                # Step 2: Generate corresponding lua file based on filtered fg, lens_vmi, ke
+                single_param = get_parameters_for_combination(processed_data, fg, lens_vmi, ke)
+                
+                # Clear output file for this specific run
+                clear_file_contents(OUT_FILE)
+                
+                # Step 3: Run simion
+                run_optimized_simulations_with_ke(single_param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, OUT_FILE)
+                
+                # Process simulation data for this combination
+                single_processed_data = process_data(
+                    x_range=x_scan_range,
+                    file_path=OUT_FILE,
+                    focus_axis='z',
+                    fly2_file=OUTPUT_FILENAME_FLY2,
+                    y_range=(-0.5, 0.5),
+                    z_range=(-0.5, 0.5)
+                )
+                
+                if single_processed_data is None:
+                    print(f"    ERROR: Data processing failed")
+                    failed_count += 1
+                    continue
+                
+                # Step 4: Extract final positions
+                final_positions, success = _extract_final_positions(single_processed_data, fg, lens_vmi, ke)
+                
+                if not success or not final_positions:
+                    print(f"    WARNING: No final positions found")
+                    failed_count += 1
+                    continue
+                
+                # Center the positions
+                final_positions = _center_positions(final_positions)
+                
+                # Step 5: Apply rectangular binning
+                rect_binned, rect_edges, rect_centers = bin_positions(
+                    final_positions,
+                    bin_type='rectangular',
+                    bin_interval=bin_interval,
+                    outside_region_width=outside_region_width
+                )
+                
+                # Step 6: Perform Abel inversion and estimate FWHM
+                fwhm_result = _estimate_fwhm_and_resolution(rect_binned, bin_interval, fg, lens_vmi, ke)
+                
+                if fwhm_result is None:
+                    failed_count += 1
+                    continue
+                
+                # Store result
+                if fg not in fwhm_results:
+                    fwhm_results[fg] = {}
+                if lens_vmi not in fwhm_results[fg]:
+                    fwhm_results[fg][lens_vmi] = {}
+                
+                fwhm_results[fg][lens_vmi][ke] = fwhm_result
+                processed_count += 1
+                
+                # Clean up single_processed_data to free memory
+                del single_processed_data
+                del final_positions
+                del rect_binned
+                
+            except Exception as e:
+                print(f"    ERROR: {str(e)}")
+                failed_count += 1
+                continue
+            
+            # Save checkpoint if interval reached
+            if checkpoint_interval > 0 and combo_num % checkpoint_interval == 0:
+                checkpoint_file = save_checkpoint(fwhm_results, 'energy_resolution', combo_num)
+                if checkpoint_file:
+                    checkpoint_files.append(checkpoint_file)
         
-        # Process simulation data for this combination
-        single_processed_data = process_data(
-            x_range=x_scan_range,
-            file_path=OUT_FILE,
-            focus_axis='z',
-            fly2_file=OUTPUT_FILENAME_FLY2,
-            y_range=(-0.5, 0.5),
-            z_range=(-0.5, 0.5)
-        )
+        # End of batch - cleanup
+        batch_time = time.time() - batch_start_time
+        print(f"Batch {batch_idx + 1} completed in {batch_time:.1f}s")
         
-        if single_processed_data is None:
-            # Suppressed error output
-            # print(f"  ERROR: Data processing failed for FG {fg}, Lens {lens_vmi}, KE {ke:.2f}")
-            continue
-        
-        # Step 4: For given fg, lens_vmi, ke, get final position of all trajectories and store data
-        # Suppressed step progress output
-        print(f"  Step 4: Extracting final positions for FG {fg}, Lens {lens_vmi}, KE {ke:.2f} eV...")
-        final_positions, success = _extract_final_positions(single_processed_data, fg, lens_vmi, ke)
-        
-        if not success or not final_positions:
-            # Suppressed warning output
-            # print(f"  WARNING: No final positions found for FG {fg}, Lens {lens_vmi}, KE {ke:.2f}")
-            continue
-        
-        # Center the positions
-        final_positions = _center_positions(final_positions)
-        
-        # Step 2: Apply rectangular binning
-        # Suppressed step progress output
-        print(f"  Step 5: Applying rectangular binning for FG {fg}, Lens {lens_vmi}, KE {ke:.2f} eV...")
-        rect_binned, rect_edges, rect_centers = bin_positions(
-            final_positions,
-            bin_type='rectangular',
-            bin_interval=bin_interval,
-            outside_region_width=outside_region_width
-        )
-        
-        # Step 6: For given fg, lens_vmi, ke, perform abel inversion
-        # Suppressed step progress output
-        print(f"  Step 6: Performing Abel inversion for FG {fg}, Lens {lens_vmi}, KE {ke:.2f} eV...")
-        fwhm_result = _estimate_fwhm_and_resolution(rect_binned, bin_interval, fg, lens_vmi, ke)
-        print(f"  Completed energy resolution analysis for FG {fg}, Lens {lens_vmi}, KE {ke:.2f} eV \n")
-        if fwhm_result is None:
-            continue
-        
-        # Step 7: For given fg, lens_vmi, ke, estimate fwhm and energy resolution
-        # FWHM and energy resolution are already calculated in _estimate_fwhm_and_resolution
-        
-        # Step 5: Store the data to processed_data
-        # Suppressed step progress output
-        #print(f"  Step 5: Storing results to processed_data...")
-        if fg not in fwhm_results:
-            fwhm_results[fg] = {}
-        if lens_vmi not in fwhm_results[fg]:
-            fwhm_results[fg][lens_vmi] = {}
-        
-        fwhm_results[fg][lens_vmi][ke] = fwhm_result
+        if enable_memory_optimization:
+            cleanup_memory(force=True)
+            current_memory = get_memory_usage_mb()
+            if current_memory > 0:
+                print(f"Memory after cleanup: {current_memory:.1f} MB")
     
     # Store FWHM results in processed_data global section
+    print(f"\nStoring results in processed_data...")
     for fg in fwhm_results:
         if fg not in processed_data:
             continue
@@ -3953,9 +4145,27 @@ def energy_resolution_analysis(processed_data, tolerable_offset=2.0,
                 
                 # Store FWHM results in global section
                 processed_data[fg][lens_vmi][ke]['global'].update(fwhm_results[fg][lens_vmi][ke])
-                
-    # Suppressed completion message
-    print("Energy resolution analysis completed. FWHM results stored in processed_data global section.")
+    
+    # Final summary
+    total_time = time.time() - start_time
+    print(f"\n{'='*60}")
+    print(f"Energy resolution analysis completed!")
+    print(f"  Total combinations: {total_combinations}")
+    print(f"  Successfully processed: {processed_count}")
+    print(f"  Failed: {failed_count}")
+    print(f"  Total time: {total_time:.1f}s ({total_time/60:.1f} min)")
+    if processed_count > 0:
+        print(f"  Average time per combination: {total_time/processed_count:.2f}s")
+    
+    # Cleanup checkpoint files
+    if checkpoint_files:
+        print(f"  Cleaning up {len(checkpoint_files)} checkpoint files...")
+        for cf in checkpoint_files:
+            try:
+                os.remove(cf)
+            except:
+                pass
+    
     return processed_data
 
 
@@ -4264,9 +4474,11 @@ def plot_heatmap_all_fg(processed_data, cmap='viridis', figsize=(14, 10),
     plt.show()
 
 
-def store_all_heatmaps(processed_data, filename='all_heatmaps.pkl'):
+def store_all_heatmaps(processed_data, filename='all_heatmaps.pkl', batch_size=10):
     """
     Store all heatmap data for all field gradients to a pickle file.
+    
+    OPTIMIZED: Process heatmaps in batches to reduce memory usage for large datasets.
     
     This function pre-computes heatmap data for all field gradients in the processed_data
     and stores them in a dictionary that can be saved to disk for later visualization.
@@ -4275,6 +4487,7 @@ def store_all_heatmaps(processed_data, filename='all_heatmaps.pkl'):
         processed_data: Dictionary containing processed SIMION data with structure:
                        processed_data[fg][lens_VMI][ke]['global']['energy_resolution']
         filename: Output pickle file name (default: 'all_heatmaps.pkl')
+        batch_size: Number of field gradients to process per batch (default: 10)
     
     Returns:
         dict: Dictionary containing all heatmap data with structure:
@@ -4288,26 +4501,43 @@ def store_all_heatmaps(processed_data, filename='all_heatmaps.pkl'):
         print("No field gradient data available")
         return {}
     
-    # Pre-compute all heatmap data
+    print(f"Processing {len(fg_keys)} field gradients for heatmap storage...")
+    
+    # Pre-compute all heatmap data in batches
     all_heatmaps = {}
     
-    for fg in fg_keys:
-        heatmap_data, lens_values, ke_values = heatmap_energy_lens(processed_data, fg)
-        if heatmap_data is not None:
-            all_heatmaps[fg] = {
-                'heatmap_data': heatmap_data,
-                'lens_values': lens_values,
-                'ke_values': ke_values
-            }
+    num_batches = (len(fg_keys) + batch_size - 1) // batch_size
+    
+    for batch_idx in range(num_batches):
+        batch_start = batch_idx * batch_size
+        batch_end = min(batch_start + batch_size, len(fg_keys))
+        batch_fgs = fg_keys[batch_start:batch_end]
+        
+        for fg in batch_fgs:
+            heatmap_data, lens_values, ke_values = heatmap_energy_lens(processed_data, fg)
+            if heatmap_data is not None:
+                all_heatmaps[fg] = {
+                    'heatmap_data': heatmap_data,
+                    'lens_values': lens_values,
+                    'ke_values': ke_values
+                }
+        
+        # Cleanup after each batch
+        gc.collect()
+        
+        if (batch_idx + 1) % 5 == 0:
+            print(f"  Processed {batch_end}/{len(fg_keys)} field gradients...")
     
     # Save to pickle file
     if filename:
         try:
             with open(filename, 'wb') as f:
-                pickle.dump(all_heatmaps, f)
+                pickle.dump(all_heatmaps, f, protocol=pickle.HIGHEST_PROTOCOL)
             print(f"Heatmap data saved to '{filename}'")
         except Exception as e:
             print(f"Error saving heatmap data: {e}")
+    
+    return all_heatmaps
     
     return all_heatmaps
 

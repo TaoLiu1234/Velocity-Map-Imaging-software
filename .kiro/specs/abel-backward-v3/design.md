@@ -648,6 +648,27 @@ class ReconstructionMetadata:
 
 **Validates: Requirements 5.3 (projection formula correctness)**
 
+### Property 14: Lifetime Broadening Tolerance
+
+*For any* synthetic image with non-zero lifetime τ, the reconstructed peak parameters SHALL satisfy the following tolerances (accounting for Voigt profile physics):
+
+| τ (fs) | r0 error | σ error | β error | Notes |
+|--------|----------|---------|---------|-------|
+| 0 | < 1% | < 5% | < 0.1 | Pure Gaussian baseline |
+| 50 | < 2% | < 30% | < 0.15 | Significant Lorentzian (γ=0.0066 eV) |
+| 100 | < 2.5% | < 20% | < 0.18 | Moderate Lorentzian (γ=0.0033 eV) |
+| 200 | < 3% | < 15% | < 0.2 | Weak Lorentzian (γ=0.0016 eV) |
+
+Note: The σ tolerance is relaxed for short lifetimes because the Voigt profile's Lorentzian wings cause systematic σ overestimation when fitting with a Gaussian model. This is expected physics, not an algorithm defect.
+
+**Validates: Requirements 9.2, 9.3, 9.4**
+
+### Property 15: Multi-Peak Lifetime Independence
+
+*For any* multi-peak image where different peaks have different lifetimes (τ₁ ≠ τ₂), the reconstruction SHALL correctly extract parameters for each peak independently, with cross-talk error < 5%.
+
+**Validates: Requirements 9.5**
+
 ## Critical Finding: Forward Fitting Limitations (V3 Post-Mortem)
 
 ### 问题诊断
@@ -759,6 +780,52 @@ reconstructor.reconstruct(image, skip_forward_fit=True, use_polar_fit=False)
 
 1. **单元测试**：验证特定示例和边界情况
 2. **属性测试**：验证在所有有效输入上都应成立的通用属性
+
+### Orthogonal Test Framework
+
+正交测试框架系统地测试算法在所有独立参数维度上的性能：
+
+#### Test Dimensions (正交测试维度)
+
+| 维度 | 测试值 | 说明 |
+|------|--------|------|
+| Number of peaks | 1, 2, 3, 4, 5 | 峰数量 |
+| Radial position | 3mm, 10mm, 17mm | 内、中、外位置 |
+| Beta values | -1, -0.5, 0, 0.5, 1, 1.5, 2 | 角向各向异性 |
+| Peak width (σ) | 0.1mm, 0.4mm, 1.0mm | 窄、中、宽 |
+| Peak separation | 2σ, 4σ, 6σ | 峰间距 |
+| **Lifetime (τ)** | 0 fs, 50 fs, 100 fs, 200 fs | **寿命展宽（新增）** |
+| Event count | 1e4, 1e5, 1e6, 1e7 | 统计量 |
+
+#### Lifetime Broadening Physics (寿命展宽物理)
+
+激发态寿命 τ 通过海森堡不确定性原理导致能量展宽：
+
+**Lorentzian HWHM**: γ = ℏ / (2τ)
+
+其中 ℏ = 0.6582 eV·fs
+
+| τ (fs) | γ (eV) | 物理意义 |
+|--------|--------|----------|
+| 0 | 0 | 无寿命展宽（纯高斯） |
+| 50 | 0.0066 | 中等展宽 |
+| 100 | 0.0033 | 较小展宽 |
+| 200 | 0.0016 | 微弱展宽 |
+
+**Voigt Profile**: 实际线型是高斯（激光带宽 + 多普勒）和洛伦兹（寿命）的卷积
+
+#### Accuracy Requirements by Lifetime
+
+The Voigt profile (Gaussian ⊗ Lorentzian) causes the reconstructed σ to be larger than the input Gaussian σ because the algorithm assumes pure Gaussian peaks. This is expected physical behavior, not an algorithm defect.
+
+| τ (fs) | γ (eV) | r0 error | σ error | β error | Notes |
+|--------|--------|----------|---------|---------|-------|
+| 0 | 0 | < 1% | < 5% | < 0.1 | Pure Gaussian baseline |
+| 50 | 0.0066 | < 2% | < 30% | < 0.15 | Significant Lorentzian |
+| 100 | 0.0033 | < 2.5% | < 20% | < 0.18 | Moderate Lorentzian |
+| 200 | 0.0016 | < 3% | < 15% | < 0.2 | Weak Lorentzian |
+
+Note: σ tolerance is relaxed for short lifetimes because the Voigt profile's Lorentzian wings cause systematic σ overestimation when fitting with Gaussian model.
 
 ### Property-Based Testing Framework
 
