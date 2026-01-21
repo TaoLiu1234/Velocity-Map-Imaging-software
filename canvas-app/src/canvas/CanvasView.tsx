@@ -27,14 +27,29 @@ function LinkListPanel() {
   }, [])
 
   const handleMouseEnter = useCallback(() => {
-    if (hoverTimer) clearTimeout(hoverTimer)
+    if (hoverTimer !== null) {
+      clearTimeout(hoverTimer)
+      setHoverTimer(null)
+    }
     setIsExpanded(true)
   }, [hoverTimer])
 
   const handleMouseLeave = useCallback(() => {
-    const timer = setTimeout(() => setIsExpanded(false), 200)
+    const timer = window.setTimeout(() => {
+      setIsExpanded(false)
+      setHoverTimer(null)
+    }, 200)
     setHoverTimer(timer)
   }, [])
+
+  // 清理定时器
+  useEffect(() => {
+    return () => {
+      if (hoverTimer !== null) {
+        clearTimeout(hoverTimer)
+      }
+    }
+  }, [hoverTimer])
 
   const palette = useMemo(
     () =>

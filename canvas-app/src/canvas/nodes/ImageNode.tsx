@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback, type PointerEvent } from 'react'
+import React, { useEffect, useMemo, useState, useCallback, type PointerEvent } from 'react'
 import type { NodeProps } from 'reactflow'
 import { Handle, Position } from 'reactflow'
 import type { CanvasNodeData } from '../types'
@@ -6,7 +6,7 @@ import { BaseCard } from './BaseCard'
 import { useCanvasStore } from '../store'
 import { useSettingsStore } from '../settingsStore'
 
-export function ImageNode(props: NodeProps<CanvasNodeData>) {
+export const ImageNode = React.memo<NodeProps<CanvasNodeData>>(function ImageNode(props) {
   const { id, data } = props
   const theme = useSettingsStore((s) => s.theme)
   const [dataUrl, setDataUrl] = useState<string | null>(null)
@@ -173,6 +173,6 @@ export function ImageNode(props: NodeProps<CanvasNodeData>) {
       <Handle type="source" position={Position.Right} id="right-source" style={{ top: '50%', width: 14, height: 14 }} />
     </div>
   )
-}
+})
 
 
