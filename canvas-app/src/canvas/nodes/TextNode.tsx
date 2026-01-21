@@ -120,7 +120,7 @@ export const TextNode = React.memo<NodeProps<CanvasNodeData>>(function TextNode(
   )
 
   return (
-    <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+    <div style={{ width: '100%', height: '100%', position: 'relative', overflow: 'visible' }}>
       {/* Obsidian风格：同一个点既是 source 也是 target（叠两个 handle，视觉上一个点） */}
       {/* 先放一个更大的“隐形 target”，用于更容易接线 */}
       <Handle
