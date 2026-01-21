@@ -58,7 +58,7 @@ function LinkListPanel() {
     <div
       style={{
         position: 'absolute',
-        right: 'calc(35% - 59px)', // 贴着canvas区和latex区的边界，往右移动约窗口宽度的1/5（280px * 0.2 ≈ 56px）
+        right: 'calc(35% - 159px)', // 贴着canvas区和latex区的边界，往右移动约156px
         top: 360, // 在inspector下方（inspector top: 70 + 估算高度约280-300）
         zIndex: 15,
         display: 'flex',
