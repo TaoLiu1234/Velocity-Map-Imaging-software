@@ -58,12 +58,12 @@ function LinkListPanel() {
     <div
       style={{
         position: 'absolute',
-        right: '35%', // 贴着canvas区和latex区的边界
-        top: 80, // 在mini map上面
+        right: '35.5%', // 贴着canvas区和latex区的边界，稍微往右偏移一点
+        bottom: 80, // 在inspector右下方，mini map上方
         zIndex: 15,
         display: 'flex',
-        flexDirection: 'row-reverse',
-        alignItems: 'flex-start',
+        flexDirection: 'column', // 改为垂直排列，展开的内容在下方
+        alignItems: 'flex-end',
       }}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
@@ -83,7 +83,7 @@ function LinkListPanel() {
             boxShadow: theme === 'light'
               ? '0 8px 24px rgba(0,0,0,0.15)'
               : '0 12px 30px rgba(0,0,0,0.45)',
-            marginRight: 8,
+            marginBottom: 8,
             transition: 'all 0.15s ease',
           }}
         >
