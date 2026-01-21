@@ -1112,41 +1112,6 @@ ${source}
         </div>
       </div>
 
-      <div
-        style={{
-          borderTop: `1px solid ${theme === 'light' ? 'rgba(15,23,42,0.08)' : 'rgba(148,163,184,0.35)'}`,
-          padding: 8,
-          maxHeight: 120,
-          overflowY: 'auto',
-          fontSize: 11,
-        }}
-      >
-        <div style={{ fontWeight: 600, marginBottom: 4 }}>链接列表</div>
-        {links.length === 0 ? (
-          <div style={{ opacity: 0.7, color: theme === 'light' ? 'rgba(15,23,42,0.6)' : 'inherit' }}>暂无链接。先选中文本，再选中画布节点，点击上方按钮创建链接。</div>
-        ) : (
-          <ul style={{ margin: 0, paddingLeft: 16 }}>
-            {links.map((l) => (
-              <li
-                key={l.id}
-                style={{ marginBottom: 2 }}
-                onContextMenu={(e) => {
-                  e.preventDefault()
-                  setContextMenu({ x: e.clientX, y: e.clientY, linkId: l.id })
-                }}
-              >
-                <span
-                  style={{ cursor: 'pointer', color: '#38bdf8' }}
-                  onClick={() => focusNodes(l.nodeIds)}
-                >
-                  "{l.text.slice(0, 24)}{l.text.length > 24 ? '…' : ''}"
-                </span>{' '}
-                → {l.nodeIds.join(', ')}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
 
       {contextMenu && (
         <div

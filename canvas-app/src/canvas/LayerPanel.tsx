@@ -126,7 +126,6 @@ export const LayerPanel: React.FC = React.memo(() => {
   }, [newRuleText, rulesDraft, persistRules, rulesLayerId])
 
   const expanded = isPanelVisible || isHovered || Boolean(rulesLayerId)
-  const opacity = expanded ? 1 : 0.25
 
   const rulesModal = rulesLayerId
     ? createPortal(
@@ -270,25 +269,26 @@ export const LayerPanel: React.FC = React.memo(() => {
           bottom: 20,
           left: '50%',
           transform: 'translateX(-50%)',
-          background: theme === 'light' ? 'rgba(255,255,255,0.95)' : 'rgba(15,16,22,0.95)',
-          border: `1px solid ${theme === 'light' ? 'rgba(15,23,42,0.15)' : 'rgba(255,255,255,0.18)'}`,
-          borderRadius: 8,
-          padding: expanded ? '8px 12px' : '6px 10px',
-          minWidth: expanded ? 280 : 140,
-          maxWidth: expanded ? 400 : 160,
-          maxHeight: expanded ? 300 : 32,
+          background: theme === 'light' ? 'rgba(255,255,255,0.92)' : 'rgba(15,16,22,0.75)',
+          border: `1px solid ${theme === 'light' ? 'rgba(15,23,42,0.12)' : 'rgba(255,255,255,0.10)'}`,
+          borderRadius: 12,
+          padding: expanded ? '10px 14px' : '6px 12px',
+          minWidth: expanded ? 300 : 160,
+          maxWidth: expanded ? 420 : 180,
+          maxHeight: expanded ? 320 : 36,
           overflow: 'hidden',
-          opacity,
-          transition: 'opacity 0.15s ease, transform 0.15s ease',
+          opacity: expanded ? 1 : 0.8,
+          transition: 'all 0.15s ease',
           zIndex: 2000,
           pointerEvents: 'auto',
+          backdropFilter: 'blur(10px)',
           boxShadow: expanded
             ? theme === 'light'
-              ? '0 8px 24px rgba(0,0,0,0.15)'
-              : '0 12px 30px rgba(0,0,0,0.45)'
+              ? '0 12px 30px rgba(0,0,0,0.15)'
+              : '0 14px 35px rgba(0,0,0,0.45)'
             : theme === 'light'
-            ? '0 4px 12px rgba(0,0,0,0.1)'
-            : '0 6px 18px rgba(0,0,0,0.35)',
+            ? '0 6px 16px rgba(0,0,0,0.1)'
+            : '0 8px 22px rgba(0,0,0,0.35)',
         }}
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}

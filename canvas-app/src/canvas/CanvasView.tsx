@@ -13,6 +13,176 @@ const nodeTypes = {
   pdf: PdfNode,
   iframe: IframeNode,
 }
+
+// 链接列表浮动窗口组件
+function LinkListPanel() {
+  const [isExpanded, setIsExpanded] = useState(false)
+  const [hoverTimer, setHoverTimer] = useState<number | null>(null)
+  const { theme } = useSettingsStore()
+  const links = useLatexLinkStore((s) => s.links)
+  const focusNodes = useCallback((nodeIds: string[]) => {
+    const nodes = useCanvasStore.getState().nodes
+    const next = nodes.map((n) => ({ ...n, selected: nodeIds.includes(n.id) }))
+    useCanvasStore.getState().setNodes(next, false)
+  }, [])
+
+  const handleMouseEnter = useCallback(() => {
+    if (hoverTimer) clearTimeout(hoverTimer)
+    setIsExpanded(true)
+  }, [hoverTimer])
+
+  const handleMouseLeave = useCallback(() => {
+    const timer = setTimeout(() => setIsExpanded(false), 200)
+    setHoverTimer(timer)
+  }, [])
+
+  const palette = useMemo(
+    () =>
+      theme === 'light'
+        ? {
+            surface: 'rgba(255,255,255,0.92)',
+            border: 'rgba(15,23,42,0.12)',
+            textPrimary: '#0f172a',
+            textSecondary: 'rgba(15,23,42,0.6)',
+          }
+        : {
+            surface: 'rgba(15, 16, 22, 0.75)',
+            border: 'rgba(255,255,255,0.10)',
+            textPrimary: 'rgba(255,255,255,0.9)',
+            textSecondary: 'rgba(255,255,255,0.65)',
+          },
+    [theme],
+  )
+
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        right: '35%', // 贴着canvas区和latex区的边界
+        top: 80, // 在mini map上面
+        zIndex: 15,
+        display: 'flex',
+        flexDirection: 'row-reverse',
+        alignItems: 'flex-start',
+      }}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+    >
+      {/* 展开的内容 */}
+      {isExpanded && (
+        <div
+          style={{
+            background: palette.surface,
+            border: `1px solid ${palette.border}`,
+            borderRadius: 12,
+            padding: '12px 16px',
+            width: 280,
+            maxHeight: 300,
+            overflowY: 'auto',
+            backdropFilter: 'blur(10px)',
+            boxShadow: theme === 'light'
+              ? '0 8px 24px rgba(0,0,0,0.15)'
+              : '0 12px 30px rgba(0,0,0,0.45)',
+            marginRight: 8,
+            transition: 'all 0.15s ease',
+          }}
+        >
+          <div style={{
+            fontWeight: 600,
+            marginBottom: 8,
+            color: palette.textPrimary,
+            fontSize: 13
+          }}>
+            LaTeX 链接列表
+          </div>
+          {links.length === 0 ? (
+            <div style={{
+              opacity: 0.7,
+              color: palette.textSecondary,
+              fontSize: 12,
+              fontStyle: 'italic'
+            }}>
+              暂无链接。先选中文本，再选中画布节点，右键创建链接。
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {links.map((link) => (
+                <div
+                  key={link.id}
+                  style={{
+                    padding: '8px 10px',
+                    borderRadius: 8,
+                    background: theme === 'light' ? 'rgba(15,23,42,0.03)' : 'rgba(255,255,255,0.05)',
+                    border: `1px solid ${theme === 'light' ? 'rgba(15,23,42,0.08)' : 'rgba(255,255,255,0.1)'}`,
+                    cursor: 'pointer',
+                  }}
+                  onClick={() => focusNodes(link.nodeIds)}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = theme === 'light' ? 'rgba(59,130,246,0.1)' : 'rgba(59,130,246,0.2)'
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = theme === 'light' ? 'rgba(15,23,42,0.03)' : 'rgba(255,255,255,0.05)'
+                  }}
+                >
+                  <div style={{
+                    fontSize: 11,
+                    color: palette.textPrimary,
+                    fontWeight: 500,
+                    marginBottom: 4
+                  }}>
+                    "{link.text.slice(0, 30)}{link.text.length > 30 ? '…' : ''}"
+                  </div>
+                  <div style={{
+                    fontSize: 10,
+                    color: palette.textSecondary,
+                    opacity: 0.8
+                  }}>
+                    节点: {link.nodeIds.join(', ')}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 收缩的竖条 */}
+      <div
+        style={{
+          width: 6,
+          height: 120,
+          background: palette.surface,
+          border: `1px solid ${palette.border}`,
+          borderRadius: '3px 0 0 3px',
+          cursor: 'pointer',
+          backdropFilter: 'blur(10px)',
+          boxShadow: theme === 'light'
+            ? '0 2px 8px rgba(0,0,0,0.1)'
+            : '0 2px 8px rgba(0,0,0,0.3)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          transition: 'all 0.15s ease',
+          opacity: isExpanded ? 0.8 : 1,
+        }}
+        title="LaTeX 链接列表"
+      >
+        <div
+          style={{
+            writingMode: 'vertical-rl',
+            textOrientation: 'mixed',
+            fontSize: 10,
+            fontWeight: 600,
+            color: palette.textSecondary,
+            letterSpacing: 1,
+          }}
+        >
+          链接 ({links.length})
+        </div>
+      </div>
+    </div>
+  )
+}
 import ReactFlow, {
   addEdge,
   applyEdgeChanges,
@@ -29,8 +199,8 @@ import type { Connection, EdgeChange, NodeChange } from 'reactflow'
 import 'reactflow/dist/style.css'
 import { useCanvasStore, type RFEdge } from './store'
 import { useLatexLinkStore } from './latexLinkStore'
-import { useGlobalUndoStore } from './globalUndoStore'
 import { useLayerStore } from './layerStore'
+import { useGlobalUndoStore } from './globalUndoStore'
 import { LayerPanel } from './LayerPanel'
 import { TextNode } from './nodes/TextNode'
 import { MarkdownNode } from './nodes/MarkdownNode'
@@ -1158,6 +1328,9 @@ function CanvasInner() {
         )}
         {!exporting && <Controls />}
       </ReactFlow>
+
+      {/* Link List Panel */}
+      <LinkListPanel />
 
       {/* Right-side inspector */}
       <div
