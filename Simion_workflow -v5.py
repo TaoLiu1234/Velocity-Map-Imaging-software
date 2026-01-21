@@ -9,7 +9,6 @@ Optimized SIMION Workflow - v5
 # Import the Utilis module containing all utility functions for SIMION data processing and simulation
 import os
 import Utilis
-import delete_temp
 import numpy as np
 # Configuration parameters for the SIMION simulation workflow
 # These define the parameter sweep ranges and simulation settings
@@ -25,7 +24,7 @@ Theta=0*2*np.pi/360 # roataion for the particles DEGREE
 
 FIELD_MIN = 100  # Minimum field gradient in V/cm for parameter sweep
 FIELD_MAX = 100  # Maximum field gradient in V/cm for parameter sweep
-NUM_POINTS = 1   # Number of field gradient points to simulate (reduced from v2's 20 for faster testing)
+NUM_POINTS = 2   # Number of field gradient points to simulate (reduced from v2's 20 for faster testing)
 
 LENS_MIN = 1    # Minimum lens focusing factor (lens_VMI), adjusted from v2's 1.38
 LENS_MAX = 1.4  # Maximum lens focusing factor (lens_VMI)
@@ -65,7 +64,7 @@ for ke in electron_energy_sequence:
     Utilis.run_optimized_simulations_with_ke_parallel(param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, OUT_FILE)
 
 # Call the function to delete temp files in the current directory
-delete_temp.delete_temp_files()
+Utilis.delete_temp_files()
 
 # Step 4: Process simulation data to find focus points
 # Parses out.txt, calculates final position statistics, analyzes beam across x-planes, and finds focus
@@ -87,7 +86,7 @@ print("Workflow completed successfully.")
 #----------------------------------------------------------------------------------------------------------
 processed_data = Utilis.energy_resolution_analysis(processed_data, tolerable_offset=3.0,
                               source_position=(199, -1, 0.0),
-                              num_particles_per_energy=10000,
+                              num_particles_per_energy=50000,
                               x_scan_range=(73.0, 166.0),
                               bin_interval=0.01,
                               outside_region_width=2)

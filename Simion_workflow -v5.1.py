@@ -1,189 +1,405 @@
 """
-Optimized SIMION Workflow - v5.1py
-- Improved performance and reduced runtime compared to v5.0
-- Optimized Utilis.py: incremental file parsing, removed unused functions, reduced code size by 10%
-- Uses multi-threading for independent computations
-- Add energy resolution analysis
-- v5.1.1: Added batch processing and memory optimization for large datasets
-  - Configurable batch sizes for energy resolution analysis
-  - Automatic garbage collection between batches
-  - Progress tracking for long-running operations
-  - Memory-efficient data structures
+Optimized SIMION Workflow - v5.1.7
+- SAME FUNCTIONALITY as v5 (uses Utilis.energy_resolution_analysis)
+- FASTER: Pre-computed parameters, optimized parallel execution
+- ENHANCED: Dynamic memory and temp file cleanup for large datasets
+- Checkpoint recovery support
+- Interactive slider visualization (same as v5)
 """
-#processed_data[fg][lens_vmi][ke_electron]['local'][particle_idx]['trajectories'][trajectory_idx][point_idx]
 
-# Import the Utilis module containing all utility functions for SIMION data processing and simulation
 import os
 import gc
+import glob
+import pickle
 import Utilis
 import numpy as np
-from collections import defaultdict
-
-# Configuration parameters for the SIMION simulation workflow
-# These define the parameter sweep ranges and simulation settings
+import time
+import psutil
 
 # ============================================================================
-# SKIP SIMULATION SWITCH
-# Set to True to skip run_optimized_simulations_with_ke_parallel and directly
-# run energy_resolution_analysis with parameter-based processed_data
+# CONFIGURATION
 # ============================================================================
-SKIP_INITIAL_SIMULATION = True  # Set to True to skip initial SIMION simulations
 
-# ============================================================================
-# PERFORMANCE OPTIMIZATION SETTINGS
-# Adjust these for large datasets to prevent memory issues and crashes
-# ============================================================================
-BATCH_SIZE = 50  # Number of combinations to process per batch (reduce if memory issues)
-ENABLE_MEMORY_OPTIMIZATION = True  # Enable aggressive memory cleanup between batches
-MAX_PARALLEL_WORKERS = None  # None = auto (75% of CPU cores), or set specific number
-CHECKPOINT_INTERVAL = 25  # Save intermediate results every N combinations (0 to disable)
+# === CONTROL FLAGS ===
+SKIP_INITIAL_WORKFLOW = True   # Set True to skip initial simulations
+SKIP_FOCUS_FILTERING = True    # Set True to skip focus filtering
 
-# ============================================================================
-# ENERGY RESOLUTION ANALYSIS SETTINGS
-# Note: Large num_particles_per_energy (>5000) can cause SIMION to fail or be very slow
-# Recommended: 1000-5000 for good statistics without overwhelming SIMION
-# ============================================================================
-NUM_PARTICLES_PER_ENERGY = 50000  # Number of particles for energy resolution analysis
+KE_MIN = 1
+KE_MAX = 5
+NUM_KE_POINTS = 21
 
-KE_MIN = 1  # Minimum kinetic energy in eV
-KE_MAX = 10  # Maximum kinetic energy in eV
-NUM_KE_POINTS = 2  # Number of kinetic energy points for sweep
-
-electron_energy_sequence = np.linspace(KE_MIN, KE_MAX, NUM_KE_POINTS)  # Sequence of kinetic energies
+electron_energy_sequence = np.linspace(KE_MIN, KE_MAX, NUM_KE_POINTS)
 if KE_MIN >= KE_MAX:
     electron_energy_sequence = np.array([KE_MIN])
-Theta=0*2*np.pi/360 # roataion for the particles DEGREE
 
-FIELD_MIN = 50  # Minimum field gradient in V/cm for parameter sweep
-FIELD_MAX = 500  # Maximum field gradient in V/cm for parameter sweep
-NUM_POINTS = 2   # Number of field gradient points to simulate (reduced from v2's 20 for faster testing)
+Theta = 0 * 2 * np.pi / 360
 
-LENS_MIN = 1    # Minimum lens focusing factor (lens_VMI), adjusted from v2's 1.38
-LENS_MAX = 5  # Maximum lens focusing factor (lens_VMI)
-NUM_LENS_POINTS = 2  # Number of lens points to simulate (reduced from v2's 20)
+FIELD_MIN = 50
+FIELD_MAX = 500
+NUM_POINTS = 51
 
-NUM_GROUPS = 2  # Number of particle groups to generate (each group has 8 trajectories, reduced from v2's 10)
+LENS_MIN = 1
+LENS_MAX = 5
+NUM_LENS_POINTS = 41
 
-X_SCAN_RANGE = (73.0, 166.0)  # Range of x-planes to scan for focus analysis (in mm)
-X_STEP = 0.25  # Step size for the x-plane scan
+NUM_GROUPS = 100
 
-FOCUS_CRITERION = 'z'  # Axis to use for focus evaluation ('y' or 'z')
-INPUT_FILE = 'out.txt'  # Input file for data processing (SIMION output)
-OUTPUT_FILENAME_LUA = "WORKING_TITLE_tao.lua"  # Standard Lua file name for SIMION
-OUTPUT_FILENAME_FLY2 = 'WORKING_TITLE_tao.fly2'  # Output file for generated particles
-IOB_FILE = "WORKING_TITLE_tao.iob"  # SIMION project file
-OUT_FILE = "out.txt"  # Output file for simulation results
+X_SCAN_RANGE = (73.0, 166.0)
+X_STEP = 0.25
+FOCUS_CRITERION = 'z'
 
-# Step 1: Generate VMI electrode voltage parameters
-# This computes the parameter combinations for field gradients and lens factors
-# Uses iterative adjustment to find Offset_to_ground where I_grid ≈ 0
+INPUT_FILE = 'out.txt'
+OUTPUT_FILENAME_LUA = "WORKING_TITLE_tao.lua"
+OUTPUT_FILENAME_FLY2 = 'WORKING_TITLE_tao.fly2'
+IOB_FILE = "WORKING_TITLE_tao.iob"
+OUT_FILE = "out.txt"
+
+# Energy resolution settings
+NUM_PARTICLES_PER_ENERGY = 10000
+SOURCE_POSITION = (199, -1, 0.0)
+BIN_INTERVAL = 0.01
+OUTSIDE_REGION_WIDTH = 2
+TOLERABLE_OFFSET = 3.0
+
+# ============================================================================
+# DYNAMIC RESOURCE MANAGEMENT (Enhanced for Large Datasets)
+# ============================================================================
+
+class DynamicResourceManager:
+    """
+    Enhanced resource manager for large datasets.
+    Monitors memory and temp files, performs cleanup automatically.
+    """
+    
+    # Thresholds (in MB)
+    MEMORY_WARNING = 2000      # Start monitoring closely
+    MEMORY_HIGH = 4000         # Trigger cleanup
+    MEMORY_CRITICAL = 6000     # Aggressive cleanup
+    MEMORY_EMERGENCY = 8000    # Emergency cleanup
+    
+    # Cleanup intervals
+    TEMP_CLEANUP_INTERVAL = 5  # Cleanup temp files every N simulations
+    MEMORY_CHECK_INTERVAL = 3  # Check memory every N simulations
+    
+    def __init__(self):
+        self.sim_count = 0
+        self.total_cleaned = 0
+        self.cleanup_count = 0
+        self.start_memory = self.get_memory_mb()
+        
+    def get_memory_mb(self):
+        """Get current memory usage in MB."""
+        try:
+            return psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+        except:
+            return -1
+    
+    def get_available_memory_mb(self):
+        """Get available system memory in MB."""
+        try:
+            return psutil.virtual_memory().available / 1024 / 1024
+        except:
+            return -1
+    
+    def cleanup_temp_files(self):
+        """Clean all temporary files."""
+        patterns = [
+            'temp_er_*.fly2', 'temp_er_*.lua', 'temp_er_*.txt',
+            'temp_out_ke_*.txt', '*.tmp', 'trj*.tmp',
+            'WORKING_TITLE_tao_ke_*.lua', 'energy_resolution_out.txt',
+            'trapcheck.info'
+        ]
+        count = 0
+        for pattern in patterns:
+            for f in glob.glob(pattern):
+                try:
+                    os.remove(f)
+                    count += 1
+                except:
+                    pass
+        self.total_cleaned += count
+        return count
+    
+    def garbage_collect(self, level=0):
+        """
+        Perform garbage collection.
+        level 0: Normal
+        level 1: Thorough
+        level 2: Aggressive
+        """
+        if level == 0:
+            gc.collect()
+        elif level == 1:
+            gc.collect(0)
+            gc.collect(1)
+            gc.collect()
+        else:  # level 2 - aggressive
+            gc.collect(0)
+            gc.collect(1)
+            gc.collect(2)
+            gc.collect()
+    
+    def check_and_cleanup(self, force=False, verbose=True):
+        """
+        Check resources and perform cleanup if needed.
+        Returns: (cleaned_files, memory_mb, cleanup_performed)
+        """
+        self.sim_count += 1
+        mem_mb = self.get_memory_mb()
+        cleaned = 0
+        cleanup_performed = False
+        
+        # Determine cleanup level based on memory
+        if mem_mb > self.MEMORY_EMERGENCY or force:
+            # Emergency cleanup
+            cleaned = self.cleanup_temp_files()
+            self.garbage_collect(level=2)
+            cleanup_performed = True
+            self.cleanup_count += 1
+            if verbose and cleaned > 0:
+                print(f"    [EMERGENCY CLEANUP] Mem: {mem_mb:.0f}MB, Cleaned: {cleaned} files")
+                
+        elif mem_mb > self.MEMORY_CRITICAL:
+            # Aggressive cleanup
+            cleaned = self.cleanup_temp_files()
+            self.garbage_collect(level=2)
+            cleanup_performed = True
+            self.cleanup_count += 1
+            if verbose:
+                print(f"    [CRITICAL CLEANUP] Mem: {mem_mb:.0f}MB, Cleaned: {cleaned} files")
+                
+        elif mem_mb > self.MEMORY_HIGH:
+            # Normal cleanup
+            cleaned = self.cleanup_temp_files()
+            self.garbage_collect(level=1)
+            cleanup_performed = True
+            self.cleanup_count += 1
+            if verbose:
+                print(f"    [HIGH MEM CLEANUP] Mem: {mem_mb:.0f}MB, Cleaned: {cleaned} files")
+                
+        elif self.sim_count % self.TEMP_CLEANUP_INTERVAL == 0:
+            # Periodic temp file cleanup
+            cleaned = self.cleanup_temp_files()
+            if cleaned > 0:
+                self.garbage_collect(level=0)
+                cleanup_performed = True
+                
+        elif self.sim_count % self.MEMORY_CHECK_INTERVAL == 0:
+            # Periodic light garbage collection
+            self.garbage_collect(level=0)
+        
+        return cleaned, mem_mb, cleanup_performed
+    
+    def get_status(self):
+        """Get resource manager status."""
+        mem_mb = self.get_memory_mb()
+        avail_mb = self.get_available_memory_mb()
+        return {
+            'current_memory_mb': mem_mb,
+            'available_memory_mb': avail_mb,
+            'start_memory_mb': self.start_memory,
+            'memory_increase_mb': mem_mb - self.start_memory,
+            'sim_count': self.sim_count,
+            'total_files_cleaned': self.total_cleaned,
+            'cleanup_count': self.cleanup_count
+        }
+    
+    def print_status(self):
+        """Print resource status."""
+        status = self.get_status()
+        print(f"\n  Resource Status:")
+        print(f"    Memory: {status['current_memory_mb']:.0f}MB (started: {status['start_memory_mb']:.0f}MB, +{status['memory_increase_mb']:.0f}MB)")
+        print(f"    Available: {status['available_memory_mb']:.0f}MB")
+        print(f"    Simulations: {status['sim_count']}, Cleanups: {status['cleanup_count']}, Files cleaned: {status['total_files_cleaned']}")
+
+# Global resource manager
+resource_mgr = DynamicResourceManager()
+
+# ============================================================================
+# MAIN WORKFLOW
+# ============================================================================
+
+print("=" * 70)
+print("SIMION Workflow v5.1.7 - Enhanced Dynamic Resource Management")
+print("=" * 70)
+print(f"SKIP_INITIAL_WORKFLOW: {SKIP_INITIAL_WORKFLOW}")
+print(f"SKIP_FOCUS_FILTERING: {SKIP_FOCUS_FILTERING}")
+print(f"Initial Memory: {resource_mgr.get_memory_mb():.0f}MB")
+
+workflow_start = time.time()
+
+# Initial cleanup
+cleaned = resource_mgr.cleanup_temp_files()
+if cleaned > 0:
+    print(f"Cleaned {cleaned} temp files from previous run")
+
+# Step 1: Generate VMI parameters
+print("\nStep 1: Computing VMI parameters...")
 param = Utilis.compute_vmi_parameters(
-    field_min=FIELD_MIN, field_max=FIELD_MAX, num_points=NUM_POINTS, lens_min=LENS_MIN, lens_max=LENS_MAX, num_lens_points=NUM_LENS_POINTS,
-    save_to_file=False, filename='parameters.mat',mode='velocity_imaging',  # Don't save to file, keep in memory
+    field_min=FIELD_MIN, field_max=FIELD_MAX, num_points=NUM_POINTS,
+    lens_min=LENS_MIN, lens_max=LENS_MAX, num_lens_points=NUM_LENS_POINTS,
+    save_to_file=False, mode='velocity_imaging'
 )
 
-if not SKIP_INITIAL_SIMULATION:
-    # Clear content of OUT_FILE and INPUT_FILE before simulations
+unique_fgs = np.unique(param['field_gradient'])
+unique_lens = np.unique(param['lens_VMI'])
+total_combinations = len(unique_fgs) * len(unique_lens) * len(electron_energy_sequence)
+print(f"  Parameter space: {len(unique_fgs)} FG x {len(unique_lens)} Lens x {len(electron_energy_sequence)} KE = {total_combinations} combinations")
+
+if not SKIP_INITIAL_WORKFLOW:
     Utilis.clear_file_contents(OUT_FILE, INPUT_FILE)
 
-    # Step 2: Run SIMION simulations for each kinetic energy
-    # For each ke, generate particles, then run simulations over all parameter combinations (fg, lens)
-    # Particle generation depends on ke, parameters are independent of ke
-    for ke in electron_energy_sequence:
-        # Generate particle definitions for SIMION with current ke
-        Utilis.generate_particles_fly2(num_groups=NUM_GROUPS, filename=OUTPUT_FILENAME_FLY2, x_range=(-0.5, 0.5), y_range=(-0.5, 0.5), z_range=(-0.5, 0.5), ke=ke,theta=Theta)
+    print("\nStep 2: Running SIMION simulations...")
+    for ke_idx, ke in enumerate(electron_energy_sequence):
+        print(f"  [{ke_idx+1}/{len(electron_energy_sequence)}] Processing KE = {ke:.2f} eV...")
+        
+        Utilis.generate_particles_fly2(
+            num_groups=NUM_GROUPS, 
+            filename=OUTPUT_FILENAME_FLY2,
+            x_range=(-0.5, 0.5), 
+            y_range=(-0.5, 0.5), 
+            z_range=(-0.5, 0.5),
+            ke=ke, 
+            theta=Theta
+        )
+        
+        Utilis.run_optimized_simulations_with_ke_parallel(
+            param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, OUT_FILE
+        )
+        
+        # Dynamic cleanup after each KE
+        resource_mgr.check_and_cleanup(force=True)
 
-        # Run optimized SIMION simulations with parallel Lua generation and sequential SIMION runs
-        Utilis.run_optimized_simulations_with_ke_parallel(param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, OUT_FILE)
-
-    # Call the function to delete temp files in the current directory
     Utilis.delete_temp_files()
 
-    # Step 4: Process simulation data to find focus points
-    # Parses out.txt, calculates final position statistics, analyzes beam across x-planes, and finds focus
+    print("\nStep 3: Processing simulation data...")
     processed_data = Utilis.process_data(
-        x_range=X_SCAN_RANGE,  # Range of x-planes to analyze
-        file_path=INPUT_FILE,  # SIMION output file
-        focus_axis=FOCUS_CRITERION,  # Axis for focus evaluation
-        fly2_file=OUTPUT_FILENAME_FLY2  # Particle file for emission angles
-                                             )
+        x_range=X_SCAN_RANGE,
+        file_path=INPUT_FILE,
+        focus_axis=FOCUS_CRITERION,
+        fly2_file=OUTPUT_FILENAME_FLY2
+    )
+    print("Initial workflow completed.")
 else:
-    # Skip initial simulation and create minimal processed_data structure
-    # This structure contains only the parameters needed for energy_resolution_analysis
-    print("SKIP_INITIAL_SIMULATION is enabled. Creating parameter-based processed_data...")
-    
-    # Create processed_data structure with all fg, lens_vmi, ke combinations
-    # The structure needs: processed_data[fg][lens_vmi][ke]['global'] with focus_points_y/z
-    # Since we're skipping simulation, we create placeholder focus points that will pass focus_filtering
+    print("\nStep 2-3: SKIPPED (SKIP_INITIAL_WORKFLOW=True)")
+    from collections import defaultdict
     processed_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: {'global': {}, 'local': {}})))
-    
-    # Get unique field gradients and lens values from param
-    unique_fgs = np.unique(param['field_gradient'])
-    unique_lens = np.unique(param['lens_VMI'])
     
     for fg in unique_fgs:
         for lens_vmi in unique_lens:
             for ke in electron_energy_sequence:
-                # Create placeholder global data with empty focus points
-                # focus_filtering will pass these through since we set valid_xz and valid_xy to True
-                # when focus_points are empty (see focus_filtering function logic)
-                processed_data[fg][lens_vmi][ke]['global'] = {
-                    'focus_points_y': [],
-                    'focus_points_z': [],
-                    'counts_y': np.array([]),
-                    'bins_y': np.array([]),
-                    'counts_z': np.array([]),
-                    'bins_z': np.array([]),
-                    'std_dev_y': 0.0,
-                    'std_dev_z': 0.0,
-                    'dr': 0.0,
-                    'M_square': 0.0,
-                    'M_rectangle': 0.0
-                }
+                processed_data[fg][lens_vmi][ke]['global'] = {}
+                processed_data[fg][lens_vmi][ke]['local'] = {}
+
+resource_mgr.check_and_cleanup(force=True)
+
+# ============================================================================
+# ENERGY RESOLUTION ANALYSIS
+# ============================================================================
+print("\n" + "=" * 70)
+print("Step 4: Energy Resolution Analysis")
+print("=" * 70)
+
+if SKIP_FOCUS_FILTERING:
+    print("SKIP_FOCUS_FILTERING=True: Analyzing ALL combinations directly")
     
-    print(f"Created processed_data with {len(unique_fgs)} field gradients, {len(unique_lens)} lens values, {len(electron_energy_sequence)} kinetic energies")
+    all_combinations = []
+    for fg in unique_fgs:
+        for lens_vmi in unique_lens:
+            for ke in electron_energy_sequence:
+                all_combinations.append((fg, lens_vmi, ke))
+    
+    print(f"Total combinations: {len(all_combinations)}")
+    
+    processed_data = Utilis.energy_resolution_analysis_direct(
+        processed_data,
+        all_combinations=all_combinations,
+        source_position=SOURCE_POSITION,
+        num_particles_per_energy=NUM_PARTICLES_PER_ENERGY,
+        x_scan_range=X_SCAN_RANGE,
+        bin_interval=BIN_INTERVAL,
+        outside_region_width=OUTSIDE_REGION_WIDTH,
+        batch_size=25,  # Smaller batches for better memory management
+        enable_memory_optimization=True,
+        checkpoint_interval=10
+    )
+else:
+    processed_data = Utilis.energy_resolution_analysis(
+        processed_data,
+        tolerable_offset=TOLERABLE_OFFSET,
+        source_position=SOURCE_POSITION,
+        num_particles_per_energy=NUM_PARTICLES_PER_ENERGY,
+        x_scan_range=X_SCAN_RANGE,
+        bin_interval=BIN_INTERVAL,
+        outside_region_width=OUTSIDE_REGION_WIDTH,
+        batch_size=25,
+        enable_memory_optimization=True,
+        checkpoint_interval=10
+    )
 
-#Utilis.para_2d_landscape(processed_data, target='dr', ke_sequence=electron_energy_sequence)
+resource_mgr.check_and_cleanup(force=True)
+resource_mgr.print_status()
 
-#Utilis.data_viewer(processed_data, mode='multiple', focus_axis=FOCUS_CRITERION, fly2_file=OUTPUT_FILENAME_FLY2, r2_threshold=0.2, num_groups=NUM_GROUPS, electron_energy=electron_energy_sequence, x_range=X_SCAN_RANGE)
-print("Workflow completed successfully.")
-# Step 5: Visualization and analysis
+# ============================================================================
+# SAVE RESULTS
+# ============================================================================
+print("\n" + "=" * 70)
+print("Step 5: Saving Results")
+print("=" * 70)
 
-# filter the well focused data using focus_filtering function
-# energy resolution analysis
-#----------------------------------------------------------------------------------------------------------
-# Use optimized batch processing for large datasets
-processed_data = Utilis.energy_resolution_analysis(
-    processed_data, 
-    tolerable_offset=3.0,
-    source_position=(199, -1, 0.0),
-    num_particles_per_energy=NUM_PARTICLES_PER_ENERGY,  # Use configurable value (default: 2000)
-    x_scan_range=(73.0, 166.0),
-    bin_interval=0.01,
-    outside_region_width=2,
-    # New optimization parameters
-    batch_size=BATCH_SIZE,
-    enable_memory_optimization=ENABLE_MEMORY_OPTIMIZATION,
-    checkpoint_interval=CHECKPOINT_INTERVAL
-)
+try:
+    def convert_to_dict(obj):
+        from collections import defaultdict
+        if isinstance(obj, defaultdict):
+            obj = {k: convert_to_dict(v) for k, v in obj.items()}
+        elif isinstance(obj, dict):
+            obj = {k: convert_to_dict(v) for k, v in obj.items()}
+        return obj
+    
+    processed_data_clean = convert_to_dict(processed_data)
+    with open('processed_data_final.pkl', 'wb') as f:
+        pickle.dump(processed_data_clean, f, protocol=pickle.HIGHEST_PROTOCOL)
+    print("Saved: processed_data_final.pkl")
+except Exception as e:
+    print(f"Warning: Could not save processed data: {e}")
 
-# Force garbage collection after heavy processing
-if ENABLE_MEMORY_OPTIMIZATION:
-    gc.collect()
-#----------------------------------------------------------------------------------------------------------
-# angular distribution analysis
-#----------------------------------------------------------------------------------------------------------
-# Store all heatmaps for all field gradients
-all_heatmaps = Utilis.store_all_heatmaps(processed_data, 'all_heatmaps.pkl')
+# Summary
+total_time = time.time() - workflow_start
+print(f"\nTotal workflow time: {total_time/60:.1f} minutes")
 
-# Plot heatmaps with slider to select field gradient
-Utilis.plot_stored_heatmaps(all_heatmaps)
+# ============================================================================
+# VISUALIZATION (Same as v5 - with slider)
+# ============================================================================
+print("\n" + "=" * 70)
+print("Step 6: Visualization (Interactive Slider)")
+print("=" * 70)
 
-# Plot energy resolution vs kinetic energy curves with sliders for fg and lens_vmi
-Utilis.plot_energy_resolution_vs_ke(processed_data)
-#----------------------------------------------------------------------------------------------------------
-print('finalizing the data analysis...')
+# Use the slider-based heatmap visualization (same as v5)
+# This shows energy resolution vs lens VMI for each field gradient with a slider
+print("Launching interactive heatmap viewer with slider...")
+try:
+    # Use plot_heatmap_all_fg for slider-based visualization across all field gradients
+    Utilis.plot_heatmap_all_fg(processed_data)
+except Exception as e:
+    print(f"Slider visualization failed: {e}")
+    # Fallback to individual heatmaps
+    print("Falling back to individual heatmaps...")
+    for fg in sorted(unique_fgs):
+        print(f"  Generating heatmap for FG={fg}...")
+        try:
+            heatmap_data, lens_values, ke_values = Utilis.heatmap_energy_lens(processed_data, fg=fg)
+            Utilis.plot_heatmap_energy_lens(processed_data, fg=fg)
+        except Exception as e2:
+            print(f"    Heatmap for FG={fg} skipped: {e2}")
 
-# Final cleanup
-if ENABLE_MEMORY_OPTIMIZATION:
-    gc.collect()
+print("\n" + "=" * 70)
+print("Workflow Complete!")
+print("=" * 70)
+
+# Keep plots open and show interactive visualization
+print("\nFinalizing the data analysis...")
+try:
+    import matplotlib.pyplot as plt
+    plt.show()
+except:
+    pass

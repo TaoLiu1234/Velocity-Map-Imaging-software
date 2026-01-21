@@ -79,15 +79,16 @@ class Config:
     dld_resolution: float = 0.005    # DLD digitization resolution (mm), 0 = no quantization
     supersample_factor: int = 4      # Deprecated, kept for compatibility
     
-    # Electronics parameters
-    dark_rate: float = 0.1           # Dark current (counts/pixel)
-    readout_sigma: float = 5.0       # Readout noise sigma (counts)
-    readout_offset: float = 100.0    # Readout offset/bias (counts)
+    # Electronics parameters (for CCD/CMOS camera mode only, not used for DLD)
+    readout_sigma: float = 0.0       # Readout noise sigma (counts) - NOT used for DLD
+    readout_offset: float = 0.0      # Readout offset/bias (counts) - NOT used for DLD
     
-    # Background gas parameters
-    bg_rate: float = 0.01            # Background fraction of N_events
-    bg_energy: float = 0.1           # Background electron energy (eV)
-    bg_sigma: float = 0.05           # Background energy spread (eV)
+    # MCP noise parameters
+    mcp_dark_rate: float = 0.01      # MCP dark current: fraction of N_events, uniform across MCP
+    
+    # Residual gas ionization parameters
+    residual_gas_rate: float = 0.005 # Residual gas ionization: fraction of N_events
+    residual_gas_sigma: float = 1.0  # Spatial spread of residual gas signal (mm), centered at origin
     
     def __post_init__(self):
         """Validate and normalize configuration."""
@@ -437,63 +438,93 @@ class VMIInstrument:
 # =============================================================================
 class CameraElectronics:
     """
-    Simulates camera electronics and noise sources.
+    Simulates detector noise sources for MCP+DLD.
     
-    Noise model:
-    - Background gas: low-energy isotropic electrons
-    - Dark current: Poisson distributed
+    Noise sources for MCP+DLD (event-counting):
+    1. MCP dark current: Thermal emission from MCP surface → uniform random hits across MCP
+    2. Residual gas ionization: Low-energy electrons from ionized residual gas → concentrated at image center
+    
+    For CCD/CMOS camera (optional, legacy):
     - Readout noise: Gaussian distributed with offset
     """
     
     def __init__(self, config: Config):
         self.cfg = config
     
-    def add_background(self, img: np.ndarray) -> np.ndarray:
-        """Add background gas contribution (isotropic, low-energy electrons)."""
-        if self.cfg.bg_rate <= 0:
-            return img
+    def generate_mcp_dark_current(self, mcp_radius: float, psf_sigma: float = 0.0, 
+                                   dld_res: float = 0.0) -> np.ndarray:
+        """
+        Generate MCP dark current hits.
         
-        # Create background config
-        bg_config = Config(
-            mass=self.cfg.mass,
-            E_centers=[self.cfg.bg_energy],
-            Betas=[0.0],  # Isotropic
-            branching_ratios=[1.0],
-            N_events=int(self.cfg.N_events * self.cfg.bg_rate),
-            vmi_k=self.cfg.vmi_k,
-            sigma_laser=self.cfg.bg_sigma,
-            T_beam=0.0,
-            tau_lifetimes=0.0,
-            vol_sigma=self.cfg.vol_sigma,
-            polarization_vec=self.cfg.polarization_vec,
-            img_res=self.cfg.img_res,
-            pixel_size=self.cfg.pixel_size,
-            psf_fwhm=self.cfg.psf_fwhm,
-        )
+        MCP dark current: thermal electron emission from MCP surface.
+        Uniformly distributed across the entire MCP active area.
         
-        physics = PhysicsSource(bg_config)
-        instrument = VMIInstrument(bg_config)
-        origins, velocities, _ = physics.generate_particles()
+        Args:
+            mcp_radius: MCP active area radius (mm)
+            psf_sigma: PSF sigma (mm)
+            dld_res: DLD resolution (mm)
+            
+        Returns:
+            Array of (x, y) positions in mm, shape (n_dark, 2)
+        """
+        if self.cfg.mcp_dark_rate <= 0:
+            return np.empty((0, 2))
         
-        return img + instrument.process(origins, velocities)
+        n_dark = int(self.cfg.N_events * self.cfg.mcp_dark_rate)
+        
+        # Uniform distribution in circular MCP area
+        r = np.sqrt(np.random.uniform(0, 1, n_dark)) * mcp_radius
+        theta = np.random.uniform(0, 2 * np.pi, n_dark)
+        hits = np.column_stack([r * np.cos(theta), r * np.sin(theta)])
+        
+        # Apply PSF broadening
+        if psf_sigma > 0:
+            hits = hits + np.random.normal(0, psf_sigma, hits.shape)
+        
+        # Apply DLD quantization
+        if dld_res > 0:
+            hits = np.round(hits / dld_res) * dld_res
+        
+        return hits
     
-    def add_dark_current(self, img: np.ndarray) -> np.ndarray:
-        """Add Poisson-distributed dark current noise."""
-        if self.cfg.dark_rate <= 0:
-            return img
-        return img + np.random.poisson(self.cfg.dark_rate, img.shape)
+    def generate_residual_gas_noise(self, psf_sigma: float = 0.0, 
+                                     dld_res: float = 0.0) -> np.ndarray:
+        """
+        Generate residual gas ionization noise.
+        
+        Residual gas in the chamber gets ionized and produces low-energy electrons
+        that hit near the center of the detector (near-zero kinetic energy).
+        
+        Args:
+            psf_sigma: PSF sigma (mm)
+            dld_res: DLD resolution (mm)
+            
+        Returns:
+            Array of (x, y) positions in mm, shape (n_gas, 2)
+        """
+        if self.cfg.residual_gas_rate <= 0:
+            return np.empty((0, 2))
+        
+        n_gas = int(self.cfg.N_events * self.cfg.residual_gas_rate)
+        
+        # Gaussian distribution centered at origin
+        hits = np.random.normal(0, self.cfg.residual_gas_sigma, (n_gas, 2))
+        
+        # Apply PSF broadening
+        if psf_sigma > 0:
+            hits = hits + np.random.normal(0, psf_sigma, hits.shape)
+        
+        # Apply DLD quantization
+        if dld_res > 0:
+            hits = np.round(hits / dld_res) * dld_res
+        
+        return hits
     
     def add_readout_noise(self, img: np.ndarray) -> np.ndarray:
-        """Add Gaussian readout noise with offset."""
-        return img + np.random.normal(self.cfg.readout_offset, self.cfg.readout_sigma, img.shape)
-    
-    def process(self, img: np.ndarray, add_background: bool = True) -> np.ndarray:
-        """Apply all noise sources."""
-        if add_background:
-            img = self.add_background(img)
-        img = self.add_dark_current(img)
-        img = self.add_readout_noise(img)
-        return img
+        """Add Gaussian readout noise with offset (CCD/CMOS only)."""
+        if self.cfg.readout_sigma <= 0 and self.cfg.readout_offset <= 0:
+            return img
+        return img + np.random.normal(self.cfg.readout_offset, max(self.cfg.readout_sigma, 1e-10), img.shape)
 
 
 # =============================================================================
@@ -501,7 +532,6 @@ class CameraElectronics:
 # =============================================================================
 def run_simulation(config: Config, 
                    add_noise: bool = True,
-                   add_background: bool = True,
                    return_particles: bool = False,
                    output_mode: str = 'image') -> Tuple[np.ndarray, dict]:
     """
@@ -509,24 +539,23 @@ def run_simulation(config: Config,
     
     Args:
         config: Simulation configuration
-        add_noise: Whether to add electronic noise
-        add_background: Whether to add background gas
+        add_noise: Whether to add detector noise (MCP dark current + residual gas)
         return_particles: If True, include particle data in metadata
         output_mode: 
             'image' - 返回像素化图像（默认），完整链路
             'xy_ideal' - 返回理想 XY 坐标（无任何展宽，理论极限）
-            'xy_dld' - 返回模拟 DLD 输出的 XY 坐标（PSF + DLD量化）
+            'xy_dld' - 返回模拟 DLD 输出的 XY 坐标（PSF + DLD量化 + 噪声）
     
     Returns:
         output_mode='image': (image, metadata) tuple
         output_mode='xy_ideal' or 'xy_dld': (xy_coords, metadata) tuple
     
     数据流：
-        真实位置 → [PSF展宽] → 连续位置 → [DLD量化] → DLD输出坐标 → [histogram] → 图像
+        真实位置 → [PSF展宽] → [DLD量化] → DLD坐标 → [histogram] → 图像
         
-        xy_ideal: 真实位置（无展宽）
-        xy_dld: DLD输出坐标（有PSF+量化，无histogram）
-        image: 最终图像（完整链路）
+    噪声源（MCP+DLD）：
+        1. MCP dark current: 均匀分布在整个MCP区域（热发射）
+        2. Residual gas ionization: 集中在图像中心（低能电子）
     """
     physics = PhysicsSource(config)
     instrument = VMIInstrument(config)
@@ -540,7 +569,6 @@ def run_simulation(config: Config,
     
     if output_mode == 'xy_ideal':
         # 直接返回理想 XY 坐标（无任何展宽）
-        # 这是"真实"位置，实际探测器无法达到
         metadata = {
             'N_events': config.N_events,
             'E_centers': config.E_centers,
@@ -554,69 +582,57 @@ def run_simulation(config: Config,
             metadata['level_indices'] = level_indices
         return hits_ideal, metadata
     
-    elif output_mode in ['xy_dld', 'xy_with_psf']:  # xy_with_psf 保留兼容
-        # 模拟完整的 DLD 输出：PSF 展宽 + DLD 数字化量化 + 背景噪声
-        hits_processed = hits_ideal.copy()
+    # Common processing for xy_dld and image modes
+    psf_sigma = config.psf_sigma
+    dld_res = config.dld_resolution
+    
+    # Step 1: PSF 展宽（MCP + 延迟线的空间分辨率）
+    hits_processed = hits_ideal.copy()
+    if psf_sigma > 0:
+        hits_processed = hits_processed + np.random.normal(0, psf_sigma, hits_processed.shape)
+    
+    # Step 2: DLD 数字化量化（TDC 时间分辨率 → 位置精度）
+    if dld_res > 0:
+        hits_processed = np.round(hits_processed / dld_res) * dld_res
+    
+    # Step 3: 添加噪声
+    n_dark = 0
+    n_gas = 0
+    if add_noise:
+        # 计算 MCP 半径（比数据区域大 50%）
+        data_r_max = np.sqrt(np.max(hits_processed[:, 0]**2 + hits_processed[:, 1]**2))
+        mcp_radius = data_r_max * 1.5
         
-        # Step 1: PSF 展宽（MCP + 延迟线的空间分辨率）
-        psf_sigma = config.psf_sigma
-        if psf_sigma > 0:
-            noise_x = np.random.normal(0, psf_sigma, len(hits_ideal))
-            noise_y = np.random.normal(0, psf_sigma, len(hits_ideal))
-            hits_processed = hits_processed + np.column_stack([noise_x, noise_y])
+        # MCP dark current: 均匀分布在整个 MCP 区域
+        dark_hits = camera.generate_mcp_dark_current(mcp_radius, psf_sigma, dld_res)
+        n_dark = len(dark_hits)
         
-        # Step 2: DLD 数字化量化（TDC 时间分辨率 → 位置精度）
-        dld_res = config.dld_resolution
-        if dld_res > 0:
-            hits_processed = np.round(hits_processed / dld_res) * dld_res
+        # Residual gas ionization: 集中在图像中心
+        gas_hits = camera.generate_residual_gas_noise(psf_sigma, dld_res)
+        n_gas = len(gas_hits)
         
-        # Step 3: 添加高斯背景噪声（类似图像模式）
-        # 噪声区域比实际数据区域大，模拟真实探测器的背景噪声
-        n_bg_events = int(config.N_events * config.bg_rate) if config.bg_rate > 0 else 0
-        
-        if n_bg_events > 0:
-            # 计算数据的实际范围
-            data_r_max = np.sqrt(np.max(hits_processed[:, 0]**2 + hits_processed[:, 1]**2))
-            
-            # 背景噪声区域比数据区域大 50%（覆盖更大范围）
-            bg_extent = data_r_max * 1.5
-            
-            # 生成均匀分布的背景噪声点（在圆形区域内）
-            # 使用极坐标采样确保均匀分布
-            bg_r = np.sqrt(np.random.uniform(0, 1, n_bg_events)) * bg_extent
-            bg_theta = np.random.uniform(0, 2 * np.pi, n_bg_events)
-            bg_x = bg_r * np.cos(bg_theta)
-            bg_y = bg_r * np.sin(bg_theta)
-            bg_hits = np.column_stack([bg_x, bg_y])
-            
-            # 对背景噪声也应用 PSF 展宽
-            if psf_sigma > 0:
-                bg_noise_x = np.random.normal(0, psf_sigma, n_bg_events)
-                bg_noise_y = np.random.normal(0, psf_sigma, n_bg_events)
-                bg_hits = bg_hits + np.column_stack([bg_noise_x, bg_noise_y])
-            
-            # 对背景噪声也应用 DLD 量化
-            if dld_res > 0:
-                bg_hits = np.round(bg_hits / dld_res) * dld_res
-            
-            # 合并信号和背景
-            hits_processed = np.vstack([hits_processed, bg_hits])
-        
-        # 计算等效展宽
+        # 合并所有 hits
+        if n_dark > 0:
+            hits_processed = np.vstack([hits_processed, dark_hits])
+        if n_gas > 0:
+            hits_processed = np.vstack([hits_processed, gas_hits])
+    
+    if output_mode in ['xy_dld', 'xy_with_psf']:
+        # 返回 DLD 坐标
         sigma_dld = dld_res / np.sqrt(12) if dld_res > 0 else 0
         
         metadata = {
             'N_events': config.N_events,
             'N_signal': len(hits_ideal),
-            'N_background': n_bg_events,
+            'N_mcp_dark': n_dark,
+            'N_residual_gas': n_gas,
             'E_centers': config.E_centers,
             'Betas': config.Betas,
             'output_mode': 'xy_dld',
             'psf_sigma_mm': psf_sigma,
             'dld_resolution_mm': dld_res,
             'sigma_dld_mm': sigma_dld,
-            'bg_rate': config.bg_rate,
-            'note': 'Simulated DLD output: PSF broadening + digitization + background noise'
+            'note': 'Simulated DLD output: PSF + quantization + noise'
         }
         if return_particles:
             metadata['origins'] = origins
@@ -625,20 +641,29 @@ def run_simulation(config: Config,
         return hits_processed, metadata
     
     else:  # output_mode == 'image'
-        # 原来的行为：生成像素化图像
-        image_ideal = instrument.process(origins, velocities)
+        # Step 4: 直方图化（将散点转换为图像）
+        half_size = config.detector_size_mm / 2
+        edges = np.linspace(-half_size, half_size, config.img_res + 1)
+        final_image, _, _ = np.histogram2d(
+            hits_processed[:, 0], hits_processed[:, 1], 
+            bins=[edges, edges]
+        )
         
-        # Add noise
-        final_image = camera.process(image_ideal, add_background) if add_noise else image_ideal
+        # Step 5: 添加相机噪声（仅用于 CCD/CMOS，DLD 不需要）
+        if add_noise:
+            final_image = camera.add_readout_noise(final_image)
         
-        # Metadata
         metadata = {
             'N_events': config.N_events,
+            'N_signal': len(hits_ideal),
+            'N_mcp_dark': n_dark,
+            'N_residual_gas': n_gas,
             'E_centers': config.E_centers,
             'Betas': config.Betas,
             'output_mode': 'image',
-            'image_ideal_sum': float(np.sum(image_ideal)),
-            'image_final_sum': float(np.sum(final_image)),
+            'psf_sigma_mm': psf_sigma,
+            'dld_resolution_mm': dld_res,
+            'image_sum': float(np.sum(final_image)),
         }
         
         if return_particles:
@@ -734,7 +759,7 @@ if __name__ == "__main__":
         N_events=int(1e6),
         vmi_k=vmi_k,
         sigma_laser=0.015,
-        T_beam=10.0,
+        T_beam=0.0,
         tau_lifetimes=[100.0, 50.0, 200.0],
         photon_energy=21.2,
         target_mass=28.0,
@@ -743,12 +768,11 @@ if __name__ == "__main__":
         img_res=512,
         pixel_size=0.1,
         psf_fwhm=0.0,
-        dark_rate=0.1,
-        readout_sigma=5.0,
-        readout_offset=0.0,
-        bg_rate=0.02,
-        bg_energy=0.15,
-        bg_sigma=0.08,
+        dld_resolution=0.01,
+        # MCP+DLD noise sources
+        mcp_dark_rate=0.4,          # 2% MCP dark current (uniform across MCP)
+        residual_gas_rate=0.01,      # 1% residual gas ionization (centered)
+        residual_gas_sigma=2.0,      # 2mm spread for residual gas
     )
     
     print(f"\nConfiguration:")
@@ -766,18 +790,20 @@ if __name__ == "__main__":
     
     # Run simulation
     print(f"\nRunning simulation with {config.N_events:,} particles...")
-    image_noisy, meta_noisy = run_simulation(config, add_noise=True, add_background=True)
+    image_noisy, meta_noisy = run_simulation(config, add_noise=True)
     
-    print(f"  Ideal sum: {meta_noisy['image_ideal_sum']:.0f}")
-    print(f"  Final sum: {meta_noisy['image_final_sum']:.0f}")
+    print(f"  Signal events: {meta_noisy['N_signal']}")
+    print(f"  MCP dark events: {meta_noisy['N_mcp_dark']}")
+    print(f"  Residual gas events: {meta_noisy['N_residual_gas']}")
+    print(f"  Image sum: {meta_noisy['image_sum']:.0f}")
     
     # Clean image for reconstruction
-    image_clean, _ = run_simulation(config, add_noise=False, add_background=False)
+    image_clean, _ = run_simulation(config, add_noise=False)
     
     # =========================================================================
     # Reconstruction Comparison
     # =========================================================================
-    RUN_RECONSTRUCTION = True
+    RUN_RECONSTRUCTION = False
     
     if RUN_RECONSTRUCTION:
         print("\n" + "=" * 70)
@@ -826,7 +852,7 @@ if __name__ == "__main__":
         # Generate 3D distribution for visualization
         print("\nGenerating 3D distribution for visualization...")
         _, meta_3d = run_simulation(
-            config, add_noise=False, add_background=False, return_particles=True
+            config, add_noise=False, return_particles=True
         )
         
         # Create XY slice of 3D velocity distribution
