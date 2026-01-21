@@ -118,7 +118,7 @@ export const PdfNode = React.memo<NodeProps<CanvasNodeData>>(function PdfNode(pr
   const title = useMemo(() => data.title ?? 'PDF', [data.title])
 
   return (
-    <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+    <div style={{ width: '100%', height: '100%', position: 'relative', overflow: 'visible' }}>
       <Handle type="target" position={Position.Left} id="left-target" style={{ opacity: 0.02, width: 60, height: 60, top: '50%' }} />
       <Handle type="source" position={Position.Left} id="left-source" style={{ top: '50%', width: 14, height: 14 }} />
 
