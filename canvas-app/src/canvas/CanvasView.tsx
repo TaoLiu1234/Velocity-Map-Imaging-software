@@ -3,6 +3,16 @@ import { performanceMonitor } from './performanceMonitor'
 
 // 创建一个全局的palette缓存，避免每次都重新创建
 const paletteCache = new Map<string, any>()
+
+// 定义nodeTypes在组件外部，避免每次渲染都重新创建
+const nodeTypes = {
+  text: TextNode,
+  markdown: MarkdownNode,
+  code: CodeNode,
+  image: ImageNode,
+  pdf: PdfNode,
+  iframe: IframeNode,
+}
 import ReactFlow, {
   addEdge,
   applyEdgeChanges,
@@ -130,17 +140,6 @@ function CanvasInner() {
 
   const autoSaveTimerRef = useRef<number | null>(null)
 
-  const nodeTypes = useMemo(
-    () => ({
-      text: TextNode,
-      markdown: MarkdownNode,
-      code: CodeNode,
-      image: ImageNode,
-      pdf: PdfNode,
-      iframe: IframeNode,
-    }),
-    [],
-  )
 
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {

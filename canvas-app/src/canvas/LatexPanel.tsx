@@ -7,8 +7,7 @@ import katex from 'katex'
 import 'katex/dist/katex.min.css'
 // LaTeX 渲染函数（使用 KaTeX）
 // 注意：KaTeX 只能用于"快速预览"，与 TeX 引擎（xelatex/pdflatex）排版可能存在差异。
-const renderLatex = React.memo<{ text: string; theme: 'light' | 'dark' }>(
-  function renderLatex({ text, theme }): string {
+function renderLatex(text: string, theme: 'light' | 'dark'): string {
   const escapeHtml = (str: string) => {
     const div = document.createElement('div')
     div.textContent = str
@@ -87,7 +86,7 @@ const renderLatex = React.memo<{ text: string; theme: 'light' | 'dark' }>(
         .join('')
     })
     .join('')
-})
+}
 
 export function LatexPanel() {
   const [localSource, setLocalSource] = useState<string>('%% LaTeX 文本示例\n\n行内公式: $E = mc^2$\n\n块级公式:\n\n$$\\int_{-\\infty}^{\\infty} e^{-x^2} dx = \\sqrt{\\pi}$$')
@@ -1070,7 +1069,7 @@ ${source}
                   }}
                 >
                   {segments.map((segment, idx) => {
-                    const html = renderLatex({ text: segment.text, theme })
+                    const html = renderLatex(segment.text, theme)
 
                     if (segment.link) {
                       const colors = getLinkColors(segment.level, segment.link.nodeIds.some((id) => activeNodeIds.has(id)))
