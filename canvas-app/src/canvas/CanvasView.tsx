@@ -58,11 +58,11 @@ function LinkListPanel() {
     <div
       style={{
         position: 'absolute',
-        right: '35.5%', // 贴着canvas区和latex区的边界，稍微往右偏移一点
-        bottom: 80, // 在inspector右下方，mini map上方
+        right: 'calc(35% - 3px)', // 贴着canvas区和latex区的边界（35%是latex panel的宽度，-3px让竖条正好贴在边界上）
+        top: 360, // 在inspector下方（inspector top: 70 + 估算高度约280-300）
         zIndex: 15,
         display: 'flex',
-        flexDirection: 'column', // 改为垂直排列，展开的内容在下方
+        flexDirection: 'column', // 垂直排列，展开的内容在下方
         alignItems: 'flex-end',
       }}
       onMouseEnter={handleMouseEnter}
@@ -2339,7 +2339,12 @@ function CanvasInner() {
             background: 'rgba(0,0,0,0.35)',
             zIndex: 50,
           }}
-          onMouseDown={(e) => e.stopPropagation()}
+          onMouseDown={(e) => {
+            // 点击背景层时关闭设置窗口
+            if (e.target === e.currentTarget) {
+              setSettingsOpen(false)
+            }
+          }}
         >
           <div
             style={{
