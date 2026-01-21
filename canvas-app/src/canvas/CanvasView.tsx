@@ -1323,7 +1323,7 @@ function CanvasInner() {
         multiSelectionKeyCode={['Control', 'Shift', 'Meta']}
         snapToGrid
         snapGrid={[10, 10]}
-        connectionRadius={20} // 设置连接吸附半径，与视觉连接圈大小一致（target handle是36x36，半径18px，这里设为20px确保完全覆盖）
+        connectionRadius={50} // 增大连接吸附半径，使连接更容易（50px半径，覆盖更大的区域）
         proOptions={{ hideAttribution: true }}
         onMoveEnd={(_event, viewport) => {
           setViewport(viewport, false)

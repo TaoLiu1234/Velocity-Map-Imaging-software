@@ -129,8 +129,8 @@ export const TextNode = React.memo<NodeProps<CanvasNodeData>>(function TextNode(
         id="left-target"
         style={{
           top: '50%',
-          width: 36,
-          height: 36,
+          width: 60,
+          height: 60,
           background: 'transparent',
           border: 'none',
           opacity: 0.02,
@@ -202,8 +202,8 @@ export const TextNode = React.memo<NodeProps<CanvasNodeData>>(function TextNode(
         id="right-target"
         style={{
           top: '50%',
-          width: 36,
-          height: 36,
+          width: 60,
+          height: 60,
           background: 'transparent',
           border: 'none',
           opacity: 0.02,

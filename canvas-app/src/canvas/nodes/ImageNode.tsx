@@ -120,7 +120,7 @@ export const ImageNode = React.memo<NodeProps<CanvasNodeData>>(function ImageNod
 
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative' }}>
-      <Handle type="target" position={Position.Left} id="left-target" style={{ opacity: 0.02, width: 36, height: 36, top: '50%' }} />
+      <Handle type="target" position={Position.Left} id="left-target" style={{ opacity: 0.02, width: 60, height: 60, top: '50%' }} />
       <Handle type="source" position={Position.Left} id="left-source" style={{ top: '50%', width: 14, height: 14 }} />
 
       <BaseCard title={title} color={data.color} onTitleChange={commitTitle} selected={props.selected}>
@@ -169,7 +169,7 @@ export const ImageNode = React.memo<NodeProps<CanvasNodeData>>(function ImageNod
         }}
       />
 
-      <Handle type="target" position={Position.Right} id="right-target" style={{ opacity: 0.02, width: 36, height: 36, top: '50%' }} />
+      <Handle type="target" position={Position.Right} id="right-target" style={{ opacity: 0.02, width: 60, height: 60, top: '50%' }} />
       <Handle type="source" position={Position.Right} id="right-source" style={{ top: '50%', width: 14, height: 14 }} />
     </div>
   )
