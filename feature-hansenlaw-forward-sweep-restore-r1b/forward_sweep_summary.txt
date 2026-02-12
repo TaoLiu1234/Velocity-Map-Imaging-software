@@ -1,0 +1,138 @@
+Feature Hansen-Law forward-driven comprehensive sweep
+Data mode: xy_ideal, add_noise=False, psf_sigma_mm=0, dld_resolution_mm=0
+Forward thermal setting: T_beam=0 K (no thermal motion broadening)
+Reconstructor mode: feature_hansenlaw_fusion(ideal_mode=True, run_followup_stages=False, enable_uncertainty_analysis=False, line_shape=gaussian)
+Design mode: both, repeats=1
+
+Total scenarios: 1009
+- OFAT scenarios: 48
+- Pairwise scenarios: 961
+
+Algorithm flow (feature_hansenlaw_fusion):
+- XY points -> radial m0 profile histogram -> Hansen-Law inverse (rho0)
+- Multi-scale peak detection (prominence + curvature + radius weighting)
+- Local Gaussian refinement for each peak (r0, sigma, amp)
+- Beta estimation fusion (moment + FFT + curve fit + WLS)
+- Area/BR estimation via probabilistic responsibility assignment
+
+Design (range / points / interval):
+- n_peaks: points=4, levels=[1, 2, 3, 4], unit=count, interval=step=1, desc=number of rings
+- center_r_mm: points=8, levels=[4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0], unit=mm, interval=step=2.0 mm, desc=overall radius location
+- separation_mm: points=5, levels=[1.2, 2.0, 3.0, 4.5, 6.0], unit=mm, interval=non-uniform dense points, desc=distance between adjacent rings
+- sigma_mm: points=6, levels=[0.15, 0.25, 0.35, 0.45, 0.55, 0.7], unit=mm, interval=approx step=0.10 mm, desc=radial width
+- beta_value: points=13, levels=[-1.0, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0], unit=dimensionless, interval=step=0.25, desc=anisotropy beta
+- dominant_ratio: points=6, levels=[1.0, 1.5, 2.0, 3.0, 5.0, 10.0], unit=ratio, interval=non-uniform dense points, desc=peak-1 BR ratio vs others
+- n_events: points=6, levels=[5000, 10000, 20000, 50000, 100000, 200000], unit=events, interval=roughly log-spaced, desc=detected event count
+
+Fixed baseline params:
+- psf_sigma_mm=0.0
+- dld_resolution_mm=0.0
+- pixel_size_mm=0.05
+- vmi_k=0.01
+- forward_temperature_k=0.0
+
+Overall performance:
+- Npk_err%: mean=100.0000, median=100.0000, p90=100.0000, p99=100.0000
+- r0_err%: mean=0.0000, median=0.0000, p90=0.0000, p99=0.0000
+- sigma_err%: mean=0.0000, median=0.0000, p90=0.0000, p99=0.0000
+- beta_abs_err: mean=0.0000, median=0.0000, p90=0.0000, p99=0.0000
+- BR_err%: mean=0.0000, median=0.0000, p90=0.0000, p99=0.0000
+- Time(s): mean=0.0158, median=0.0151, p90=0.0190, p99=0.0312
+
+OFAT per-factor level stats (mean / median / p90):
+- n_peaks:
+  - level=1, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=2, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=3, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=4, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+- center_r_mm:
+  - level=4.0, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=6.0, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=8.0, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=10.0, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=12.0, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=14.0, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=16.0, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=18.0, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+- separation_mm:
+  - level=1.2, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=2.0, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=3.0, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=4.5, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=6.0, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+- sigma_mm:
+  - level=0.15, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=0.25, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=0.35, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=0.45, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=0.55, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=0.7, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+- beta_value:
+  - level=-1.0, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=-0.75, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=-0.5, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=-0.25, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=0.0, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=0.25, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=0.5, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=0.75, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=1.0, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=1.25, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=1.5, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=1.75, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=2.0, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+- dominant_ratio:
+  - level=1.0, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=1.5, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=2.0, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=3.0, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=5.0, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=10.0, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+- n_events:
+  - level=5000, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=10000, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=20000, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=50000, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=100000, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+  - level=200000, r0%=(0.0000/0.0000/0.0000), sigma%=(0.0000/0.0000/0.0000), beta_abs=(0.0000/0.0000/0.0000), BR%=(0.0000/0.0000/0.0000)
+
+Pairwise interaction sensitivity (delta=max-min mean):
+- r0_err%:
+  - beta_value x dominant_ratio: delta=0.0000
+  - beta_value x n_events: delta=0.0000
+  - center_r_mm x beta_value: delta=0.0000
+  - center_r_mm x dominant_ratio: delta=0.0000
+  - center_r_mm x n_events: delta=0.0000
+  - center_r_mm x separation_mm: delta=0.0000
+  - center_r_mm x sigma_mm: delta=0.0000
+  - dominant_ratio x n_events: delta=0.0000
+- sigma_err%:
+  - beta_value x dominant_ratio: delta=0.0000
+  - beta_value x n_events: delta=0.0000
+  - center_r_mm x beta_value: delta=0.0000
+  - center_r_mm x dominant_ratio: delta=0.0000
+  - center_r_mm x n_events: delta=0.0000
+  - center_r_mm x separation_mm: delta=0.0000
+  - center_r_mm x sigma_mm: delta=0.0000
+  - dominant_ratio x n_events: delta=0.0000
+- beta_abs_err:
+  - beta_value x dominant_ratio: delta=0.0000
+  - beta_value x n_events: delta=0.0000
+  - center_r_mm x beta_value: delta=0.0000
+  - center_r_mm x dominant_ratio: delta=0.0000
+  - center_r_mm x n_events: delta=0.0000
+  - center_r_mm x separation_mm: delta=0.0000
+  - center_r_mm x sigma_mm: delta=0.0000
+  - dominant_ratio x n_events: delta=0.0000
+- BR_err%:
+  - beta_value x dominant_ratio: delta=0.0000
+  - beta_value x n_events: delta=0.0000
+  - center_r_mm x beta_value: delta=0.0000
+  - center_r_mm x dominant_ratio: delta=0.0000
+  - center_r_mm x n_events: delta=0.0000
+  - center_r_mm x separation_mm: delta=0.0000
+  - center_r_mm x sigma_mm: delta=0.0000
+  - dominant_ratio x n_events: delta=0.0000
+
+Strict target hit count (Npk=0, r0<=5%, beta<=0.05, sigma<=10%, BR<=15%):
+- strict count=0/1009 (0.00%)
