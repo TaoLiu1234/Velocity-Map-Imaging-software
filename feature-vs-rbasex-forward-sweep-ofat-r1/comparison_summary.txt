@@ -1,0 +1,30 @@
+Feature Hansen-Law vs rBasex forward-driven sweep
+Design mode: ofat, repeats=1
+Data mode: xy_ideal, add_noise=False, T_beam=0 K
+
+Total scenario-evaluations: 96
+Total scenarios: 48
+
+[feature_hansenlaw_fusion]
+- Npk_err%: mean=0.0000, median=0.0000, p90=0.0000, p99=0.0000
+- r0_err%: mean=0.7302, median=0.1923, p90=0.7273, p99=11.3899
+- sigma_err%: mean=11.4915, median=8.9907, p90=22.7167, p99=41.0256
+- beta_abs_err: mean=0.0373, median=0.0367, p90=0.0567, p99=0.1017
+- BR_err%: mean=28.2399, median=25.6211, p90=31.8183, p99=115.9857
+- Time(s): mean=0.1438, median=0.1390, p90=0.1504, p99=0.2421
+
+[rbasex]
+- Npk_err%: mean=2.0833, median=0.0000, p90=0.0000, p99=53.0000
+- r0_err%: mean=3.9812, median=0.8056, p90=11.7306, p99=36.8337
+- sigma_err%: mean=37.3831, median=32.3795, p90=78.0920, p99=91.4266
+- beta_abs_err: mean=0.3519, median=0.1170, p90=1.3076, p99=2.2932
+- BR_err%: mean=13.9566, median=11.3066, p90=27.1026, p99=47.6948
+- Time(s): mean=0.0093, median=0.0089, p90=0.0110, p99=0.0273
+
+Per-scenario lower-is-better win counts:
+- Npk_err%: feature=1, rbasex=0, tie=47 (total=48)
+- r0_err%: feature=42, rbasex=6, tie=0 (total=48)
+- sigma_err%: feature=43, rbasex=5, tie=0 (total=48)
+- beta_abs_err: feature=42, rbasex=6, tie=0 (total=48)
+- BR_err%: feature=7, rbasex=40, tie=1 (total=48)
+- Time(s): feature=0, rbasex=48, tie=0 (total=48)

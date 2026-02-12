@@ -217,6 +217,12 @@ class AlgorithmRegistry:
             self.algorithms["feature_hansenlaw_fusion"] = AlgorithmWrapper("feature_hansenlaw_fusion", fit_xy_feature_hansenlaw_p2)
         except Exception:
             pass
+        try:
+            from rbasex_benchmark_adapter import fit_xy_rbasex_benchmark
+
+            self.algorithms["rbasex"] = AlgorithmWrapper("rbasex", fit_xy_rbasex_benchmark)
+        except Exception:
+            pass
 
     def get_algorithm(self, name: str) -> Optional[AlgorithmWrapper]:
         return self.algorithms.get(name)

@@ -1,0 +1,138 @@
+Feature Hansen-Law forward-driven comprehensive sweep
+Data mode: xy_ideal, add_noise=False, psf_sigma_mm=0, dld_resolution_mm=0
+Forward thermal setting: T_beam=0 K (no thermal motion broadening)
+Reconstructor mode: feature_hansenlaw_fusion(ideal_mode=True, run_followup_stages=False, enable_uncertainty_analysis=False, line_shape=gaussian)
+Design mode: both, repeats=1
+
+Total scenarios: 1009
+- OFAT scenarios: 48
+- Pairwise scenarios: 961
+
+Algorithm flow (feature_hansenlaw_fusion):
+- XY points -> radial m0 profile histogram -> Hansen-Law inverse (rho0)
+- Multi-scale peak detection (prominence + curvature + radius weighting)
+- Local Gaussian refinement for each peak (r0, sigma, amp)
+- Beta estimation fusion (moment + FFT + curve fit + WLS)
+- Area/BR estimation via probabilistic responsibility assignment
+
+Design (range / points / interval):
+- n_peaks: points=4, levels=[1, 2, 3, 4], unit=count, interval=step=1, desc=number of rings
+- center_r_mm: points=8, levels=[4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0], unit=mm, interval=step=2.0 mm, desc=overall radius location
+- separation_mm: points=5, levels=[1.2, 2.0, 3.0, 4.5, 6.0], unit=mm, interval=non-uniform dense points, desc=distance between adjacent rings
+- sigma_mm: points=6, levels=[0.15, 0.25, 0.35, 0.45, 0.55, 0.7], unit=mm, interval=approx step=0.10 mm, desc=radial width
+- beta_value: points=13, levels=[-1.0, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0], unit=dimensionless, interval=step=0.25, desc=anisotropy beta
+- dominant_ratio: points=6, levels=[1.0, 1.5, 2.0, 3.0, 5.0, 10.0], unit=ratio, interval=non-uniform dense points, desc=peak-1 BR ratio vs others
+- n_events: points=6, levels=[5000, 10000, 20000, 50000, 100000, 200000], unit=events, interval=roughly log-spaced, desc=detected event count
+
+Fixed baseline params:
+- psf_sigma_mm=0.0
+- dld_resolution_mm=0.0
+- pixel_size_mm=0.05
+- vmi_k=0.01
+- forward_temperature_k=0.0
+
+Overall performance:
+- Npk_err%: mean=0.0000, median=0.0000, p90=0.0000, p99=0.0000
+- r0_err%: mean=1.1365, median=0.1958, p90=2.0659, p99=19.1726
+- sigma_err%: mean=14.5621, median=12.6513, p90=27.2503, p99=45.6635
+- beta_abs_err: mean=0.0417, median=0.0341, p90=0.0771, p99=0.1782
+- BR_err%: mean=27.5812, median=25.5866, p90=34.9460, p99=169.5173
+- Time(s): mean=0.2567, median=0.2409, p90=0.3232, p99=0.4824
+
+OFAT per-factor level stats (mean / median / p90):
+- n_peaks:
+  - level=1, r0%=(0.5027/0.5027/0.5027), sigma%=(11.0712/11.0712/11.0712), beta_abs=(0.0550/0.0550/0.0550), BR%=(0.0000/0.0000/0.0000)
+  - level=2, r0%=(0.1601/0.1601/0.1601), sigma%=(11.1336/11.1336/11.1336), beta_abs=(0.0046/0.0046/0.0046), BR%=(30.0039/30.0039/30.0039)
+  - level=3, r0%=(0.3107/0.3107/0.3107), sigma%=(3.4814/3.4814/3.4814), beta_abs=(0.0435/0.0435/0.0435), BR%=(24.7636/24.7636/24.7636)
+  - level=4, r0%=(0.5823/0.5823/0.5823), sigma%=(15.2199/15.2199/15.2199), beta_abs=(0.0602/0.0602/0.0602), BR%=(31.4574/31.4574/31.4574)
+- center_r_mm:
+  - level=4.0, r0%=(1.2983/1.2983/1.2983), sigma%=(23.8601/23.8601/23.8601), beta_abs=(0.0296/0.0296/0.0296), BR%=(27.0970/27.0970/27.0970)
+  - level=6.0, r0%=(0.4636/0.4636/0.4636), sigma%=(5.7787/5.7787/5.7787), beta_abs=(0.0289/0.0289/0.0289), BR%=(27.2574/27.2574/27.2574)
+  - level=8.0, r0%=(0.1958/0.1958/0.1958), sigma%=(13.0269/13.0269/13.0269), beta_abs=(0.0356/0.0356/0.0356), BR%=(30.1771/30.1771/30.1771)
+  - level=10.0, r0%=(0.3267/0.3267/0.3267), sigma%=(8.5486/8.5486/8.5486), beta_abs=(0.0227/0.0227/0.0227), BR%=(28.1128/28.1128/28.1128)
+  - level=12.0, r0%=(0.0656/0.0656/0.0656), sigma%=(4.7894/4.7894/4.7894), beta_abs=(0.0412/0.0412/0.0412), BR%=(23.9881/23.9881/23.9881)
+  - level=14.0, r0%=(0.1154/0.1154/0.1154), sigma%=(13.2135/13.2135/13.2135), beta_abs=(0.0121/0.0121/0.0121), BR%=(24.7432/24.7432/24.7432)
+  - level=16.0, r0%=(0.0169/0.0169/0.0169), sigma%=(11.7906/11.7906/11.7906), beta_abs=(0.0027/0.0027/0.0027), BR%=(25.1778/25.1778/25.1778)
+  - level=18.0, r0%=(0.0262/0.0262/0.0262), sigma%=(20.8672/20.8672/20.8672), beta_abs=(0.0104/0.0104/0.0104), BR%=(25.6866/25.6866/25.6866)
+- separation_mm:
+  - level=1.2, r0%=(0.2051/0.2051/0.2051), sigma%=(17.6787/17.6787/17.6787), beta_abs=(0.0536/0.0536/0.0536), BR%=(29.0713/29.0713/29.0713)
+  - level=2.0, r0%=(0.1765/0.1765/0.1765), sigma%=(6.1757/6.1757/6.1757), beta_abs=(0.0643/0.0643/0.0643), BR%=(29.1138/29.1138/29.1138)
+  - level=3.0, r0%=(0.4093/0.4093/0.4093), sigma%=(5.4279/5.4279/5.4279), beta_abs=(0.0292/0.0292/0.0292), BR%=(25.5557/25.5557/25.5557)
+  - level=4.5, r0%=(0.1602/0.1602/0.1602), sigma%=(6.8412/6.8412/6.8412), beta_abs=(0.0246/0.0246/0.0246), BR%=(22.1687/22.1687/22.1687)
+  - level=6.0, r0%=(0.1349/0.1349/0.1349), sigma%=(23.3336/23.3336/23.3336), beta_abs=(0.0140/0.0140/0.0140), BR%=(28.3597/28.3597/28.3597)
+- sigma_mm:
+  - level=0.15, r0%=(0.0140/0.0140/0.0140), sigma%=(8.7044/8.7044/8.7044), beta_abs=(0.0434/0.0434/0.0434), BR%=(24.5531/24.5531/24.5531)
+  - level=0.25, r0%=(0.1092/0.1092/0.1092), sigma%=(19.2540/19.2540/19.2540), beta_abs=(0.0373/0.0373/0.0373), BR%=(27.1103/27.1103/27.1103)
+  - level=0.35, r0%=(0.0946/0.0946/0.0946), sigma%=(5.2501/5.2501/5.2501), beta_abs=(0.0507/0.0507/0.0507), BR%=(27.1926/27.1926/27.1926)
+  - level=0.45, r0%=(0.5506/0.5506/0.5506), sigma%=(10.8690/10.8690/10.8690), beta_abs=(0.0064/0.0064/0.0064), BR%=(34.2598/34.2598/34.2598)
+  - level=0.55, r0%=(1.6185/1.6185/1.6185), sigma%=(31.4251/31.4251/31.4251), beta_abs=(0.0179/0.0179/0.0179), BR%=(30.0088/30.0088/30.0088)
+  - level=0.7, r0%=(3.9309/3.9309/3.9309), sigma%=(49.5393/49.5393/49.5393), beta_abs=(0.0388/0.0388/0.0388), BR%=(7.3276/7.3276/7.3276)
+- beta_value:
+  - level=-1.0, r0%=(0.1477/0.1477/0.1477), sigma%=(25.6148/25.6148/25.6148), beta_abs=(0.1272/0.1272/0.1272), BR%=(40.9949/40.9949/40.9949)
+  - level=-0.75, r0%=(0.0490/0.0490/0.0490), sigma%=(6.8512/6.8512/6.8512), beta_abs=(0.0729/0.0729/0.0729), BR%=(27.5489/27.5489/27.5489)
+  - level=-0.5, r0%=(0.1685/0.1685/0.1685), sigma%=(8.4377/8.4377/8.4377), beta_abs=(0.0388/0.0388/0.0388), BR%=(33.2571/33.2571/33.2571)
+  - level=-0.25, r0%=(0.3402/0.3402/0.3402), sigma%=(10.8467/10.8467/10.8467), beta_abs=(0.0380/0.0380/0.0380), BR%=(32.6605/32.6605/32.6605)
+  - level=0.0, r0%=(0.1581/0.1581/0.1581), sigma%=(1.4525/1.4525/1.4525), beta_abs=(0.0130/0.0130/0.0130), BR%=(25.0404/25.0404/25.0404)
+  - level=0.25, r0%=(0.2158/0.2158/0.2158), sigma%=(8.3159/8.3159/8.3159), beta_abs=(0.0333/0.0333/0.0333), BR%=(19.0840/19.0840/19.0840)
+  - level=0.5, r0%=(0.1888/0.1888/0.1888), sigma%=(4.2241/4.2241/4.2241), beta_abs=(0.0361/0.0361/0.0361), BR%=(23.9370/23.9370/23.9370)
+  - level=0.75, r0%=(0.0938/0.0938/0.0938), sigma%=(12.8889/12.8889/12.8889), beta_abs=(0.0452/0.0452/0.0452), BR%=(29.1658/29.1658/29.1658)
+  - level=1.0, r0%=(0.0575/0.0575/0.0575), sigma%=(4.4963/4.4963/4.4963), beta_abs=(0.0335/0.0335/0.0335), BR%=(25.0337/25.0337/25.0337)
+  - level=1.25, r0%=(0.6234/0.6234/0.6234), sigma%=(9.2770/9.2770/9.2770), beta_abs=(0.0454/0.0454/0.0454), BR%=(15.6770/15.6770/15.6770)
+  - level=1.5, r0%=(0.0669/0.0669/0.0669), sigma%=(9.5714/9.5714/9.5714), beta_abs=(0.0342/0.0342/0.0342), BR%=(24.8610/24.8610/24.8610)
+  - level=1.75, r0%=(0.1979/0.1979/0.1979), sigma%=(4.1704/4.1704/4.1704), beta_abs=(0.0508/0.0508/0.0508), BR%=(22.6451/22.6451/22.6451)
+  - level=2.0, r0%=(0.2537/0.2537/0.2537), sigma%=(8.0282/8.0282/8.0282), beta_abs=(0.0000/0.0000/0.0000), BR%=(22.9944/22.9944/22.9944)
+- dominant_ratio:
+  - level=1.0, r0%=(0.2235/0.2235/0.2235), sigma%=(7.3038/7.3038/7.3038), beta_abs=(0.0552/0.0552/0.0552), BR%=(28.3272/28.3272/28.3272)
+  - level=1.5, r0%=(0.2791/0.2791/0.2791), sigma%=(12.8050/12.8050/12.8050), beta_abs=(0.0536/0.0536/0.0536), BR%=(23.7856/23.7856/23.7856)
+  - level=2.0, r0%=(0.1109/0.1109/0.1109), sigma%=(6.3622/6.3622/6.3622), beta_abs=(0.0131/0.0131/0.0131), BR%=(16.3324/16.3324/16.3324)
+  - level=3.0, r0%=(0.0234/0.0234/0.0234), sigma%=(4.4961/4.4961/4.4961), beta_abs=(0.0476/0.0476/0.0476), BR%=(14.6072/14.6072/14.6072)
+  - level=5.0, r0%=(0.1814/0.1814/0.1814), sigma%=(6.8380/6.8380/6.8380), beta_abs=(0.0423/0.0423/0.0423), BR%=(10.3997/10.3997/10.3997)
+  - level=10.0, r0%=(18.0045/18.0045/18.0045), sigma%=(22.4524/22.4524/22.4524), beta_abs=(0.0471/0.0471/0.0471), BR%=(182.4871/182.4871/182.4871)
+- n_events:
+  - level=5000, r0%=(0.2815/0.2815/0.2815), sigma%=(12.7204/12.7204/12.7204), beta_abs=(0.0723/0.0723/0.0723), BR%=(26.0919/26.0919/26.0919)
+  - level=10000, r0%=(0.3527/0.3527/0.3527), sigma%=(14.8061/14.8061/14.8061), beta_abs=(0.0526/0.0526/0.0526), BR%=(21.5528/21.5528/21.5528)
+  - level=20000, r0%=(0.4552/0.4552/0.4552), sigma%=(13.2359/13.2359/13.2359), beta_abs=(0.0269/0.0269/0.0269), BR%=(30.9344/30.9344/30.9344)
+  - level=50000, r0%=(0.9697/0.9697/0.9697), sigma%=(3.8778/3.8778/3.8778), beta_abs=(0.0340/0.0340/0.0340), BR%=(24.5118/24.5118/24.5118)
+  - level=100000, r0%=(0.0399/0.0399/0.0399), sigma%=(2.4114/2.4114/2.4114), beta_abs=(0.0227/0.0227/0.0227), BR%=(25.7826/25.7826/25.7826)
+  - level=200000, r0%=(0.1000/0.1000/0.1000), sigma%=(2.8263/2.8263/2.8263), beta_abs=(0.0290/0.0290/0.0290), BR%=(24.6148/24.6148/24.6148)
+
+Pairwise interaction sensitivity (delta=max-min mean):
+- r0_err%:
+  - n_peaks x separation_mm: delta=36.1168
+  - beta_value x dominant_ratio: delta=31.0629
+  - sigma_mm x dominant_ratio: delta=26.1265
+  - separation_mm x dominant_ratio: delta=19.1636
+  - n_peaks x dominant_ratio: delta=18.6119
+  - dominant_ratio x n_events: delta=18.6038
+  - center_r_mm x dominant_ratio: delta=18.5240
+  - n_peaks x center_r_mm: delta=11.4360
+- sigma_err%:
+  - center_r_mm x separation_mm: delta=90.9197
+  - center_r_mm x sigma_mm: delta=62.7842
+  - sigma_mm x beta_value: delta=45.8599
+  - sigma_mm x dominant_ratio: delta=44.0066
+  - n_peaks x sigma_mm: delta=42.7984
+  - separation_mm x sigma_mm: delta=41.9513
+  - sigma_mm x n_events: delta=41.3811
+  - center_r_mm x n_events: delta=40.7314
+- beta_abs_err:
+  - n_peaks x beta_value: delta=0.2249
+  - beta_value x dominant_ratio: delta=0.2221
+  - center_r_mm x beta_value: delta=0.2019
+  - sigma_mm x beta_value: delta=0.1950
+  - sigma_mm x n_events: delta=0.1814
+  - beta_value x n_events: delta=0.1760
+  - separation_mm x n_events: delta=0.1643
+  - center_r_mm x n_events: delta=0.1463
+- BR_err%:
+  - sigma_mm x dominant_ratio: delta=199.5676
+  - beta_value x dominant_ratio: delta=188.9548
+  - separation_mm x dominant_ratio: delta=172.3396
+  - n_peaks x dominant_ratio: delta=169.7149
+  - center_r_mm x dominant_ratio: delta=163.4455
+  - dominant_ratio x n_events: delta=157.4511
+  - sigma_mm x beta_value: delta=45.9349
+  - n_peaks x sigma_mm: delta=40.2966
+
+Strict target hit count (Npk=0, r0<=5%, beta<=0.05, sigma<=10%, BR<=15%):
+- strict count=55/1009 (5.45%)

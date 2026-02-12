@@ -11,6 +11,7 @@ from scipy.signal import find_peaks
 
 _EPS = 1e-12
 _LAST_PIPELINE_STATE: Dict[str, Any] = {}
+_FORWARD_MODEL_CACHE: Dict[Tuple[int, float, float, float], np.ndarray] = {}
 
 
 @dataclass
@@ -34,6 +35,8 @@ def fit_xy_feature_hansenlaw_p2(
     **kwargs: Any,
 ) -> List[Dict[str, float]]:
     ideal_mode = bool(kwargs.get("ideal_mode", False))
+    forward_consistent_sigma = bool(kwargs.get("forward_consistent_sigma", ideal_mode))
+    br_background_em = bool(kwargs.get("br_background_em", False))
     cfg = ExtractConfig(
         radial_bins=int(kwargs.get("radial_bins", 560 if ideal_mode else 512)),
         profile_smooth_sigma=float(kwargs.get("profile_smooth_sigma", 1.1 if ideal_mode else 1.4)),
@@ -44,12 +47,21 @@ def fit_xy_feature_hansenlaw_p2(
         beta_window_sigma_mult=float(kwargs.get("beta_window_sigma_mult", 1.4 if ideal_mode else 1.8)),
     )
 
-    peaks, context = extract_hansenlaw(xy_data=xy_data, n_peaks=n_peaks, config=cfg, return_context=True)
+    peaks, context = extract_hansenlaw(
+        xy_data=xy_data,
+        n_peaks=n_peaks,
+        config=cfg,
+        return_context=True,
+        forward_consistent_sigma=forward_consistent_sigma,
+        br_background_em=br_background_em,
+    )
     _LAST_PIPELINE_STATE.clear()
     _LAST_PIPELINE_STATE.update(
         {
             "followup_enabled": bool(kwargs.get("run_followup_stages", False)),
             "ideal_mode": ideal_mode,
+            "forward_consistent_sigma": forward_consistent_sigma,
+            "br_background_em": br_background_em,
             "line_shape_requested": str(kwargs.get("line_shape", "gaussian")),
             "line_shape_used": "gaussian",
             "xy_count": int(context.get("xy_count", 0)),
@@ -64,6 +76,8 @@ def extract_hansenlaw(
     *,
     config: Optional[ExtractConfig] = None,
     return_context: bool = False,
+    forward_consistent_sigma: bool = True,
+    br_background_em: bool = True,
 ) -> Any:
     cfg = config or ExtractConfig()
     arr = _sanitize_xy(xy_data)
@@ -116,13 +130,14 @@ def extract_hansenlaw(
         radii=centers,
         peak_indices=peak_indices,
         refine_window_bins=cfg.refine_window_bins,
+        forward_consistent_sigma=bool(forward_consistent_sigma),
     )
     if not peaks:
         return ([], {}) if return_context else []
 
     _regularize_sigmas(peaks)
     _estimate_beta_for_peaks(peaks=peaks, x=x, y=y, r=r, theta=theta, beta_window_sigma_mult=max(float(cfg.beta_window_sigma_mult), 1.0))
-    _assign_probabilistic_amplitudes(peaks=peaks, r=r)
+    _assign_probabilistic_amplitudes(peaks=peaks, r=r, dr=dr, use_background_em=bool(br_background_em))
 
     if n_peaks is not None and int(n_peaks) > 0:
         nn = int(n_peaks)
@@ -402,6 +417,7 @@ def _refine_peaks_gaussian(
     radii: np.ndarray,
     peak_indices: Sequence[int],
     refine_window_bins: int,
+    forward_consistent_sigma: bool = True,
 ) -> List[Dict[str, float]]:
     peaks: List[Dict[str, float]] = []
     n = len(profile)
@@ -450,6 +466,7 @@ def _refine_peaks_gaussian(
             amp_fit = float(np.max(y_pos))
 
         if aux_profile is not None and len(aux_profile) == n:
+            sigma_aux = float("nan")
             sigma_aux = _fit_sigma_from_aux_profile(
                 aux_profile=np.asarray(aux_profile, dtype=float),
                 radii=radii,
@@ -461,6 +478,22 @@ def _refine_peaks_gaussian(
             if np.isfinite(sigma_aux):
                 sigma_aux = float(np.clip(sigma_aux, 0.04, max(2.5, 0.35 * r0_fit + 0.8)))
                 sigma_fit = 0.60 * float(max(sigma_fit, 0.02)) + 0.40 * sigma_aux
+            need_forward_refine = bool(forward_consistent_sigma)
+            if need_forward_refine and np.isfinite(sigma_aux):
+                rel_gap = abs(float(sigma_aux) - float(sigma_fit)) / max(float(sigma_fit), 1e-6)
+                need_forward_refine = bool((sigma_fit < 0.58) or (rel_gap > 0.20))
+            if need_forward_refine:
+                r0_fc, sigma_fc = _forward_consistent_refine_from_aux_profile(
+                    aux_profile=np.asarray(aux_profile, dtype=float),
+                    radii=radii,
+                    r0_init=float(r0_fit),
+                    sigma_init=float(max(sigma_fit, 0.02)),
+                    dr=dr,
+                    half_window=max(3 * half_window, 30),
+                )
+                if np.isfinite(r0_fc) and np.isfinite(sigma_fc):
+                    r0_fit = 0.70 * float(r0_fit) + 0.30 * float(r0_fc)
+                    sigma_fit = 0.55 * float(max(sigma_fit, 0.02)) + 0.45 * float(max(sigma_fc, 0.02))
 
         area_local = float(np.trapz(y_pos, xw)) if len(xw) > 1 else float(np.max(y_pos) * dr)
         peaks.append(
@@ -472,6 +505,104 @@ def _refine_peaks_gaussian(
             }
         )
     return peaks
+
+
+def _forward_projected_ring_profile(radii: np.ndarray, r0: float, sigma: float, dr: float) -> np.ndarray:
+    rr = np.asarray(radii, dtype=float)
+    sig = float(max(sigma, max(0.75 * dr, 0.02)))
+    r0v = float(max(r0, 0.0))
+    key = (len(rr), round(float(dr), 6), round(r0v, 2), round(sig, 3))
+    cached = _FORWARD_MODEL_CACHE.get(key)
+    if cached is not None:
+        return cached
+    src = np.exp(-0.5 * ((rr - r0v) / sig) ** 2)
+    src = np.maximum(src, 0.0)
+    try:
+        import abel
+
+        try:
+            proj = abel.hansenlaw.hansenlaw_transform(src, direction="forward", dr=float(max(dr, 1e-6)))
+        except TypeError:
+            proj = abel.hansenlaw.hansenlaw_transform(src, direction="forward")
+        proj = np.asarray(proj, dtype=float)
+    except Exception:
+        proj = np.zeros_like(src)
+        for i, yv in enumerate(rr):
+            mask = rr >= yv
+            if not np.any(mask):
+                continue
+            rv = rr[mask]
+            sv = src[mask]
+            denom = np.sqrt(np.maximum(rv * rv - yv * yv, 1e-12))
+            integrand = sv * rv / denom
+            proj[i] = 2.0 * float(np.trapz(integrand, rv))
+    proj = np.nan_to_num(np.asarray(proj, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    proj = np.maximum(proj, 0.0)
+    if len(proj) > 5:
+        proj = gaussian_filter1d(proj, sigma=0.6, mode="nearest")
+    if len(_FORWARD_MODEL_CACHE) > 12000:
+        _FORWARD_MODEL_CACHE.clear()
+    _FORWARD_MODEL_CACHE[key] = proj
+    return proj
+
+
+def _forward_consistent_refine_from_aux_profile(
+    *,
+    aux_profile: np.ndarray,
+    radii: np.ndarray,
+    r0_init: float,
+    sigma_init: float,
+    dr: float,
+    half_window: int,
+) -> Tuple[float, float]:
+    n = len(aux_profile)
+    if n < 9:
+        return float("nan"), float("nan")
+    i_center = int(np.argmin(np.abs(radii - float(r0_init))))
+    i0 = max(i_center - int(half_window), 0)
+    i1 = min(i_center + int(half_window) + 1, n)
+    xw = np.asarray(radii[i0:i1], dtype=float)
+    yw = np.maximum(np.asarray(aux_profile[i0:i1], dtype=float), 0.0)
+    if len(xw) < 7 or float(np.max(yw)) <= 0:
+        return float("nan"), float("nan")
+
+    sig0 = float(max(sigma_init, 0.03))
+    sig_min = float(max(0.025, min(0.7 * sig0, 0.10)))
+    sig_max = float(max(sig_min + 0.03, min(2.8, 2.2 * sig0 + 0.35)))
+    sigma_grid = np.linspace(sig_min, sig_max, 6)
+    r_step = float(max(0.45 * dr, 0.06 * sig0, 0.01))
+    r_grid = np.array([r0_init - r_step, r0_init, r0_init + r_step], dtype=float)
+    r_grid = np.clip(r_grid, float(xw[0]), float(xw[-1]))
+
+    best_err = np.inf
+    best_r0 = float("nan")
+    best_sigma = float("nan")
+    ones = np.ones_like(xw)
+    y_scale = np.maximum(yw, 1.0)
+
+    for r0v in r_grid:
+        for sig in sigma_grid:
+            model_full = _forward_projected_ring_profile(radii=np.asarray(radii, dtype=float), r0=float(r0v), sigma=float(sig), dr=float(dr))
+            mw = np.maximum(np.asarray(model_full[i0:i1], dtype=float), 0.0)
+            if float(np.max(mw)) <= 0:
+                continue
+            X = np.column_stack([mw, ones])
+            try:
+                coef, _, _, _ = np.linalg.lstsq(X, yw, rcond=None)
+            except np.linalg.LinAlgError:
+                continue
+            amp = float(max(coef[0], 0.0))
+            floor = float(max(coef[1], 0.0))
+            pred = amp * mw + floor
+            err = float(np.mean(((pred - yw) ** 2) / y_scale))
+            if err < best_err:
+                best_err = err
+                best_r0 = float(r0v)
+                best_sigma = float(sig)
+
+    if not np.isfinite(best_r0) or not np.isfinite(best_sigma):
+        return float("nan"), float("nan")
+    return float(best_r0), float(best_sigma)
 
 
 def _regularize_sigmas(peaks: List[Dict[str, float]]) -> None:
@@ -638,24 +769,64 @@ def _beta_from_wls(phi: np.ndarray) -> Tuple[float, float]:
     return beta, conf
 
 
-def _assign_probabilistic_amplitudes(peaks: List[Dict[str, float]], r: np.ndarray) -> None:
+def _assign_probabilistic_amplitudes(
+    peaks: List[Dict[str, float]],
+    r: np.ndarray,
+    dr: float = 0.05,
+    use_background_em: bool = True,
+) -> None:
     if not peaks or len(r) == 0:
         return
     n = len(peaks)
-    resp = np.zeros((len(r), n), dtype=float)
+    rr = np.asarray(r, dtype=float)
+    kernels = np.zeros((len(rr), n), dtype=float)
     for k, peak in enumerate(peaks):
         r0 = float(peak.get("r0", 0.0))
-        sigma = float(max(peak.get("sigma", 0.05), 0.02))
-        core = np.exp(-0.5 * ((r - r0) / sigma) ** 2) / (sigma + _EPS)
-        resp[:, k] = core
-    bg = np.full((len(r), 1), 1e-4, dtype=float)
-    row_sum = np.sum(resp, axis=1, keepdims=True) + bg
-    resp = resp / np.maximum(row_sum, _EPS)
-    amps = np.sum(resp, axis=0)
-    amp_sum = float(np.sum(amps))
-    if amp_sum <= _EPS:
-        amps = np.ones(n, dtype=float) / float(n)
+        sigma = float(max(peak.get("sigma", 0.05), 1.3 * dr, 0.02))
+        core = np.exp(-0.5 * ((rr - r0) / sigma) ** 2) / (sigma + _EPS)
+        kernels[:, k] = core
+
+    if not use_background_em:
+        resp = kernels / np.maximum(np.sum(kernels, axis=1, keepdims=True) + 1e-4, _EPS)
+        amps = np.sum(resp, axis=0)
+        amp_sum = float(np.sum(amps))
+        if amp_sum <= _EPS:
+            amps = np.ones(n, dtype=float) / float(n)
+        else:
+            amps = amps / amp_sum
+        for k, peak in enumerate(peaks):
+            peak["amp"] = float(max(amps[k], 1e-9))
+        return
+
+    init = np.array([max(float(p.get("amp", 0.0)), 1e-6) for p in peaks], dtype=float)
+    if float(np.sum(init)) <= _EPS:
+        init[:] = 1.0 / float(n)
     else:
-        amps = amps / amp_sum
+        init = init / float(np.sum(init))
+    w_bg = 0.03
+    w_comp = init * (1.0 - w_bg)
+    rmax = float(max(np.max(rr), _EPS))
+    bg_shape = 0.30 + 0.70 * (rr / rmax)
+    bg_shape = bg_shape / max(float(np.mean(bg_shape)), _EPS)
+
+    for _ in range(8):
+        mix = kernels * w_comp[None, :]
+        bg = (w_bg * bg_shape)[:, None]
+        denom = np.sum(mix, axis=1, keepdims=True) + bg + _EPS
+        resp = mix / denom
+        resp_bg = bg[:, 0] / denom[:, 0]
+        Nk = np.sum(resp, axis=0)
+        Nbg = float(np.sum(resp_bg))
+        total = float(np.sum(Nk) + Nbg)
+        if total <= _EPS:
+            break
+        w_bg = float(np.clip(Nbg / total, 0.0, 0.25))
+        w_comp = Nk / total
+        if float(np.sum(w_comp)) <= _EPS:
+            w_comp = np.ones(n, dtype=float) * ((1.0 - w_bg) / float(n))
+        else:
+            w_comp = w_comp / float(np.sum(w_comp)) * (1.0 - w_bg)
+
+    amps = w_comp / max(float(np.sum(w_comp)), _EPS)
     for k, peak in enumerate(peaks):
         peak["amp"] = float(max(amps[k], 1e-9))

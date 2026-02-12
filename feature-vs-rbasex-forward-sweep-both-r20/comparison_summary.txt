@@ -1,0 +1,44 @@
+Feature Hansen-Law vs rBasex forward-driven sweep
+Design mode: both, repeats=20
+Data mode: xy_ideal, add_noise=False, T_beam=0 K
+
+Total scenario-evaluations: 40360
+Total scenarios: 20180
+
+[feature_hansenlaw_fusion]
+- Npk_err%: mean=0.0363, median=0.0000, p90=0.0000, p99=0.0000
+- r0_err%: mean=1.2206, median=0.1927, p90=1.9597, p99=20.5439
+- sigma_err%: mean=14.4190, median=12.3100, p90=26.6499, p99=45.5657
+- beta_abs_err: mean=0.0420, median=0.0339, p90=0.0772, p99=0.1728
+- BR_err%: mean=28.1191, median=25.7319, p90=35.5585, p99=172.4374
+- Time(s): mean=0.1584, median=0.1359, p90=0.2587, p99=0.3390
+- Repeat stability (std across repeats per same factor-level):
+  - Npk_err%: mean_std=0.1007, median_std=0.0000, p90_std=0.0000
+  - r0_err%: mean_std=0.9535, median_std=0.2741, p90_std=2.0601
+  - sigma_err%: mean_std=4.6003, median_std=4.2005, p90_std=7.2671
+  - beta_abs_err: mean_std=0.0172, median_std=0.0147, p90_std=0.0259
+  - BR_err%: mean_std=5.6368, median_std=3.0227, p90_std=7.0997
+  - Time(s): mean_std=0.0092, median_std=0.0055, p90_std=0.0198
+
+[rbasex]
+- Npk_err%: mean=1.7290, median=0.0000, p90=0.0000, p99=50.0000
+- r0_err%: mean=7.2480, median=1.3316, p90=23.4903, p99=39.6853
+- sigma_err%: mean=48.7759, median=45.9835, p90=90.0022, p99=95.1259
+- beta_abs_err: mean=0.4392, median=0.1366, p90=1.3534, p99=2.5000
+- BR_err%: mean=22.0584, median=15.1188, p90=44.9623, p99=117.3461
+- Time(s): mean=0.0081, median=0.0072, p90=0.0109, p99=0.0235
+- Repeat stability (std across repeats per same factor-level):
+  - Npk_err%: mean_std=1.8805, median_std=0.0000, p90_std=10.0000
+  - r0_err%: mean_std=2.8270, median_std=1.5844, p90_std=6.6320
+  - sigma_err%: mean_std=10.7882, median_std=10.6470, p90_std=16.8475
+  - beta_abs_err: mean_std=0.2822, median_std=0.2591, p90_std=0.6128
+  - BR_err%: mean_std=9.8833, median_std=6.5524, p90_std=21.2909
+  - Time(s): mean_std=0.0012, median_std=0.0010, p90_std=0.0022
+
+Per-scenario lower-is-better win counts:
+- Npk_err%: feature=668, rbasex=17, tie=19495 (total=20180)
+- r0_err%: feature=16975, rbasex=3205, tie=0 (total=20180)
+- sigma_err%: feature=18954, rbasex=1226, tie=0 (total=20180)
+- beta_abs_err: feature=17412, rbasex=2768, tie=0 (total=20180)
+- BR_err%: feature=5455, rbasex=13825, tie=900 (total=20180)
+- Time(s): feature=0, rbasex=20180, tie=0 (total=20180)
