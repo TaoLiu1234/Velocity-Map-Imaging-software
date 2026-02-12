@@ -1,0 +1,36 @@
+﻿# Windows 保留名防护
+nul
+con
+prn
+aux
+com[1-9]
+lpt[1-9]
+
+# 嵌套仓库忽略
+.pnpm-store/
+Openprism/open-prism/
+# =============== 科研数据防护 ===============
+# 大型二进制数据文件
+*.pkl
+*.mat
+*.fly2
+*.exe
+*.key
+rings_checkpoint.pkl
+processed_data_final.pkl
+smart_recordings.pkl
+vision_recordings.pkl
+window_local_recordings.pkl
+
+# 仿真结果目录（可再生）
+results_*/
+sweep_*/
+xyplots_*/
+
+# 临时/配置文件
+temp_*.json
+workflow.json
+parameters.mat
+shilpa_data.mat
+particles_tao.fly2
+simion.*
