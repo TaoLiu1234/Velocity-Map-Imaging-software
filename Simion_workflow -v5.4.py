@@ -45,7 +45,7 @@ VIEWER_METHOD = "rmax"
 SAVE_FULL_PROCESSED_DATA = False
 # Keep checkpoints by default so long runs can resume after crashes/interruption.
 # Set True only when you intentionally want a clean restart.
-CLEAR_STALE_CHECKPOINTS = False
+CLEAR_STALE_CHECKPOINTS = True
 
 # === CONTROL FLAGS ===
 SKIP_INITIAL_WORKFLOW = True   # Skip front simulation stage, go directly to energy resolution analysis
@@ -53,8 +53,8 @@ SKIP_FOCUS_FILTERING = True    # Analyze all parameter combinations directly
 USE_PARALLEL_SIMION = False    # SIMION is kept serial to avoid race-condition failures
 
 KE_MIN = 1
-KE_MAX = 30
-NUM_KE_POINTS = 15
+KE_MAX = 15.5
+NUM_KE_POINTS = 3
 
 electron_energy_sequence = np.linspace(KE_MIN, KE_MAX, NUM_KE_POINTS)
 if KE_MIN >= KE_MAX:
@@ -63,12 +63,12 @@ if KE_MIN >= KE_MAX:
 Theta = 0 * 2 * np.pi / 360
 
 FIELD_MIN = 50
-FIELD_MAX = 300
-NUM_POINTS = 6
+FIELD_MAX = 50
+NUM_POINTS = 1
 
-LENS_MIN = 1
-LENS_MAX = 3
-NUM_LENS_POINTS = 6
+LENS_MIN = 1.33
+LENS_MAX = 1.33
+NUM_LENS_POINTS = 1
 
 NUM_GROUPS = 100
 
@@ -97,7 +97,7 @@ TIMING_VERBOSE = True
 SAVE_PER_RUN_SUMMARY = True     # Save each repeat before aggregation
 CHECKPOINT_INTERVAL = 100       # Save checkpoint shard every N attempted combinations
 GC_INTERVAL_COMBOS = 50         # Run gc.collect() every N attempted combinations
-Intraction_volume = True
+Intraction_volume = False
 Interaction_volume_range = 1 # mm
 
 if Intraction_volume == True:
@@ -344,7 +344,8 @@ def build_energy_resolution_summary(data):
                     'pair_count', 'pair_count_runs',
                     'dr_values', 'r_values', 'dr_over_r_values', 'dr_over_r_pairs',
                     'raw_ion_points_yz', 'raw_point_count', 'raw_point_format',
-                    'failure_reasons'
+                    'failure_reasons',
+                    'count_check_passed', 'plot_marker', 'plot_skip', 'pipeline_stage'
                 ]
                 for key in optional_fields:
                     if key in global_data:
@@ -883,6 +884,7 @@ else:
         enable_memory_optimization=True,
         checkpoint_interval=CHECKPOINT_INTERVAL,
         gc_interval_combos=GC_INTERVAL_COMBOS,
+        require_full_particle_capture=REQUIRE_FULL_PARTICLE_CAPTURE,
         detector_x_mm=DETECTOR_X_MM,
         detector_x_tol_mm=DETECTOR_X_TOL_MM,
         detector_y_range_mm=DETECTOR_Y_RANGE_MM,

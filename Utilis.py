@@ -51,46 +51,222 @@ def cleanup_memory(force=False):
         gc.collect()
 
 
+_CHECKPOINT_COMPACT_KEYS = {
+    'fwhm',
+    'fwhm_mean',
+    'fwhm_variance',
+    'fwhm_std',
+    'fwhm_runs',
+    'energy_resolution',
+    'energy_resolution_mean',
+    'energy_resolution_variance',
+    'energy_resolution_std',
+    'energy_resolution_runs',
+    'max_r',
+    'max_r_mean',
+    'max_r_variance',
+    'max_r_std',
+    'max_r_runs',
+    'r_max_all_points',
+    'r_max_all_points_runs',
+    'all_point_count_runs',
+    'generated_particles',
+    'generated_particles_per_run',
+    'detected_particles',
+    'detected_particles_runs',
+    'pair_count',
+    'pair_count_runs',
+    'dr_values',
+    'r_values',
+    'dr_over_r_values',
+    'dr_over_r_pairs',
+    'raw_ion_points_yz',
+    'raw_point_count',
+    'raw_point_format',
+    'total_runs',
+    'valid_run_count',
+    'valid',
+    'failure_reason',
+    'count_check_passed',
+    'plot_marker',
+    'plot_skip',
+    'pipeline_stage'
+}
+
+
+def _count_checkpoint_nodes(data):
+    count = 0
+    for fg_data in (data or {}).values():
+        if not isinstance(fg_data, dict):
+            continue
+        for lens_data in fg_data.values():
+            if not isinstance(lens_data, dict):
+                continue
+            count += len(lens_data)
+    return count
+
+
+def _set_checkpoint_node(container, fg, lens_vmi, ke, result):
+    if fg not in container:
+        container[fg] = {}
+    if lens_vmi not in container[fg]:
+        container[fg][lens_vmi] = {}
+    container[fg][lens_vmi][ke] = result
+
+
+def _merge_checkpoint_results(target, source):
+    for fg, fg_data in (source or {}).items():
+        if not isinstance(fg_data, dict):
+            continue
+        for lens_vmi, lens_data in fg_data.items():
+            if not isinstance(lens_data, dict):
+                continue
+            for ke, result in lens_data.items():
+                _set_checkpoint_node(target, fg, lens_vmi, ke, result)
+
+
+def _is_compact_checkpoint_data(data):
+    sample_checked = False
+    for fg_data in (data or {}).values():
+        if not isinstance(fg_data, dict):
+            return False
+        for lens_data in fg_data.values():
+            if not isinstance(lens_data, dict):
+                return False
+            for result in lens_data.values():
+                sample_checked = True
+                if not isinstance(result, dict):
+                    return False
+                keys = set(result.keys())
+                if not keys.issubset(_CHECKPOINT_COMPACT_KEYS):
+                    return False
+                break
+            break
+        break
+    return sample_checked
+
+
+def _compact_checkpoint_results(data):
+    if not data:
+        return {}
+    if _is_compact_checkpoint_data(data):
+        return data
+
+    essential_data = {}
+    for fg, fg_data in data.items():
+        if not isinstance(fg_data, dict):
+            continue
+        for lens_vmi, lens_data in fg_data.items():
+            if not isinstance(lens_data, dict):
+                continue
+            for ke, result in lens_data.items():
+                if not isinstance(result, dict):
+                    continue
+                compact_result = {
+                    'fwhm': result.get('fwhm'),
+                    'fwhm_mean': result.get('fwhm_mean'),
+                    'fwhm_variance': result.get('fwhm_variance'),
+                    'fwhm_std': result.get('fwhm_std'),
+                    'fwhm_runs': result.get('fwhm_runs'),
+                    'energy_resolution': result.get('energy_resolution'),
+                    'energy_resolution_mean': result.get('energy_resolution_mean'),
+                    'energy_resolution_variance': result.get('energy_resolution_variance'),
+                    'energy_resolution_std': result.get('energy_resolution_std'),
+                    'energy_resolution_runs': result.get('energy_resolution_runs'),
+                    'max_r': result.get('max_r'),
+                    'max_r_mean': result.get('max_r_mean'),
+                    'max_r_variance': result.get('max_r_variance'),
+                    'max_r_std': result.get('max_r_std'),
+                    'max_r_runs': result.get('max_r_runs'),
+                    'r_max_all_points': result.get('r_max_all_points'),
+                    'r_max_all_points_runs': result.get('r_max_all_points_runs', []),
+                    'all_point_count_runs': result.get('all_point_count_runs', []),
+                    'generated_particles': result.get('generated_particles'),
+                    'generated_particles_per_run': result.get('generated_particles_per_run'),
+                    'detected_particles': result.get('detected_particles'),
+                    'detected_particles_runs': result.get('detected_particles_runs'),
+                    'pair_count': result.get('pair_count'),
+                    'pair_count_runs': result.get('pair_count_runs'),
+                    'dr_values': result.get('dr_values', []),
+                    'r_values': result.get('r_values', []),
+                    'dr_over_r_values': result.get('dr_over_r_values', []),
+                    'dr_over_r_pairs': result.get('dr_over_r_pairs', []),
+                    'raw_ion_points_yz': result.get('raw_ion_points_yz', []),
+                    'raw_point_count': result.get('raw_point_count'),
+                    'raw_point_format': result.get('raw_point_format'),
+                    'total_runs': result.get('total_runs'),
+                    'valid_run_count': result.get('valid_run_count'),
+                    'valid': result.get('valid'),
+                    'failure_reason': result.get('failure_reason'),
+                    'count_check_passed': result.get('count_check_passed'),
+                    'plot_marker': result.get('plot_marker'),
+                    'plot_skip': result.get('plot_skip'),
+                    'pipeline_stage': result.get('pipeline_stage')
+                }
+                _set_checkpoint_node(essential_data, fg, lens_vmi, ke, compact_result)
+    return essential_data
+
+
+def _checkpoint_part_pattern(filename):
+    return f"{filename}_checkpoint_part_*.pkl"
+
+
+def _checkpoint_part_file(filename, checkpoint_num):
+    try:
+        idx = int(checkpoint_num)
+    except (TypeError, ValueError):
+        idx = 0
+    return f"{filename}_checkpoint_part_{idx:08d}.pkl"
+
+
+def _sorted_checkpoint_parts(filename):
+    files = glob.glob(_checkpoint_part_pattern(filename))
+
+    def _extract_num(path):
+        base = os.path.basename(path)
+        m = re.search(r'_checkpoint_part_(\d+)\.pkl$', base)
+        if not m:
+            return -1
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return -1
+
+    return sorted(files, key=lambda p: (_extract_num(p), p))
+
+
+def _save_checkpoint_payload_atomic(path, payload):
+    tmp_file = f"{path}.tmp"
+    with open(tmp_file, 'wb') as f:
+        pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_file, path)
+
+
 def save_checkpoint(data, filename, checkpoint_num, completed_combinations=None):
     """
-    Save intermediate results to a checkpoint file.
-    Only saves essential data (fwhm, energy_resolution, max_r) to minimize file size.
-    Also saves list of completed combinations for recovery.
-    
-    Args:
-        data: Data to save (fwhm_results dictionary)
-        filename: Base filename for checkpoint
-        checkpoint_num: Checkpoint number
-        completed_combinations: Set of completed (fg, lens_vmi, ke) tuples
+    Save checkpoint shard (incremental chunk) for recovery.
+
+    For long runs this avoids rewriting one ever-growing checkpoint file.
     """
-    # Use a single checkpoint file that gets overwritten
-    checkpoint_file = f"{filename}_checkpoint.pkl"
     try:
-        # Extract only essential data to reduce checkpoint size
-        essential_data = {}
-        for fg, fg_data in data.items():
-            essential_data[fg] = {}
-            for lens_vmi, lens_data in fg_data.items():
-                essential_data[fg][lens_vmi] = {}
-                for ke, result in lens_data.items():
-                    if result is not None:
-                        # Only save essential fields, skip large arrays
-                        essential_data[fg][lens_vmi][ke] = {
-                            'fwhm': result.get('fwhm'),
-                            'energy_resolution': result.get('energy_resolution'),
-                            'max_r': result.get('max_r')
-                        }
-        
-        # Save checkpoint with metadata
+        node_count = _count_checkpoint_nodes(data)
+        if node_count <= 0:
+            return None
+
+        checkpoint_file = _checkpoint_part_file(filename, checkpoint_num)
         checkpoint_data = {
-            'results': essential_data,
+            'results': _compact_checkpoint_results(data),
             'completed': list(completed_combinations) if completed_combinations else [],
-            'checkpoint_num': checkpoint_num
+            'checkpoint_num': int(checkpoint_num) if checkpoint_num is not None else 0,
+            'checkpoint_format': 'shard_v2'
         }
-        
-        with open(checkpoint_file, 'wb') as f:
-            pickle.dump(checkpoint_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-        print(f"  Checkpoint saved: {checkpoint_file} ({len(checkpoint_data['completed'])} completed)")
+        _save_checkpoint_payload_atomic(checkpoint_file, checkpoint_data)
+        print(
+            f"  Checkpoint shard saved: {checkpoint_file} "
+            f"(nodes={node_count}, completed={len(checkpoint_data['completed'])})"
+        )
         return checkpoint_file
     except Exception as e:
         print(f"  Warning: Could not save checkpoint: {e}")
@@ -107,22 +283,140 @@ def load_latest_checkpoint(filename):
     Returns:
         tuple: (fwhm_results dict, completed_combinations set, checkpoint_num) or (None, None, 0)
     """
-    checkpoint_file = f"{filename}_checkpoint.pkl"
-    try:
-        if os.path.exists(checkpoint_file):
-            with open(checkpoint_file, 'rb') as f:
-                checkpoint_data = pickle.load(f)
-            
-            results = checkpoint_data.get('results', {})
-            completed = set(tuple(c) for c in checkpoint_data.get('completed', []))
-            checkpoint_num = checkpoint_data.get('checkpoint_num', 0)
-            
-            print(f"  Loaded checkpoint: {len(completed)} combinations completed")
-            return results, completed, checkpoint_num
-    except Exception as e:
-        print(f"  Warning: Could not load checkpoint {checkpoint_file}: {e}")
-    
+    part_files = _sorted_checkpoint_parts(filename)
+    merged_file = f"{filename}_checkpoint_merged.pkl"
+    legacy_file = f"{filename}_checkpoint.pkl"
+
+    if part_files:
+        merged_results = {}
+        merged_completed = set()
+        latest_num = 0
+        loaded_parts = 0
+        for part_file in part_files:
+            try:
+                with open(part_file, 'rb') as f:
+                    checkpoint_data = pickle.load(f)
+                _merge_checkpoint_results(merged_results, checkpoint_data.get('results', {}))
+                merged_completed.update(tuple(c) for c in checkpoint_data.get('completed', []))
+                part_num = int(checkpoint_data.get('checkpoint_num', 0) or 0)
+                if part_num > latest_num:
+                    latest_num = part_num
+                loaded_parts += 1
+            except Exception as e:
+                print(f"  Warning: Could not load checkpoint shard {part_file}: {e}")
+        print(
+            f"  Loaded {loaded_parts} checkpoint shards: "
+            f"{_count_checkpoint_nodes(merged_results)} nodes, {len(merged_completed)} completed markers"
+        )
+        return merged_results, merged_completed, latest_num
+
+    for checkpoint_file in (merged_file, legacy_file):
+        try:
+            if os.path.exists(checkpoint_file):
+                with open(checkpoint_file, 'rb') as f:
+                    checkpoint_data = pickle.load(f)
+
+                results = checkpoint_data.get('results', {})
+                completed = set(tuple(c) for c in checkpoint_data.get('completed', []))
+                checkpoint_num = int(checkpoint_data.get('checkpoint_num', 0) or 0)
+                print(
+                    f"  Loaded checkpoint: {checkpoint_file} "
+                    f"({len(completed)} completed, nodes={_count_checkpoint_nodes(results)})"
+                )
+                return results, completed, checkpoint_num
+        except Exception as e:
+            print(f"  Warning: Could not load checkpoint {checkpoint_file}: {e}")
+
     return None, set(), 0
+
+
+def consolidate_checkpoints(filename, cleanup_parts=False):
+    """
+    Merge checkpoint shards into a single consolidated checkpoint file.
+    """
+    part_files = _sorted_checkpoint_parts(filename)
+    if not part_files:
+        return None
+
+    merged_results = {}
+    merged_completed = set()
+    latest_num = 0
+    for part_file in part_files:
+        try:
+            with open(part_file, 'rb') as f:
+                checkpoint_data = pickle.load(f)
+            _merge_checkpoint_results(merged_results, checkpoint_data.get('results', {}))
+            merged_completed.update(tuple(c) for c in checkpoint_data.get('completed', []))
+            part_num = int(checkpoint_data.get('checkpoint_num', 0) or 0)
+            if part_num > latest_num:
+                latest_num = part_num
+        except Exception as e:
+            print(f"  Warning: Could not read checkpoint shard {part_file} during consolidation: {e}")
+
+    merged_file = f"{filename}_checkpoint_merged.pkl"
+    payload = {
+        'results': _compact_checkpoint_results(merged_results),
+        'completed': list(merged_completed),
+        'checkpoint_num': latest_num,
+        'checkpoint_format': 'merged_v2',
+        'source_parts': len(part_files)
+    }
+    try:
+        _save_checkpoint_payload_atomic(merged_file, payload)
+        print(
+            f"  Consolidated {len(part_files)} checkpoint shards -> {merged_file} "
+            f"(nodes={_count_checkpoint_nodes(merged_results)})"
+        )
+    except Exception as e:
+        print(f"  Warning: Could not write consolidated checkpoint {merged_file}: {e}")
+        return None
+
+    if cleanup_parts:
+        for part_file in part_files:
+            try:
+                os.remove(part_file)
+            except Exception:
+                pass
+        legacy_file = f"{filename}_checkpoint.pkl"
+        if os.path.exists(legacy_file):
+            try:
+                os.remove(legacy_file)
+            except Exception:
+                pass
+
+    return merged_file
+
+
+def _has_valid_energy_value(result_dict):
+    if not isinstance(result_dict, dict):
+        return False
+    er = result_dict.get('energy_resolution_mean', result_dict.get('energy_resolution'))
+    try:
+        val = float(er)
+        return np.isfinite(val)
+    except (TypeError, ValueError):
+        return False
+
+
+def _checkpoint_result_has_required_pair_details(result_dict):
+    """
+    A checkpoint result is considered complete if it has at least one
+    recoverable metric payload:
+    - valid energy metric with dr_over_r_pairs, or
+    - raw ion payload (ion_n,y,z), or
+    - explicitly marked invalid node.
+    """
+    if not isinstance(result_dict, dict):
+        return False
+    raw_points = result_dict.get('raw_ion_points_yz')
+    has_raw_points = isinstance(raw_points, list) and len(raw_points) > 0
+    if not _has_valid_energy_value(result_dict):
+        if has_raw_points:
+            return True
+        return result_dict.get('valid') is False
+    pairs = result_dict.get('dr_over_r_pairs')
+    has_pairs = isinstance(pairs, list) and len(pairs) > 0
+    return has_pairs or has_raw_points
 
 
 def load_checkpoint(filename):
@@ -161,6 +455,46 @@ def clear_file_contents(*file_paths):
             print(f"Cleared contents of '{path}'")
         except Exception as e:
             print(f"Error clearing '{path}': {e}")
+
+
+def make_energy_resolution_temp_out_file(base_out_file="energy_resolution_out.txt"):
+    """
+    Create a unique temporary out-file path for one energy-resolution node.
+
+    This avoids repeatedly appending to a long-lived shared output file, which can
+    degrade I/O performance in large runs.
+    """
+    import tempfile
+
+    base_name = os.path.basename(base_out_file) if base_out_file else "energy_resolution_out.txt"
+    stem, ext = os.path.splitext(base_name)
+    if not ext:
+        ext = ".txt"
+    prefix = f"{stem}_node_"
+    fd, temp_path = tempfile.mkstemp(prefix=prefix, suffix=ext, dir=os.getcwd())
+    os.close(fd)
+    # We only need the path; runner writes the content.
+    try:
+        os.remove(temp_path)
+    except OSError:
+        pass
+    return temp_path
+
+
+def remove_file_with_retry(path, max_wait_s=6.0, step_s=0.2):
+    """Best-effort file cleanup for Windows file-lock timing."""
+    if not path:
+        return True
+    deadline = time.time() + max_wait_s
+    while time.time() < deadline:
+        try:
+            os.remove(path)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            time.sleep(step_s)
+    return not os.path.exists(path)
 
 
 # Define complex type hints for better readability
@@ -820,6 +1154,7 @@ def parse_out_file_memory_optimized(filename: str) -> dict:
     Key optimizations:
     - Uses regular dict instead of defaultdict
     - Only stores final positions (last point of each trajectory)
+    - Keeps final x/y/z coordinates for detector-acceptance filtering
     - Uses numpy arrays with float32 to reduce memory
     - Processes data in streaming fashion
     
@@ -829,33 +1164,45 @@ def parse_out_file_memory_optimized(filename: str) -> dict:
     Returns:
         A nested dictionary containing the parsed data with only final positions.
     """
-    param_pattern = re.compile(r'parameters\s*=\s*\[([^\]]+)\]')
-
     # Use regular dict instead of defaultdict
     data = {}
 
-    current_block_data = []
+    separator_token = "Begin Next Fly'm"
+    comment_prefix = '"'
+
+    current_block_last_points = {}
     current_fg = None
     current_lens_VMI = None
     current_ke = None
 
     try:
-        with open(filename, 'r') as f:
+        # Large read buffer improves throughput for 100s MB recording files
+        with open(filename, 'r', buffering=8 * 1024 * 1024, errors='ignore') as f:
             for line in f:
                 # Check if this is a block separator
-                if "Begin Next Fly'm" in line:
-                    if current_fg is not None and current_lens_VMI is not None and current_ke is not None and current_block_data:
-                        process_block_memory_optimized(data, current_fg, current_lens_VMI, current_ke, current_block_data)
-                    current_block_data = []
+                if separator_token in line:
+                    if current_fg is not None and current_lens_VMI is not None and current_ke is not None and current_block_last_points:
+                        process_block_memory_optimized(
+                            data,
+                            current_fg,
+                            current_lens_VMI,
+                            current_ke,
+                            current_block_last_points
+                        )
+                    current_block_last_points = {}
                     current_fg = None
                     current_lens_VMI = None
                     current_ke = None
                     continue
 
-                # Try to match parameter line
-                if (param_match := param_pattern.search(line)):
+                # Parse parameter line using string ops (faster than regex in hot loop)
+                if 'parameters' in line and '[' in line and ']' in line:
                     try:
-                        params_str = param_match.group(1)
+                        left = line.find('[')
+                        right = line.find(']', left + 1)
+                        if left == -1 or right == -1:
+                            continue
+                        params_str = line[left + 1:right]
                         params = [float(p.strip()) for p in params_str.split(',')]
                         if len(params) > 8:
                             current_fg = params[0]
@@ -871,20 +1218,33 @@ def parse_out_file_memory_optimized(filename: str) -> dict:
 
                 # Parse data line
                 line = line.strip()
-                if not line or line.startswith('"'):
+                if not line or line.startswith(comment_prefix):
                     continue
 
-                parts = [p.strip() for p in line.split(',')]
+                if current_fg is None or current_lens_VMI is None or current_ke is None:
+                    continue
+
+                # Fast path: no per-field strip list creation
+                parts = line.split(',', 3)
                 if len(parts) == 4:
                     try:
-                        ion_n, x, y, z = int(parts[0]), float(parts[1]), float(parts[2]), float(parts[3])
-                        current_block_data.append((ion_n, x, y, z))
+                        ion_n = int(parts[0])
+                        x = float(parts[1])
+                        y = float(parts[2])
+                        z = float(parts[3])
+                        current_block_last_points[ion_n] = (x, y, z)
                     except (ValueError, IndexError):
                         pass
 
             # Process the last block
-            if current_fg is not None and current_lens_VMI is not None and current_ke is not None and current_block_data:
-                process_block_memory_optimized(data, current_fg, current_lens_VMI, current_ke, current_block_data)
+            if current_fg is not None and current_lens_VMI is not None and current_ke is not None and current_block_last_points:
+                process_block_memory_optimized(
+                    data,
+                    current_fg,
+                    current_lens_VMI,
+                    current_ke,
+                    current_block_last_points
+                )
 
     except Exception as e:
         print(f"Error parsing file: {e}")
@@ -893,7 +1253,7 @@ def parse_out_file_memory_optimized(filename: str) -> dict:
     return data
 
 
-def process_block_memory_optimized(data, fg, lens_VMI, ke, block_data):
+def process_block_memory_optimized(data, fg, lens_VMI, ke, block_last_points):
     """
     Memory-optimized block processing.
     Only stores trajectory data needed for final position extraction.
@@ -903,16 +1263,9 @@ def process_block_memory_optimized(data, fg, lens_VMI, ke, block_data):
         fg: Field gradient.
         lens_VMI: Lens VMI value.
         ke: Kinetic energy.
-        block_data: List of (ion_n, x, y, z) tuples.
+        block_last_points: Dict of ion_n -> (x, y, z) final points.
     """
-    # Group points by ion number
-    ion_trajectories = {}
-    for ion_n, x, y, z in block_data:
-        if ion_n not in ion_trajectories:
-            ion_trajectories[ion_n] = []
-        ion_trajectories[ion_n].append((x, y, z))
-
-    if not ion_trajectories:
+    if not block_last_points:
         return
 
     # Initialize nested dict structure
@@ -921,20 +1274,15 @@ def process_block_memory_optimized(data, fg, lens_VMI, ke, block_data):
     if lens_VMI not in data[fg]:
         data[fg][lens_VMI] = {}
     if ke not in data[fg][lens_VMI]:
-        data[fg][lens_VMI][ke] = {'local': {}, 'global': {}}
+        data[fg][lens_VMI][ke] = {'local': {}, 'global': {}, 'fast_final_positions': []}
+    elif 'fast_final_positions' not in data[fg][lens_VMI][ke]:
+        data[fg][lens_VMI][ke]['fast_final_positions'] = []
 
-    # Group trajectories into particles
-    for ion_n, traj in ion_trajectories.items():
-        if not traj or ion_n < 1:
+    final_positions = data[fg][lens_VMI][ke]['fast_final_positions']
+    for ion_n, xyz in block_last_points.items():
+        if ion_n < 1:
             continue
-
-        p_idx = (ion_n - 1) // 8
-
-        if p_idx not in data[fg][lens_VMI][ke]['local']:
-            data[fg][lens_VMI][ke]['local'][p_idx] = {'trajectories': []}
-        
-        # Store trajectory as list (will be converted to array when needed)
-        data[fg][lens_VMI][ke]['local'][p_idx]['trajectories'].append(traj)
+        final_positions.append([xyz[0], xyz[1], xyz[2]])
 
 
 def compute_vmi_parameters(field_min=200, field_max=500, num_points=20, lens_min=1.38, lens_max=1.38, num_lens_points=1,
@@ -1290,58 +1638,83 @@ def write_standard_beam(fid, x, y, z, direction, need_comma=True, ke=15, color=0
     fid.write(',\n' if need_comma else '\n')
 
 
-def energy_resolution_utilis(filename='energy_resolution_particle.fly2', position=(0.0, 0.0, 0.0), num_particles=100, ke=15):
+def energy_resolution_utilis(filename='energy_resolution_particle.fly2', position=(0.0, 0.0, 0.0),
+                             num_particles=100, ke=15, num_groups=1,
+                             az_first_deg=0.0, az_step_deg=30.0,az_num=6, el_first_deg=0.0, el_step_deg=30.0,el_num=12,intraction_volume=False,intraction_volume_array_mm = 0):
     """
-    Generates a .fly2 file with particles at a fixed position with TRUE isotropic (4π) distribution.
-    
-    OPTIMIZED: Uses SIMION's cone_direction_distribution with fill=true and half_angle=180
-    for true isotropic distribution over the full sphere. This creates a compact file
-    regardless of particle count.
-    
+    Generates a .fly2 file using grouped standard_beam blocks:
+      - each group has n=num_particles
+      - az is fixed (default 0 deg)
+      - el uses SIMION arithmetic_sequence(first, step, n)
+      - groups are emitted from the same source position
+
+    This matches the grouped fly2/output format used in energy_resolution_out.txt
+    where particles are naturally ordered by group (e.g., first N then second N).
+
     Args:
-        filename (str): The name for the output .fly2 file.
-        position (tuple): A tuple (x, y, z) specifying the fixed position of the particle source.
-        num_particles (int): The number of particles to generate.
-        ke (float): The kinetic energy of the electron particles in electron volts (eV).
+        filename (str): Output .fly2 file name.
+        position (tuple): Source position (x, y, z).
+        num_particles (int): Number of particles per group.
+        ke (float): Kinetic energy in eV.
+        num_groups (int): Number of groups (default 1).
+        azimuth_deg (float): Fixed azimuth angle in degrees.
+        el_first_deg (float): Arithmetic sequence first elevation in degrees.
+        el_step_deg (float): Arithmetic sequence step in degrees.
     """
     if not isinstance(num_particles, int) or num_particles <= 0:
         print(f"⚠️ Invalid input for `num_particles` (value: {num_particles}). It must be a positive integer. Setting to 100.")
         num_particles = 100
-
+    if not isinstance(num_groups, int) or num_groups <= 0:
+        num_groups = 1
     if not filename or not filename.strip():
         filename = 'energy_resolution_particle.fly2'
 
+    try:
+        az_first_deg = float(az_first_deg)
+    except (TypeError, ValueError):
+        az_first_deg = 0.0
+    try:
+        el_first_deg = float(el_first_deg)
+    except (TypeError, ValueError):
+        el_first_deg = 0.0
+    try:
+        el_step_deg = float(el_step_deg)
+    except (TypeError, ValueError):
+        el_step_deg = 1.0
+
     x, y, z = position
-    
-    # Calculate speed from kinetic energy for electrons
-    # For electrons in SIMION: v (mm/μs) = 593.096 * sqrt(KE in eV)
-    speed = 593.096 * np.sqrt(ke)
 
     try:
         with open(filename, 'w') as fid:
-            # Write compact fly2 format using cone_direction_distribution for true isotropy
             fid.write('particles {\n')
             fid.write('  coordinates = 0,\n')
-            fid.write('  standard_beam {\n')
-            fid.write(f'    n = {num_particles},\n')
-            fid.write('    tob = 0,\n')
-            fid.write('    mass = 0.000548579903,\n')  # Electron mass in amu
-            fid.write('    charge = -1,\n')
-            fid.write('    cwf = 1,\n')
-            fid.write('    color = 0,\n')
-            # cone_direction_distribution with half_angle=180 and fill=true gives true 4π isotropy
-            fid.write('    direction = cone_direction_distribution {\n')
-            fid.write('      axis = vector(1, 0, 0),\n')  # Reference axis (arbitrary for full sphere)
-            fid.write('      half_angle = 180,\n')  # Full sphere coverage
-            fid.write('      fill = true\n')  # Uniform solid angle distribution
-            fid.write('    },\n')
-            fid.write(f'    position = vector({x:.6f}, {y:.6f}, {z:.6f}),\n')
-            # Fixed speed corresponding to kinetic energy
-            fid.write(f'    speed = {speed:.6f},\n')
-            fid.write('    format = ""\n')
-            fid.write('  }\n')
+            for group_idx in range(num_groups):
+                if intraction_volume == True:
+                    shift = intraction_volume_array_mm[group_idx]
+                    new_position = position + shift
+                    x, y, z = new_position
+                fid.write('  standard_beam {\n')
+                fid.write(f'    n = {num_particles},\n')
+                fid.write('    tob = 0,\n')
+                fid.write('    mass = 0.000548579903,\n')
+                fid.write('    charge = -1,\n')
+                fid.write(f'    ke = {ke},\n')
+                fid.write('    az = arithmetic_sequence {\n')
+                fid.write(f'      first = {az_first_deg:.10g},\n')
+                fid.write(f'      step = {az_step_deg:.10g},\n')
+                fid.write(f'      n = {int(az_num)}\n')
+                fid.write('    },\n')
+                fid.write('    el = arithmetic_sequence {\n')
+                fid.write(f'      first = {el_first_deg:.10g},\n')
+                fid.write(f'      step = {el_step_deg:.10g},\n')
+                fid.write(f'      n = {int(el_num)}\n')
+                fid.write('    },\n')
+                fid.write('    cwf = 1,\n')
+                fid.write(f'    color = {group_idx},\n')
+                fid.write(f'    position = vector({x:.10g}, {y:.10g}, {z:.10g})\n')
+                fid.write('  }')
+                fid.write(',\n' if group_idx < num_groups - 1 else '\n')
             fid.write('}\n')
-
     except Exception as e:
         raise IOError(f"Failed to create file {filename}: {e}")
 
@@ -2674,78 +3047,151 @@ def run_optimized_simulations_with_ke(param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, 
     import subprocess
     import os
     import time
-    import glob
+    import errno
 
     num_simulations = len(param['field_gradient'])
+    successful_runs = 0
+    failed_runs = 0
     
     # Verify IOB file exists before starting
     if not os.path.exists(IOB_FILE):
         print(f"ERROR: IOB file '{IOB_FILE}' not found!")
-        return
+        return {'requested': num_simulations, 'successful': 0, 'failed': num_simulations}
+
+    def _append_output_with_parameters_streaming(temp_file_path, output_file_path, parameter_line):
+        """
+        Append temp SIMION output to OUT_FILE without loading full file into memory.
+        Insert parameter line right after the first separator line.
+        """
+        separator = "------ Begin Next Fly'm ------"
+        inserted = False
+        with open(temp_file_path, 'r', errors='ignore') as in_f, open(output_file_path, 'a') as out_f:
+            for line in in_f:
+                out_f.write(line)
+                if (not inserted) and (separator in line):
+                    out_f.write(parameter_line)
+                    inserted = True
+        if not inserted:
+            # Fallback: append parameters at end if separator was not found
+            with open(output_file_path, 'a') as out_f:
+                out_f.write(parameter_line)
 
     # Generate Lua file (only one needed since we process sequentially)
     for field_idx in range(num_simulations):
         lua_filename = OUTPUT_FILENAME_LUA
         generate_simion_lua_file(field_idx, param, output_filename=lua_filename)
         
-        temp_out_file = f"temp_out_ke_{field_idx}.txt"
+        temp_out_file = f"temp_out_ke_{field_idx}_{os.getpid()}_{int(time.time() * 1000)}.txt"
+        if os.path.exists(temp_out_file):
+            try:
+                os.remove(temp_out_file)
+            except OSError:
+                pass
         
         # Run SIMION - DO NOT capture output to avoid memory issues
         command = f"simion.exe --nogui fly --recording-output={temp_out_file} {IOB_FILE}"
-        
-        # Use DEVNULL to discard stdout/stderr - prevents memory buildup
-        result = subprocess.run(
-            command, 
-            shell=True, 
-            stdout=subprocess.DEVNULL, 
-            stderr=subprocess.DEVNULL
-        )
-        
-        if result.returncode != 0:
-            print(f"Error: SIMION failed for field_idx {field_idx}")
+
+        def _read_file_with_retry(path, max_wait_s=8.0, step_s=0.25):
+            """Windows: SIMION 可能短时间占用输出文件，做鲁棒重试读取。"""
+            deadline = time.time() + max_wait_s
+            last_exc = None
+            while time.time() < deadline:
+                try:
+                    with open(path, 'r') as f:
+                        return f.read()
+                except OSError as e:
+                    last_exc = e
+                    time.sleep(step_s)
+            raise last_exc if last_exc else OSError(errno.ETIMEDOUT, f"Timeout reading {path}")
+
+        def _remove_with_retry(path, max_wait_s=8.0, step_s=0.25):
+            """Windows: 删除也可能遇到 WinError 32，占用则重试；最终失败返回 False。"""
+            deadline = time.time() + max_wait_s
+            while time.time() < deadline:
+                try:
+                    os.remove(path)
+                    return True
+                except FileNotFoundError:
+                    return True
+                except OSError:
+                    time.sleep(step_s)
+            return False
+
+        # Run with retry to handle transient SIMION/file-lock failures
+        max_retries = 3
+        run_ok = False
+        last_returncode = None
+
+        for attempt in range(1, max_retries + 1):
+            # Use DEVNULL to discard stdout/stderr - prevents memory buildup
+            result = subprocess.run(
+                command,
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            last_returncode = result.returncode
+
+            # Wait briefly for file to become available/non-empty
+            max_wait = 12.0
+            wait_step = 0.25
+            waited = 0.0
+            output_ready = False
+            while waited < max_wait:
+                if os.path.exists(temp_out_file):
+                    try:
+                        if os.path.getsize(temp_out_file) > 0:
+                            output_ready = True
+                            break
+                    except OSError:
+                        pass
+                time.sleep(wait_step)
+                waited += wait_step
+
+            if result.returncode == 0 and output_ready:
+                run_ok = True
+                break
+
+            # Some SIMION runs may return non-zero but still produce usable output
+            if result.returncode != 0 and output_ready:
+                print(f"Warning: SIMION returned code {result.returncode} for field_idx {field_idx}, but output exists; continuing.")
+                run_ok = True
+                break
+
+            if attempt < max_retries:
+                time.sleep(0.5 * attempt)
+
+        if not run_ok:
+            print(f"Error: SIMION failed for field_idx {field_idx} after {max_retries} attempts (last return code: {last_returncode})")
+            failed_runs += 1
+            if os.path.exists(temp_out_file):
+                _remove_with_retry(temp_out_file)
             continue
-        
-        # Wait for file to be written
-        time.sleep(0.3)
         
         # Immediately append to output file and delete temp file
         if os.path.exists(temp_out_file):
             try:
-                with open(temp_out_file, 'r') as temp_f:
-                    content = temp_f.read()
-                
-                # Insert parameters
-                separator = "------ Begin Next Fly'm ------"
-                idx = content.find(separator)
-                if idx != -1:
-                    idx += len(separator)
-                    current_parameters = f"parameters = [{param['field_gradient'][field_idx]},{param['Offset_to_ground'][field_idx]},{param['lens_VMI'][field_idx]},{param['I_grid'][field_idx]},{param['VMI2'][field_idx]},{param['VMI1'][field_idx]},{param['e_grid'][field_idx]},{param['dt_e'][field_idx]},{ke}]\n"
-                    content = content[:idx] + "\n" + current_parameters + content[idx:]
-                
-                with open(OUT_FILE, 'a') as out_f:
-                    out_f.write(content)
+                current_parameters = (
+                    f"parameters = "
+                    f"[{param['field_gradient'][field_idx]},{param['Offset_to_ground'][field_idx]},"
+                    f"{param['lens_VMI'][field_idx]},{param['I_grid'][field_idx]},{param['VMI2'][field_idx]},"
+                    f"{param['VMI1'][field_idx]},{param['e_grid'][field_idx]},{param['dt_e'][field_idx]},{ke}]\n"
+                )
+                _append_output_with_parameters_streaming(temp_out_file, OUT_FILE, current_parameters)
                 
                 # Immediately delete temp file to free disk space
-                os.remove(temp_out_file)
-                
-                # Clear content variable
-                del content
+                _remove_with_retry(temp_out_file)
+                successful_runs += 1
                 
             except Exception as e:
                 print(f"Error processing temp file: {e}")
+                failed_runs += 1
                 if os.path.exists(temp_out_file):
-                    os.remove(temp_out_file)
+                    _remove_with_retry(temp_out_file)
+        else:
+            failed_runs += 1
     
-    # Clean up any remaining temp files and .tmp files
-    for pattern in ['temp_out_ke_*.txt', '*.tmp', 'WORKING_TITLE_tao_ke_*.lua']:
-        for f in glob.glob(pattern):
-            try:
-                os.remove(f)
-            except:
-                pass
-    
-    # Force garbage collection
-    gc.collect()
+    return {'requested': num_simulations, 'successful': successful_runs, 'failed': failed_runs}
 
 def run_optimized_simulations_with_ke_parallel(param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, OUT_FILE, max_workers=None, batch_size=50):
     """
@@ -2764,6 +3210,12 @@ def run_optimized_simulations_with_ke_parallel(param, ke, OUTPUT_FILENAME_LUA, I
         max_workers: Maximum number of parallel workers (default: 75% of CPU cores)
         batch_size: Number of simulations per batch (default: 50)
     """
+    # NOTE:
+    # Parallel SIMION launches share the same Lua filename in the IOB workflow, which can cause
+    # race conditions and mismatched/failed simulations. Use the safe sequential runner.
+    print("run_optimized_simulations_with_ke_parallel: using safe sequential runner to avoid Lua race conditions.")
+    return run_optimized_simulations_with_ke(param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, OUT_FILE)
+
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import subprocess
     import os
@@ -4073,7 +4525,9 @@ def get_parameters_for_combination(processed_data, fg, lens_vmi, ke):
     }
 
 
-def _extract_final_positions(single_processed_data, fg, lens_vmi, ke):
+def _extract_final_positions(single_processed_data, fg, lens_vmi, ke,
+                             detector_x_mm=None, detector_x_tol_mm=0.5,
+                             detector_y_range_mm=None, detector_z_range_mm=None):
     """
     Helper function to extract final positions from processed simulation data.
     
@@ -4082,18 +4536,126 @@ def _extract_final_positions(single_processed_data, fg, lens_vmi, ke):
         fg: Field gradient
         lens_vmi: Lens VMI value
         ke: Kinetic energy
+        detector_x_mm: Detector x center position in mm (None to disable filtering)
+        detector_x_tol_mm: Detector x acceptance half-width in mm
+        detector_y_range_mm: Detector y acceptance range tuple (min, max) in mm
+        detector_z_range_mm: Detector z acceptance range tuple (min, max) in mm
     
     Returns:
         tuple: (final_positions, success_flag)
     """
     final_positions = []
-    
+
+    detector_filter_enabled = (
+        detector_x_mm is not None
+        and detector_x_tol_mm is not None
+        and detector_y_range_mm is not None
+        and detector_z_range_mm is not None
+    )
+    if detector_filter_enabled:
+        y_min, y_max = sorted((float(detector_y_range_mm[0]), float(detector_y_range_mm[1])))
+        z_min, z_max = sorted((float(detector_z_range_mm[0]), float(detector_z_range_mm[1])))
+        detector_x_center = float(detector_x_mm)
+        detector_x_tol = abs(float(detector_x_tol_mm))
+    else:
+        y_min = y_max = z_min = z_max = detector_x_center = detector_x_tol = None
+
+    def _passes_detector_acceptance(x_value, y_value, z_value):
+        if not detector_filter_enabled:
+            return True
+        try:
+            x_num = float(x_value)
+            y_num = float(y_value)
+            z_num = float(z_value)
+        except (TypeError, ValueError):
+            return False
+        return (
+            abs(x_num - detector_x_center) <= detector_x_tol
+            and y_min <= y_num <= y_max
+            and z_min <= z_num <= z_max
+        )
+
+    def _match_key(mapping, target, abs_tol=1e-3, nearest_fallback_tol=0.1):
+        if target in mapping:
+            return target, "exact"
+        try:
+            target_f = float(target)
+        except Exception:
+            target_f = None
+        if target_f is None:
+            return None, "no-numeric-target"
+
+        numeric_diffs = []
+        for key in mapping.keys():
+            try:
+                diff = abs(float(key) - target_f)
+                numeric_diffs.append((diff, key))
+                if diff <= abs_tol:
+                    return key, "abs-tol"
+            except Exception:
+                continue
+
+        if numeric_diffs:
+            diff, nearest_key = min(numeric_diffs, key=lambda x: x[0])
+            if diff <= nearest_fallback_tol:
+                return nearest_key, f"nearest({diff:.6g})"
+
+        return None, "no-match"
+
+    fg_key, fg_match_mode = _match_key(single_processed_data, fg, abs_tol=1e-3, nearest_fallback_tol=0.5)
+    if fg_key is None:
+        print(f"  ERROR: No FG key matched requested FG {fg}")
+        return [], False
+    if fg_match_mode != "exact":
+        print(f"  WARN: FG key fallback used ({fg_match_mode}): requested {fg} -> matched {fg_key}")
+
+    lens_key, lens_match_mode = _match_key(single_processed_data[fg_key], lens_vmi, abs_tol=1e-3, nearest_fallback_tol=0.5)
+    if lens_key is None:
+        available_lens = list(single_processed_data[fg_key].keys())[:8]
+        print(f"  ERROR: No Lens key matched requested Lens {lens_vmi} under FG {fg_key}. Available (sample): {available_lens}")
+        return [], False
+    if lens_match_mode != "exact":
+        print(f"  WARN: Lens key fallback used ({lens_match_mode}): requested {lens_vmi} -> matched {lens_key}")
+
+    ke_key, ke_match_mode = _match_key(single_processed_data[fg_key][lens_key], ke, abs_tol=1e-6, nearest_fallback_tol=0.25)
+    if ke_key is None:
+        available_ke = list(single_processed_data[fg_key][lens_key].keys())[:8]
+        print(f"  ERROR: No KE key matched requested KE {ke} under FG {fg_key}, Lens {lens_key}. Available (sample): {available_ke}")
+        return [], False
+    if ke_match_mode != "exact":
+        print(f"  WARN: KE key fallback used ({ke_match_mode}): requested {ke} -> matched {ke_key}")
+
     # Check if the specific fg, lens_vmi, ke combination exists in the processed data
-    if fg in single_processed_data and lens_vmi in single_processed_data[fg] and ke in single_processed_data[fg][lens_vmi]:
-        local_data = single_processed_data[fg][lens_vmi][ke].get('local', {})
+    if fg_key in single_processed_data and lens_key in single_processed_data[fg_key] and ke_key in single_processed_data[fg_key][lens_key]:
+        combo_data = single_processed_data[fg_key][lens_key][ke_key]
+
+        # Fast path (memory-optimized parser output)
+        fast_positions = combo_data.get('fast_final_positions', None)
+        if fast_positions is not None:
+            if len(fast_positions) == 0:
+                return [], False
+            filtered_positions = []
+            for point in fast_positions:
+                if point is None:
+                    continue
+                try:
+                    point_len = len(point)
+                except TypeError:
+                    continue
+                if point_len >= 3:
+                    x, y, z = point[0], point[1], point[2]
+                    if _passes_detector_acceptance(x, y, z):
+                        filtered_positions.append([y, z])
+                elif point_len == 2 and not detector_filter_enabled:
+                    filtered_positions.append([point[0], point[1]])
+            if len(filtered_positions) == 0:
+                return [], False
+            return filtered_positions, True
+
+        local_data = combo_data.get('local', {})
         
         # Suppressed particle processing output
-        # print(f"  Processing {len(local_data)} particles for FG {fg}, Lens {lens_vmi}, KE {ke:.2f}")
+        # print(f"  Processing {len(local_data)} particles for FG {fg_key}, Lens {lens_key}, KE {float(ke_key):.2f}")
         
         # Only collect final positions from the specific combination we're analyzing
         for particle_idx in local_data:
@@ -4102,15 +4664,852 @@ def _extract_final_positions(single_processed_data, fg, lens_vmi, ke):
                 if trajectory:  # Check if trajectory is not empty
                     # Get the final point (last point in the trajectory)
                     final_point = trajectory[-1]
-                    y, z = final_point[1], final_point[2]  # Extract y and z coordinates
-                    final_positions.append([y, z])
+                    x, y, z = final_point[0], final_point[1], final_point[2]
+                    if _passes_detector_acceptance(x, y, z):
+                        final_positions.append([y, z])
                     
         # Suppressed positions collection output
-        # print(f"  Collected {len(final_positions)} final positions for FG {fg}, Lens {lens_vmi}, KE {ke:.2f}")
+        # print(f"  Collected {len(final_positions)} final positions for FG {fg_key}, Lens {lens_key}, KE {float(ke_key):.2f}")
         return final_positions, True
     else:
-        print(f"  ERROR: No data found for FG {fg}, Lens {lens_vmi}, KE {ke:.2f}")
+        print(f"  ERROR: No data found for FG {fg_key}, Lens {lens_key}, KE {float(ke_key):.2f}")
         return [], False
+
+
+def _parse_simion_ion_row(line):
+    """
+    Parse one SIMION ion row:
+      ion_n, x, y, z
+    or:
+      ion_n, x, y, z, el
+    or:
+      ion_n, x, y, z, azm, el
+    """
+    if not line:
+        return None
+    parts = [part.strip() for part in line.split(',')]
+    if len(parts) < 4:
+        return None
+    try:
+        ion_n = int(parts[0])
+        x = float(parts[1])
+        y = float(parts[2])
+        z = float(parts[3])
+    except (TypeError, ValueError):
+        return None
+
+    azm = None
+    el = None
+    if len(parts) >= 6:
+        try:
+            azm = float(parts[4])
+        except (TypeError, ValueError):
+            azm = None
+        try:
+            el = float(parts[5])
+        except (TypeError, ValueError):
+            el = None
+    elif len(parts) >= 5:
+        try:
+            el = float(parts[4])
+        except (TypeError, ValueError):
+            el = None
+    return ion_n, x, y, z, azm, el
+
+
+def _build_detector_acceptance_checker(detector_x_mm=None, detector_x_tol_mm=0.5,
+                                       detector_y_range_mm=None, detector_z_range_mm=None):
+    detector_filter_enabled = (
+        detector_x_mm is not None
+        and detector_x_tol_mm is not None
+        and detector_y_range_mm is not None
+        and detector_z_range_mm is not None
+    )
+    if detector_filter_enabled:
+        y_min, y_max = sorted((float(detector_y_range_mm[0]), float(detector_y_range_mm[1])))
+        z_min, z_max = sorted((float(detector_z_range_mm[0]), float(detector_z_range_mm[1])))
+        detector_x_center = float(detector_x_mm)
+        detector_x_tol = abs(float(detector_x_tol_mm))
+    else:
+        y_min = y_max = z_min = z_max = detector_x_center = detector_x_tol = None
+
+    def _passes_detector_acceptance(x_value, y_value, z_value):
+        if not detector_filter_enabled:
+            return True
+        try:
+            x_num = float(x_value)
+            y_num = float(y_value)
+            z_num = float(z_value)
+        except (TypeError, ValueError):
+            return False
+        return (
+            abs(x_num - detector_x_center) <= detector_x_tol
+            and y_min <= y_num <= y_max
+            and z_min <= z_num <= z_max
+        )
+
+    return _passes_detector_acceptance
+
+
+def _extract_ion_records_from_out_file(out_file_path,
+                                       detector_x_mm=None, detector_x_tol_mm=0.5,
+                                       detector_y_range_mm=None, detector_z_range_mm=None):
+    """
+    Parse SIMION energy_resolution_out.txt and return ion records sorted by ion index.
+
+    Each record includes:
+      - initial: row dict (x, y, z, el)
+      - final: row dict (x, y, z, el)
+      - initial_el: pairing key for az-fixed/el-scan workflow
+    """
+    if not out_file_path or not os.path.exists(out_file_path):
+        return [], False
+
+    _passes_detector_acceptance = _build_detector_acceptance_checker(
+        detector_x_mm=detector_x_mm,
+        detector_x_tol_mm=detector_x_tol_mm,
+        detector_y_range_mm=detector_y_range_mm,
+        detector_z_range_mm=detector_z_range_mm
+    )
+
+    def _finalize_ion_block(block_ion_n, block_rows):
+        if block_ion_n is None or not block_rows:
+            return None
+        initial_row = block_rows[0]
+        final_row = block_rows[-1]
+
+        if not _passes_detector_acceptance(final_row[1], final_row[2], final_row[3]):
+            return None
+
+        initial_azm = initial_row[4] if initial_row[4] is not None else final_row[4]
+        initial_el = initial_row[5] if initial_row[5] is not None else final_row[5]
+
+        return {
+            'ion_n': int(block_ion_n),
+            'initial': {
+                'x': float(initial_row[1]),
+                'y': float(initial_row[2]),
+                'z': float(initial_row[3]),
+                'azm': None if initial_row[4] is None else float(initial_row[4]),
+                'el': None if initial_row[5] is None else float(initial_row[5]),
+            },
+            'final': {
+                'x': float(final_row[1]),
+                'y': float(final_row[2]),
+                'z': float(final_row[3]),
+                'azm': None if final_row[4] is None else float(final_row[4]),
+                'el': None if final_row[5] is None else float(final_row[5]),
+            },
+            'initial_azm': None if initial_azm is None else float(initial_azm),
+            'initial_el': None if initial_el is None else float(initial_el),
+        }
+
+    ion_records = []
+    current_ion_n = None
+    current_rows = []
+    try:
+        with open(out_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                parsed = _parse_simion_ion_row(line)
+                if parsed is None:
+                    continue
+                ion_n = parsed[0]
+                if current_ion_n is None:
+                    current_ion_n = ion_n
+                    current_rows = [parsed]
+                    continue
+                if ion_n != current_ion_n:
+                    record = _finalize_ion_block(current_ion_n, current_rows)
+                    if record is not None:
+                        ion_records.append(record)
+                    current_ion_n = ion_n
+                    current_rows = [parsed]
+                    continue
+                current_rows.append(parsed)
+    except Exception:
+        return [], False
+
+    record = _finalize_ion_block(current_ion_n, current_rows)
+    if record is not None:
+        ion_records.append(record)
+
+    if not ion_records:
+        return [], False
+
+    return ion_records, len(ion_records) > 0
+
+
+def _extract_final_positions_from_out_file(out_file_path,
+                                           detector_x_mm=None, detector_x_tol_mm=0.5,
+                                           detector_y_range_mm=None, detector_z_range_mm=None):
+    """
+    Parse SIMION output and return final (y, z) positions in ion-index order.
+    Supports both 4-column and 5-column row formats.
+    """
+    ion_records, success = _extract_ion_records_from_out_file(
+        out_file_path,
+        detector_x_mm=detector_x_mm,
+        detector_x_tol_mm=detector_x_tol_mm,
+        detector_y_range_mm=detector_y_range_mm,
+        detector_z_range_mm=detector_z_range_mm
+    )
+    if not success:
+        return [], False
+
+    final_positions = []
+    for record in ion_records:
+        final_pos = record.get('final', {})
+        final_positions.append([final_pos.get('y', 0.0), final_pos.get('z', 0.0)])
+    return final_positions, len(final_positions) > 0
+
+
+def _convert_ion_records_to_raw_yz(ion_records):
+    """
+    Convert parsed ion records into minimal raw tuples:
+      [ion_n, y, z]
+    """
+    raw_points = []
+    if not isinstance(ion_records, list):
+        return raw_points
+    for record in ion_records:
+        if not isinstance(record, dict):
+            continue
+        final_pos = record.get('final', {})
+        if not isinstance(final_pos, dict):
+            continue
+        try:
+            ion_n = int(record.get('ion_n', -1))
+            y = float(final_pos.get('y', 0.0))
+            z = float(final_pos.get('z', 0.0))
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(y) and np.isfinite(z):
+            raw_points.append([ion_n, y, z])
+    return raw_points
+
+
+def _normalize_el_for_pairing(el_value, decimals=6, zero_tol=1e-9):
+    try:
+        value = float(el_value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(value):
+        return None
+    if abs(value) <= zero_tol:
+        value = 0.0
+    return round(value, decimals)
+
+
+def _normalize_az_for_pairing(az_value, decimals=6, zero_tol=1e-9):
+    try:
+        value = float(az_value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(value):
+        return None
+    while value > 180.0:
+        value -= 360.0
+    while value <= -180.0:
+        value += 360.0
+    if abs(value) <= zero_tol:
+        value = 0.0
+    return round(value, decimals)
+
+
+def _compute_dr_over_r_for_block(ion_block, skip_el_deg=90.0, el_tolerance_deg=1e-6,
+                                 az_round_decimals=0, el_round_decimals=0):
+    """
+    Compute dr/r using YZ plane symmetric azimuth pairing.
+
+    YZ plane symmetry: azm1 + azm2 = ±180°
+
+    This pairs ions that are symmetric about the YZ plane (x=0) at the same elevation.
+    """
+    def _pair_metric(ion_a, ion_b, el_key):
+        fa = ion_a.get('final', {})
+        fb = ion_b.get('final', {})
+        x_a = float(fa.get('x', 0.0))
+        y_a = float(fa.get('y', 0.0))
+        z_a = float(fa.get('z', 0.0))
+        x_b = float(fb.get('x', 0.0))
+        y_b = float(fb.get('y', 0.0))
+        z_b = float(fb.get('z', 0.0))
+
+        dx = x_a - x_b
+        dy = y_a - y_b
+        dz = z_a - z_b
+        dr = float(math.sqrt(dx * dx + dy * dy + dz * dz))
+
+        r_a = float(math.sqrt(y_a ** 2 + z_a ** 2))
+        r_b = float(math.sqrt(y_b ** 2 + z_b ** 2))
+        r_mean = float(0.5 * (r_a + r_b))
+        ratio = float(dr / r_mean) if r_mean > 0 else None
+
+        return {
+            'initial_el': float(el_key),
+            'ion_a': int(ion_a.get('ion_n', -1)),
+            'ion_b': int(ion_b.get('ion_n', -1)),
+            'x_a': x_a,
+            'y_a': y_a,
+            'z_a': z_a,
+            'x_b': x_b,
+            'y_b': y_b,
+            'z_b': z_b,
+            'dx': dx,
+            'dy': dy,
+            'dz': dz,
+            'dr': dr,
+            'r_a': r_a,
+            'r_b': r_b,
+            'r': r_mean,
+            'dr_over_r': ratio
+        }
+
+    def _are_yz_symmetric(azm1, azm2, tolerance=1.0):
+        """Check if two azimuth angles are YZ plane symmetric (sum = ±180°)"""
+        sum_angles = float(azm1) + float(azm2)
+        return abs(abs(sum_angles) - 180) < tolerance
+
+    pair_details = []
+    dr_values = []
+    r_values = []
+    ratio_values = []
+    unmatched_ions = []
+    pairing_mode = 'yz_plane_symmetric'
+
+    # Group ions by elevation angle
+    elv_groups = {}
+    used_indices = set()
+
+    for idx, record in enumerate(ion_block):
+        el_key = _normalize_el_for_pairing(record.get('initial_el'), decimals=el_round_decimals)
+        azm_key = _normalize_az_for_pairing(record.get('initial_azm'), decimals=az_round_decimals)
+        if azm_key is None:
+            unmatched_ions.append(int(record.get('ion_n', -1)))
+            used_indices.add(idx)
+            continue
+
+        # Skip azm = ±90° (no symmetric pair)
+        if abs(abs(azm_key) - 90.0) < 1.0:
+            unmatched_ions.append(int(record.get('ion_n', -1)))
+            used_indices.add(idx)
+            continue
+
+        # Skip el = skip_el_deg if requested
+        if el_key is not None and abs(float(el_key) - float(skip_el_deg)) <= float(el_tolerance_deg):
+            unmatched_ions.append(int(record.get('ion_n', -1)))
+            used_indices.add(idx)
+            continue
+
+        # Group by elevation
+        if el_key not in elv_groups:
+            elv_groups[el_key] = []
+        elv_groups[el_key].append((idx, record, azm_key))
+
+    # For each elevation group, find YZ symmetric pairs
+    for el_key, group in elv_groups.items():
+        for i, (idx1, ion1, azm1) in enumerate(group):
+            if idx1 in used_indices:
+                continue
+
+            # Look for YZ symmetric partner
+            for j, (idx2, ion2, azm2) in enumerate(group):
+                if i >= j or idx2 in used_indices:
+                    continue
+
+                # Check if YZ plane symmetric
+                if _are_yz_symmetric(azm1, azm2, tolerance=1.0):
+                    pair = _pair_metric(ion1, ion2, el_key if el_key is not None else 0.0)
+                    pair_details.append(pair)
+                    dr_values.append(pair['dr'])
+                    r_values.append(pair['r'])
+                    ratio = pair.get('dr_over_r')
+                    if ratio is not None and np.isfinite(ratio):
+                        ratio_values.append(float(ratio))
+
+                    used_indices.add(idx1)
+                    used_indices.add(idx2)
+                    break
+
+    # Add remaining unpaired ions
+    for idx, record in enumerate(ion_block):
+        if idx not in used_indices:
+            unmatched_ions.append(int(record.get('ion_n', -1)))
+
+    return {
+        'pairing_mode': pairing_mode,
+        'pair_details': pair_details,
+        'dr_values': dr_values,
+        'r_values': r_values,
+        'ratio_values': ratio_values,
+        'unmatched_ions': unmatched_ions
+    }
+
+
+def _compute_dr_over_r_statistics(ion_records, particles_per_run, requested_runs=1,
+                                  skip_el_deg=90.0, el_tolerance_deg=1e-6,
+                                  radius_origin_y=-1.0, radius_origin_z=0.0):
+    try:
+        particles_per_run = int(particles_per_run)
+    except (TypeError, ValueError):
+        particles_per_run = 0
+    if particles_per_run <= 0:
+        return {
+            'success': False,
+            'failure_reason': f"Invalid particles_per_run={particles_per_run}"
+        }
+
+    try:
+        requested_runs = int(requested_runs)
+    except (TypeError, ValueError):
+        requested_runs = 1
+    if requested_runs <= 0:
+        requested_runs = 1
+
+    try:
+        radius_origin_y = float(radius_origin_y)
+    except (TypeError, ValueError):
+        radius_origin_y = -1.0
+    try:
+        radius_origin_z = float(radius_origin_z)
+    except (TypeError, ValueError):
+        radius_origin_z = 0.0
+
+    detected_particles_total = len(ion_records)
+    max_repeat_blocks = detected_particles_total // particles_per_run
+    if max_repeat_blocks <= 0:
+        return {
+            'success': False,
+            'failure_reason': (
+                f"Insufficient detected particles ({detected_particles_total}) for one repeat block "
+                f"(block size={particles_per_run})"
+            )
+        }
+
+    repeat_blocks = min(requested_runs, max_repeat_blocks)
+    er_runs = []
+    max_r_runs = []
+    detected_runs = []
+    pair_count_runs = []
+    pairing_mode_runs = []
+    repeat_failures = []
+
+    all_dr_values = []
+    all_r_values = []
+    all_ratio_values = []
+    all_pair_details = []
+    all_r_all_points = []
+    all_r_max_runs_all_points = []
+    all_point_count_runs = []
+
+    for repeat_idx in range(repeat_blocks):
+        idx_start = repeat_idx * particles_per_run
+        idx_end = idx_start + particles_per_run
+        ion_block = ion_records[idx_start:idx_end]
+        detected_runs.append(len(ion_block))
+        run_all_r_values = []
+        for ion in ion_block:
+            final_row = ion.get('final', {}) if isinstance(ion, dict) else {}
+            try:
+                y = float(final_row.get('y', 0.0))
+                z = float(final_row.get('z', 0.0))
+                dy = y - radius_origin_y
+                dz = z - radius_origin_z
+                r = float(math.sqrt(dy * dy + dz * dz))
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(r):
+                run_all_r_values.append(r)
+        all_point_count_runs.append(len(run_all_r_values))
+        all_r_max_runs_all_points.append(float(np.max(run_all_r_values)) if run_all_r_values else None)
+        all_r_all_points.extend(run_all_r_values)
+
+        if len(ion_block) < particles_per_run:
+            er_runs.append(None)
+            max_r_runs.append(None)
+            pair_count_runs.append(0)
+            repeat_failures.append(
+                f"repeat#{repeat_idx + 1}: particles {len(ion_block)}/{particles_per_run}"
+            )
+            continue
+
+        block_metrics = _compute_dr_over_r_for_block(
+            ion_block,
+            skip_el_deg=skip_el_deg,
+            el_tolerance_deg=el_tolerance_deg
+        )
+        ratio_values = [
+            float(v) for v in block_metrics.get('ratio_values', [])
+            if v is not None and np.isfinite(v)
+        ]
+        r_values = [
+            float(v) for v in block_metrics.get('r_values', [])
+            if v is not None and np.isfinite(v)
+        ]
+        dr_values = [
+            float(v) for v in block_metrics.get('dr_values', [])
+            if v is not None and np.isfinite(v)
+        ]
+        pair_details = block_metrics.get('pair_details', [])
+        pair_count = len(ratio_values)
+        pairing_mode = block_metrics.get('pairing_mode', 'same_el')
+
+        if pair_count == 0:
+            er_runs.append(None)
+            max_r_runs.append(None)
+            pair_count_runs.append(0)
+            pairing_mode_runs.append(pairing_mode)
+            repeat_failures.append(
+                f"repeat#{repeat_idx + 1}: no valid mirrored pairs (skip el={skip_el_deg})"
+            )
+            continue
+
+        er_runs.append(float(np.mean(ratio_values)))
+        max_r_runs.append(float(np.max(r_values)) if r_values else None)
+        pair_count_runs.append(pair_count)
+        pairing_mode_runs.append(pairing_mode)
+        all_ratio_values.extend(ratio_values)
+        all_r_values.extend(r_values)
+        all_dr_values.extend(dr_values)
+
+        for pair in pair_details:
+            pair_record = dict(pair)
+            pair_record['run_index'] = repeat_idx + 1
+            all_pair_details.append(pair_record)
+
+        # Unmatched ions can be expected when skipping el=90 in an odd-length sweep.
+
+    valid_er_runs = [float(v) for v in er_runs if v is not None and np.isfinite(v)]
+    if not all_ratio_values:
+        failure_reason = "All repeat blocks failed dr/r pairing analysis"
+        if repeat_failures:
+            failure_reason += f" ({'; '.join(repeat_failures[:2])})"
+        return {
+            'success': False,
+            'failure_reason': failure_reason,
+            'detected_particles_total': detected_particles_total,
+            'detected_particles_runs': detected_runs,
+            'pair_count_runs': pair_count_runs
+        }
+
+    ratio_mean = float(np.mean(all_ratio_values))
+    ratio_var = float(np.var(all_ratio_values))
+    ratio_std = float(np.sqrt(ratio_var))
+
+    valid_max_r = [float(v) for v in max_r_runs if v is not None and np.isfinite(v)]
+    max_r_mean = float(np.mean(valid_max_r)) if valid_max_r else None
+    max_r_var = float(np.var(valid_max_r)) if valid_max_r else None
+    max_r_std = float(np.sqrt(max_r_var)) if max_r_var is not None else None
+    r_max_all_points = float(np.max(all_r_all_points)) if all_r_all_points else None
+
+    failure_reason_summary = None
+    if repeat_failures:
+        failure_reason_summary = '; '.join(repeat_failures[:3])
+        if len(repeat_failures) > 3:
+            failure_reason_summary += f"; +{len(repeat_failures) - 3} more"
+
+    return {
+        'success': True,
+        'detected_particles_total': detected_particles_total,
+        'detected_particles_runs': detected_runs,
+        'detected_particles_mean': int(round(float(np.mean(detected_runs)))) if detected_runs else None,
+        'pair_count_runs': pair_count_runs,
+        'pairing_mode_runs': pairing_mode_runs,
+        'pair_count_total': len(all_ratio_values),
+        'valid_run_count': len(valid_er_runs),
+        'total_runs_used': repeat_blocks,
+        'energy_resolution_runs': er_runs,
+        'energy_resolution_mean': ratio_mean,
+        'energy_resolution_variance': ratio_var,
+        'energy_resolution_std': ratio_std,
+        'max_r_runs': max_r_runs,
+        'max_r_mean': max_r_mean,
+        'max_r_variance': max_r_var,
+        'max_r_std': max_r_std,
+        'r_max_all_points': r_max_all_points,
+        'r_max_all_points_runs': all_r_max_runs_all_points,
+        'all_point_count_runs': all_point_count_runs,
+        'dr_values': all_dr_values,
+        'r_values': all_r_values,
+        'dr_over_r_values': all_ratio_values,
+        'pair_details': all_pair_details,
+        'failure_reason': failure_reason_summary
+    }
+
+
+def _safe_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_invalid_energy_result(expected_particles_total, detected_particles,
+                                 particles_per_run, requested_runs,
+                                 failure_reason, pipeline_stage='count_check'):
+    block_size = _safe_int(particles_per_run)
+    if block_size is None or block_size <= 0:
+        block_size = 1
+    total_runs = _safe_int(requested_runs)
+    if total_runs is None or total_runs <= 0:
+        total_runs = 1
+    detected_total = _safe_int(detected_particles)
+    if detected_total is None or detected_total < 0:
+        detected_total = 0
+
+    detected_runs = []
+    full_blocks = detected_total // block_size
+    for _ in range(full_blocks):
+        detected_runs.append(block_size)
+    remainder = detected_total - (full_blocks * block_size)
+    if remainder > 0:
+        detected_runs.append(remainder)
+
+    return {
+        'fwhm': None,
+        'fwhm_mean': None,
+        'fwhm_variance': None,
+        'fwhm_std': None,
+        'fwhm_runs': [],
+        'energy_resolution': None,
+        'energy_resolution_mean': None,
+        'energy_resolution_variance': None,
+        'energy_resolution_std': None,
+        'energy_resolution_runs': [],
+        'max_r': None,
+        'max_r_mean': None,
+        'max_r_variance': None,
+        'max_r_std': None,
+        'max_r_runs': [],
+        'r_max_all_points': None,
+        'r_max_all_points_runs': [],
+        'all_point_count_runs': [],
+        'generated_particles': _safe_int(expected_particles_total),
+        'generated_particles_per_run': block_size,
+        'detected_particles': detected_total,
+        'detected_particles_runs': detected_runs,
+        'pair_count': 0,
+        'pair_count_runs': [],
+        'dr_values': [],
+        'r_values': [],
+        'dr_over_r_values': [],
+        'dr_over_r_pairs': [],
+        'raw_ion_points_yz': [],
+        'raw_point_count': 0,
+        'raw_point_format': 'ion_n,y,z',
+        'total_runs': total_runs,
+        'valid_run_count': 0,
+        'valid': False,
+        'failure_reason': failure_reason,
+        'count_check_passed': False,
+        'plot_marker': 'x',
+        'plot_skip': True,
+        'pipeline_stage': pipeline_stage
+    }
+
+
+def _compute_dr_over_rmax_statistics_from_records(ion_records, particles_per_run, requested_runs=1,
+                                                  radius_origin_y=0.0, radius_origin_z=0.0):
+    """
+    Pipeline:
+      1) (already done outside) particle-count validation
+      2) pair mirrored points inside each run block
+      3) compute dr/rmax using rmax across all detected points of this node
+    """
+    block_size = _safe_int(particles_per_run)
+    if block_size is None or block_size <= 1:
+        return {
+            'success': False,
+            'failure_reason': f"Invalid particles_per_run={particles_per_run}"
+        }
+
+    runs_requested = _safe_int(requested_runs)
+    if runs_requested is None or runs_requested <= 0:
+        runs_requested = 1
+
+    try:
+        origin_y = float(radius_origin_y)
+    except (TypeError, ValueError):
+        origin_y = 0.0
+    try:
+        origin_z = float(radius_origin_z)
+    except (TypeError, ValueError):
+        origin_z = 0.0
+
+    if not isinstance(ion_records, list) or not ion_records:
+        return {
+            'success': False,
+            'failure_reason': "No ion records available for pairing"
+        }
+
+    detected_particles_total = len(ion_records)
+    max_repeat_blocks = detected_particles_total // block_size
+    if max_repeat_blocks <= 0:
+        return {
+            'success': False,
+            'failure_reason': (
+                f"Insufficient detected particles ({detected_particles_total}) for one repeat block "
+                f"(block size={block_size})"
+            )
+        }
+
+    repeat_blocks = min(runs_requested, max_repeat_blocks)
+    detected_runs = [block_size for _ in range(repeat_blocks)]
+
+    all_r_values = []
+    all_r_max_runs = []
+    all_point_count_runs = []
+    for run_idx in range(repeat_blocks):
+        start = run_idx * block_size
+        stop = start + block_size
+        ion_block = ion_records[start:stop]
+        run_r = []
+        for ion in ion_block:
+            final_pos = ion.get('final', {}) if isinstance(ion, dict) else {}
+            try:
+                y = float(final_pos.get('y', 0.0))
+                z = float(final_pos.get('z', 0.0))
+            except (TypeError, ValueError):
+                continue
+            if not (np.isfinite(y) and np.isfinite(z)):
+                continue
+            r = float(math.sqrt((y - origin_y) ** 2 + (z - origin_z) ** 2))
+            if np.isfinite(r):
+                run_r.append(r)
+        all_point_count_runs.append(len(run_r))
+        all_r_max_runs.append(float(np.max(run_r)) if run_r else None)
+        all_r_values.extend(run_r)
+
+    if not all_r_values:
+        return {
+            'success': False,
+            'failure_reason': "No finite detector radii found"
+        }
+
+    rmax_all_points = float(np.max(all_r_values))
+    if rmax_all_points <= 0:
+        return {
+            'success': False,
+            'failure_reason': "Computed rmax is not positive"
+        }
+
+    pair_count_runs = []
+    run_er_values = []
+    all_ratio_values = []
+    all_dr_values = []
+    all_r_mean_values = []
+    pair_details = []
+    repeat_failures = []
+
+    for run_idx in range(repeat_blocks):
+        start = run_idx * block_size
+        stop = start + block_size
+        ion_block = ion_records[start:stop]
+
+        # Pairing is based on initial az/el symmetry from the first row (initial state).
+        block_metrics = _compute_dr_over_r_for_block(
+            ion_block,
+            skip_el_deg=90.0,
+            el_tolerance_deg=1e-6
+        )
+        block_pairs = block_metrics.get('pair_details', [])
+        if not isinstance(block_pairs, list):
+            block_pairs = []
+
+        run_ratios = []
+        run_pair_count = 0
+
+        for pair in block_pairs:
+            try:
+                y_a = float(pair.get('y_a'))
+                z_a = float(pair.get('z_a'))
+                y_b = float(pair.get('y_b'))
+                z_b = float(pair.get('z_b'))
+            except (TypeError, ValueError):
+                continue
+            if not (np.isfinite(y_a) and np.isfinite(z_a) and np.isfinite(y_b) and np.isfinite(z_b)):
+                continue
+
+            r_a = float(math.sqrt((y_a - origin_y) ** 2 + (z_a - origin_z) ** 2))
+            r_b = float(math.sqrt((y_b - origin_y) ** 2 + (z_b - origin_z) ** 2))
+            dr = float(abs(r_a - r_b))
+            r_mean = float(0.5 * (r_a + r_b))
+            ratio = float(dr / rmax_all_points) if rmax_all_points > 0 else None
+
+            if ratio is not None and np.isfinite(ratio):
+                run_pair_count += 1
+                run_ratios.append(ratio)
+                all_ratio_values.append(ratio)
+                all_dr_values.append(dr)
+                all_r_mean_values.append(r_mean)
+                pair_details.append({
+                    'run_index': run_idx + 1,
+                    'ion_a': int(pair.get('ion_a', -1)),
+                    'ion_b': int(pair.get('ion_b', -1)),
+                    'y_a': y_a,
+                    'z_a': z_a,
+                    'y_b': y_b,
+                    'z_b': z_b,
+                    'r_a': r_a,
+                    'r_b': r_b,
+                    'dr': dr,
+                    'r': r_mean,
+                    'dr_over_r': ratio,
+                    'initial_el': pair.get('initial_el')
+                })
+
+        pair_count_runs.append(run_pair_count)
+        if run_ratios:
+            run_er_values.append(float(np.mean(run_ratios)))
+        else:
+            run_er_values.append(None)
+            repeat_failures.append(f"repeat#{run_idx + 1}: no valid az/el symmetric pairs")
+
+    if not all_ratio_values:
+        return {
+            'success': False,
+            'failure_reason': "No valid mirrored pairs found for dr/rmax"
+        }
+
+    ratio_arr = np.array(all_ratio_values, dtype=float)
+    max_r_arr = np.array([v for v in all_r_max_runs if v is not None], dtype=float)
+    er_runs_clean = [float(v) for v in run_er_values if v is not None and np.isfinite(v)]
+
+    max_r_mean = float(np.mean(max_r_arr)) if max_r_arr.size > 0 else None
+    max_r_var = float(np.var(max_r_arr)) if max_r_arr.size > 0 else None
+    max_r_std = float(np.sqrt(max_r_var)) if max_r_var is not None else None
+    failure_reason_summary = None
+    if repeat_failures:
+        failure_reason_summary = '; '.join(repeat_failures[:3])
+        if len(repeat_failures) > 3:
+            failure_reason_summary += f"; +{len(repeat_failures) - 3} more"
+
+    return {
+        'success': True,
+        'detected_particles_total': detected_particles_total,
+        'detected_particles_runs': detected_runs,
+        'detected_particles_mean': int(round(float(np.mean(detected_runs)))) if detected_runs else detected_particles_total,
+        'pair_count_runs': pair_count_runs,
+        'pair_count_total': int(np.sum(pair_count_runs)),
+        'valid_run_count': len(er_runs_clean),
+        'total_runs_used': repeat_blocks,
+        'energy_resolution_runs': run_er_values,
+        'energy_resolution_mean': float(np.mean(ratio_arr)),
+        'energy_resolution_variance': float(np.var(ratio_arr)),
+        'energy_resolution_std': float(np.std(ratio_arr)),
+        'max_r_runs': all_r_max_runs,
+        'max_r_mean': max_r_mean,
+        'max_r_variance': max_r_var,
+        'max_r_std': max_r_std,
+        'r_max_all_points': rmax_all_points,
+        'r_max_all_points_runs': all_r_max_runs,
+        'all_point_count_runs': all_point_count_runs,
+        'dr_values': all_dr_values,
+        'r_values': all_r_mean_values,
+        'dr_over_r_values': all_ratio_values,
+        'pair_details': pair_details,
+        'failure_reason': failure_reason_summary
+    }
 
 
 def _center_positions(final_positions):
@@ -4181,23 +5580,34 @@ def _estimate_fwhm_and_resolution(rect_binned, bin_interval, fg, lens_vmi, ke):
         indices_above_half = np.where(I >= half_max)[0]
         if len(indices_above_half) > 0:
             fwhm_indices = indices_above_half[-1] - indices_above_half[0]
-            fwhm_r = r[indices_above_half[-1]] - r[indices_above_half[0]]
+            fwhm_r_raw = r[indices_above_half[-1]] - r[indices_above_half[0]]
+
+            # Guardrail: Δr should be at least one radial pixel/bin.
+            # This prevents dr=0 when the half-maximum occupies a single r bin.
+            radial_steps = np.diff(r)
+            radial_steps = radial_steps[np.isfinite(radial_steps) & (radial_steps > 0)]
+            if radial_steps.size > 0:
+                min_dr = float(np.median(radial_steps))
+            else:
+                min_dr = float(bin_interval) if bin_interval and bin_interval > 0 else 0.0
+
+            fwhm_r = max(float(fwhm_r_raw), float(min_dr))
             fwhm_value = fwhm_r
             
-            # Calculate energy resolution using the peak position (should be near r=0)
+            # Calculate energy resolution in ratio form: ΔE/E ≈ 2Δr/r
             peak_position = r[peak_idx]
             if peak_position != 0:
-                energy_resolution = (fwhm_r / peak_position) * 100
+                energy_resolution = (2 * fwhm_r) / abs(peak_position)
             else:
                 # If peak is exactly at 0, use the first non-zero r value
                 non_zero_indices = np.where(r > 0)[0]
                 if len(non_zero_indices) > 0:
-                    energy_resolution = (fwhm_r / r[non_zero_indices[0]]) * 100
+                    energy_resolution = (2 * fwhm_r) / abs(r[non_zero_indices[0]])
                 else:
                     energy_resolution = 0
             
             # Suppressed FWHM and resolution output
-            print(f"  FWHM: {fwhm_value:.4f} mm, Energy Resolution: {energy_resolution:.2f}%")
+            print(f"  FWHM: {fwhm_value:.4f} mm, Energy Resolution (ΔE/E): {energy_resolution:.6f}")
             
             return {
                 'fwhm': fwhm_value,
@@ -4218,15 +5628,47 @@ def _estimate_fwhm_and_resolution(rect_binned, bin_interval, fg, lens_vmi, ke):
         return None
 
 
+def _resolve_energy_resolution_project_files():
+    """
+    Resolve a consistent (IOB, LUA, FLY2) file set for energy-resolution simulations.
+    The selected IOB determines which LUA/FLY2 filenames MUST be updated.
+    """
+    preferred_prefix = "WORKING_TITLE_energy_resolution_tao"
+    fallback_prefix = "WORKING_TITLE_tao"
+
+    preferred_iob = f"{preferred_prefix}.iob"
+    fallback_iob = f"{fallback_prefix}.iob"
+
+    if os.path.exists(preferred_iob):
+        prefix = preferred_prefix
+    elif os.path.exists(fallback_iob):
+        prefix = fallback_prefix
+    else:
+        return None, None, None, None
+
+    output_fly2 = f"{prefix}.fly2"
+    output_lua = f"{prefix}.lua"
+    iob_file = f"{prefix}.iob"
+    out_file = "energy_resolution_out.txt"
+    return output_fly2, output_lua, iob_file, out_file
+
+
 def energy_resolution_analysis(processed_data, tolerable_offset=2.0,
-                              source_position=(199, -1, 0.0),
+                              source_position=(199, 0, 0),
                               num_particles_per_energy=10000,
+                              num_statistical_repeats=1,
                               x_scan_range=(73.0, 166.0),
                               bin_interval=0.05,
                               outside_region_width=2,
                               batch_size=50,
                               enable_memory_optimization=True,
-                              checkpoint_interval=25):
+                              checkpoint_interval=100,
+                              detector_x_mm=73.0,
+                              detector_x_tol_mm=0.5,
+                              detector_y_range_mm=(-35.0, 35.0),
+                              detector_z_range_mm=(-35.0, 35.0),
+                              gc_interval_combos=50,
+                              require_full_particle_capture=True):
     """
     Perform energy resolution analysis for filtered parameter combinations.
     
@@ -4242,20 +5684,41 @@ def energy_resolution_analysis(processed_data, tolerable_offset=2.0,
     Args:
         processed_data: Dictionary containing processed SIMION data from initial workflow
         tolerable_offset: Maximum allowed deviation from 73mm for intercept (default: 2.0)
-        source_position: Fixed position for particle source (default: (199, -1, 0.0))
+        source_position: Fixed position for particle source (default: (199, 0, 0))
         num_particles_per_energy: Number of particles per energy point (default: 10000)
+        num_statistical_repeats: Number of particle groups per node (default: 1)
         x_scan_range: Range of x-planes to scan for focus analysis (default: (73.0, 166.0))
         bin_interval: Bin size for rectangular coordinates (default: 0.05 mm)
         outside_region_width: Width of region outside data area (default: 2 mm)
         batch_size: Number of combinations to process per batch (default: 50)
         enable_memory_optimization: Enable aggressive memory cleanup (default: True)
-        checkpoint_interval: Save checkpoints every N combinations (default: 25, 0 to disable)
+        checkpoint_interval: Save checkpoint shard every N attempted combinations (default: 100, 0 to disable)
+        gc_interval_combos: Run gc.collect() every N attempted combinations (default: 50, 0 to disable)
+        detector_x_mm: Detector x center in mm (None to disable detector filtering)
+        detector_x_tol_mm: Detector x acceptance half-width in mm
+        detector_y_range_mm: Detector y acceptance range (min, max) in mm
+        detector_z_range_mm: Detector z acceptance range (min, max) in mm
+        require_full_particle_capture: If True, count mismatch is invalid and skipped from pairing
     
     Returns:
-        dict: Updated processed_data with FWHM results in global section
+        dict: Updated processed_data with raw ion payload (`ion_n,y,z`) in global section
     """
     import numpy as np
-    
+
+    try:
+        num_statistical_repeats = int(num_statistical_repeats)
+    except (TypeError, ValueError):
+        num_statistical_repeats = 1
+    if num_statistical_repeats <= 0:
+        num_statistical_repeats = 1
+
+    try:
+        gc_interval_combos = int(gc_interval_combos)
+    except (TypeError, ValueError):
+        gc_interval_combos = 0
+    if gc_interval_combos < 0:
+        gc_interval_combos = 0
+
     # Step 0: focus_filtering - find out all fg,lens_vmi, ke for filtered parameters
     print("Step 0: Filtering parameter combinations based on focus criteria...")
     filtered_combinations = focus_filtering(processed_data, tolerable_offset)
@@ -4267,15 +5730,58 @@ def energy_resolution_analysis(processed_data, tolerable_offset=2.0,
     total_combinations = len(filtered_combinations)
     print(f"Found {total_combinations} valid combinations for energy resolution analysis")
     
+    def _norm_combo(c):
+        fg, lens_vmi, ke = c
+        return (float(fg), float(lens_vmi), round(float(ke), 9))
+
+    requested_norm = set(_norm_combo(c) for c in filtered_combinations)
+
     # Try to load from checkpoint for recovery
     checkpoint_name = 'energy_resolution'
     loaded_results, completed_combinations, last_checkpoint = load_latest_checkpoint(checkpoint_name)
     
-    if loaded_results is not None and len(completed_combinations) > 0:
-        print(f"  Resuming from checkpoint: {len(completed_combinations)} combinations already completed")
-        fwhm_results = loaded_results
-        # Filter out completed combinations
-        remaining_combinations = [c for c in filtered_combinations if tuple(c) not in completed_combinations]
+    if loaded_results is not None:
+        checkpoint_marker_count = len(completed_combinations)
+        if checkpoint_marker_count > 0:
+            print(f"  Resuming from checkpoint: {checkpoint_marker_count} combinations already completed")
+        else:
+            print("  Loaded checkpoint file with 0 completion markers; recovering from stored results...")
+        # Keep only checkpoint entries that belong to the current parameter request
+        fwhm_results = {}
+        dropped_incomplete = 0
+        for fg, fg_data in (loaded_results or {}).items():
+            for lens_vmi, lens_data in (fg_data or {}).items():
+                for ke, result in (lens_data or {}).items():
+                    combo_norm = _norm_combo((fg, lens_vmi, ke))
+                    if combo_norm not in requested_norm:
+                        continue
+                    if not _checkpoint_result_has_required_pair_details(result):
+                        dropped_incomplete += 1
+                        continue
+                    if fg not in fwhm_results:
+                        fwhm_results[fg] = {}
+                    if lens_vmi not in fwhm_results[fg]:
+                        fwhm_results[fg][lens_vmi] = {}
+                    fwhm_results[fg][lens_vmi][ke] = result
+
+        # IMPORTANT: Use actual stored results as source of truth.
+        # Do not trust completed-list alone, it can contain stale entries from old runs.
+        completed_norm = set()
+        for fg, fg_data in fwhm_results.items():
+            for lens_vmi, lens_data in fg_data.items():
+                for ke in lens_data.keys():
+                    completed_norm.add(_norm_combo((fg, lens_vmi, ke)))
+
+        completed_combinations = set(completed_norm)
+        stale_markers = checkpoint_marker_count - len(completed_norm)
+        if stale_markers > 0:
+            print(f"  Ignored {stale_markers} stale checkpoint completion markers")
+        if dropped_incomplete > 0:
+            print(
+                f"  Dropped {dropped_incomplete} incomplete checkpoint nodes "
+                f"(missing recoverable payload: dr_over_r_pairs or raw_ion_points_yz)"
+            )
+        remaining_combinations = [c for c in filtered_combinations if _norm_combo(c) not in completed_norm]
         print(f"  Remaining combinations: {len(remaining_combinations)}")
     else:
         fwhm_results = {}
@@ -4297,6 +5803,7 @@ def energy_resolution_analysis(processed_data, tolerable_offset=2.0,
                     if 'global' not in processed_data[fg][lens_vmi][ke]:
                         processed_data[fg][lens_vmi][ke]['global'] = {}
                     processed_data[fg][lens_vmi][ke]['global'].update(fwhm_results[fg][lens_vmi][ke])
+        consolidate_checkpoints('energy_resolution', cleanup_parts=True)
         return processed_data
     
     # Calculate number of batches for remaining combinations
@@ -4308,16 +5815,20 @@ def energy_resolution_analysis(processed_data, tolerable_offset=2.0,
         if initial_memory > 0:
             print(f"Initial memory usage: {initial_memory:.1f} MB")
     
-    # Files for energy resolution analysis
-    OUTPUT_FILENAME_FLY2 = 'WORKING_TITLE_energy_resolution_tao.fly2'
-    OUTPUT_FILENAME_LUA = "WORKING_TITLE_energy_resolution_tao.lua"
-    IOB_FILE = "WORKING_TITLE_energy_resolution_tao.iob"
-    OUT_FILE = "energy_resolution_out.txt"
+    # Files for energy resolution analysis (must be consistent with selected IOB project)
+    OUTPUT_FILENAME_FLY2, OUTPUT_FILENAME_LUA, IOB_FILE, OUT_FILE = _resolve_energy_resolution_project_files()
+    if IOB_FILE is None:
+        print("ERROR: IOB file not found! Checked 'WORKING_TITLE_energy_resolution_tao.iob' and 'WORKING_TITLE_tao.iob'")
+        return processed_data
+    print(f"Using project files: IOB={IOB_FILE}, LUA={OUTPUT_FILENAME_LUA}, FLY2={OUTPUT_FILENAME_FLY2}")
     
     # Track progress
-    processed_count = len(completed_combinations)
+    processed_count = total_combinations - len(remaining_combinations)
+    attempted_count = total_combinations - len(remaining_combinations)
     failed_count = 0
     start_time = time.time()
+    checkpoint_chunk_results = {}
+    checkpoint_chunk_completed = set()
     
     # Process in batches
     for batch_idx in range(num_batches):
@@ -4337,7 +5848,9 @@ def energy_resolution_analysis(processed_data, tolerable_offset=2.0,
         batch_start_time = time.time()
         
         for combo_idx, (fg, lens_vmi, ke) in enumerate(batch_combinations):
-            combo_num = processed_count + combo_idx + 1
+            # processed_count 在循环内会递增，所以不要再加 combo_idx
+            combo_num = attempted_count + 1
+            attempted_count += 1
             
             try:
                 # Step 1: Generate corresponding fly2 file
@@ -4346,87 +5859,182 @@ def energy_resolution_analysis(processed_data, tolerable_offset=2.0,
                     filename=OUTPUT_FILENAME_FLY2,
                     position=source_position,
                     num_particles=num_particles_per_energy,
-                    ke=ke
+                    ke=ke,
+                    num_groups=int(num_statistical_repeats)
                 )
                 
                 # Step 2: Generate corresponding lua file based on filtered fg, lens_vmi, ke
                 single_param = get_parameters_for_combination(processed_data, fg, lens_vmi, ke)
+                combo_out_file = make_energy_resolution_temp_out_file(OUT_FILE)
+
+                try:
+                    # Step 3: Run simion (node-local OUT file avoids large shared-file append costs)
+                    sim_stats = run_optimized_simulations_with_ke(
+                        single_param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, combo_out_file
+                    )
+                    if isinstance(sim_stats, dict):
+                        if sim_stats.get('successful', 0) <= 0:
+                            print(f"    ERROR: SIMION run failed for this combination (stats={sim_stats})")
+                            failed_count += 1
+                            continue
+
+                    # Step 4: Parse ion initial/final rows from node-local output
+                    ion_records, success = _extract_ion_records_from_out_file(
+                        combo_out_file,
+                        detector_x_mm=detector_x_mm,
+                        detector_x_tol_mm=detector_x_tol_mm,
+                        detector_y_range_mm=detector_y_range_mm,
+                        detector_z_range_mm=detector_z_range_mm
+                    )
+                finally:
+                    remove_file_with_retry(combo_out_file)
                 
-                # Clear output file for this specific run
-                clear_file_contents(OUT_FILE)
-                
-                # Step 3: Run simion
-                run_optimized_simulations_with_ke(single_param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, OUT_FILE)
-                
-                # Process simulation data for this combination
-                single_processed_data = process_data(
-                    x_range=x_scan_range,
-                    file_path=OUT_FILE,
-                    focus_axis='z',
-                    fly2_file=OUTPUT_FILENAME_FLY2,
-                    y_range=(-0.5, 0.5),
-                    z_range=(-0.5, 0.5)
-                )
-                
-                if single_processed_data is None:
-                    print(f"    ERROR: Data processing failed")
+                if not success or not ion_records:
+                    print("    WARNING: No ion rows found in output")
                     failed_count += 1
                     continue
-                
-                # Step 4: Extract final positions
-                final_positions, success = _extract_final_positions(single_processed_data, fg, lens_vmi, ke)
-                
-                if not success or not final_positions:
-                    print(f"    WARNING: No final positions found")
+
+                expected_particles_total = int(num_particles_per_energy) * int(num_statistical_repeats)
+                detected_particles = len(ion_records)
+                if detected_particles <= 0:
+                    print("    WARNING: No ion rows after detector acceptance filter")
                     failed_count += 1
                     continue
-                
-                # Center the positions
-                final_positions = _center_positions(final_positions)
-                
-                # Step 5: Apply rectangular binning
-                rect_binned, rect_edges, rect_centers = bin_positions(
-                    final_positions,
-                    bin_type='rectangular',
-                    bin_interval=bin_interval,
-                    outside_region_width=outside_region_width
-                )
-                
-                # Step 6: Perform Abel inversion and estimate FWHM
-                fwhm_result = _estimate_fwhm_and_resolution(rect_binned, bin_interval, fg, lens_vmi, ke)
-                
-                if fwhm_result is None:
-                    failed_count += 1
-                    continue
-                
+
+                # Pipeline step 1: strict count check before any pairing/analysis.
+                if require_full_particle_capture and detected_particles != expected_particles_total:
+                    mismatch_reason = (
+                        f"Particle mismatch after detector filter: detected {detected_particles} "
+                        f"!= expected {expected_particles_total}"
+                    )
+                    print(f"    WARNING: {mismatch_reason}; skip pairing and dr/rmax.")
+                    node_result = _build_invalid_energy_result(
+                        expected_particles_total=expected_particles_total,
+                        detected_particles=detected_particles,
+                        particles_per_run=num_particles_per_energy,
+                        requested_runs=num_statistical_repeats,
+                        failure_reason=mismatch_reason,
+                        pipeline_stage='count_check'
+                    )
+                else:
+                    raw_ion_points = _convert_ion_records_to_raw_yz(ion_records)
+                    if not raw_ion_points:
+                        print("    WARNING: No valid ion_n/y/z rows after extraction")
+                        failed_count += 1
+                        continue
+
+                    # Pipeline steps 2-3: pair first, then compute dr/rmax.
+                    stats = _compute_dr_over_rmax_statistics_from_records(
+                        ion_records=ion_records,
+                        particles_per_run=num_particles_per_energy,
+                        requested_runs=num_statistical_repeats,
+                        radius_origin_y=source_position[1] if len(source_position) > 1 else 0.0,
+                        radius_origin_z=source_position[2] if len(source_position) > 2 else 0.0
+                    )
+                    if not stats.get('success'):
+                        pairing_reason = stats.get('failure_reason', 'dr/rmax analysis failed')
+                        print(f"    WARNING: {pairing_reason}")
+                        node_result = _build_invalid_energy_result(
+                            expected_particles_total=expected_particles_total,
+                            detected_particles=detected_particles,
+                            particles_per_run=num_particles_per_energy,
+                            requested_runs=num_statistical_repeats,
+                            failure_reason=pairing_reason,
+                            pipeline_stage='pairing'
+                        )
+                    else:
+                        node_result = {
+                            'fwhm': None,
+                            'fwhm_mean': None,
+                            'fwhm_variance': None,
+                            'fwhm_std': None,
+                            'fwhm_runs': [],
+                            'energy_resolution': stats.get('energy_resolution_mean'),
+                            'energy_resolution_mean': stats.get('energy_resolution_mean'),
+                            'energy_resolution_variance': stats.get('energy_resolution_variance'),
+                            'energy_resolution_std': stats.get('energy_resolution_std'),
+                            'energy_resolution_runs': stats.get('energy_resolution_runs', []),
+                            'max_r': stats.get('max_r_mean'),
+                            'max_r_mean': stats.get('max_r_mean'),
+                            'max_r_variance': stats.get('max_r_variance'),
+                            'max_r_std': stats.get('max_r_std'),
+                            'max_r_runs': stats.get('max_r_runs', []),
+                            'r_max_all_points': stats.get('r_max_all_points'),
+                            'r_max_all_points_runs': stats.get('r_max_all_points_runs', []),
+                            'all_point_count_runs': stats.get('all_point_count_runs', []),
+                            'generated_particles': expected_particles_total,
+                            'generated_particles_per_run': int(num_particles_per_energy),
+                            # IMPORTANT: use total detected count for count-check consistency.
+                            # Mean-per-run can be derived from detected_particles_runs.
+                            'detected_particles': stats.get('detected_particles_total', detected_particles),
+                            'detected_particles_runs': stats.get('detected_particles_runs', []),
+                            'pair_count': stats.get('pair_count_total', 0),
+                            'pair_count_runs': stats.get('pair_count_runs', []),
+                            'dr_values': stats.get('dr_values', []),
+                            'r_values': stats.get('r_values', []),
+                            'dr_over_r_values': stats.get('dr_over_r_values', []),
+                            'dr_over_r_pairs': stats.get('pair_details', []),
+                            'raw_ion_points_yz': raw_ion_points,
+                            'raw_point_count': len(raw_ion_points),
+                            'raw_point_format': 'ion_n,y,z',
+                            'total_runs': int(num_statistical_repeats),
+                            'valid_run_count': int(stats.get('valid_run_count', 0)),
+                            'valid': bool(stats.get('valid_run_count', 0) > 0),
+                            'failure_reason': stats.get('failure_reason'),
+                            'count_check_passed': True,
+                            'plot_marker': None,
+                            'plot_skip': False,
+                            'pipeline_stage': 'dr_over_rmax'
+                        }
+
                 # Store result
                 if fg not in fwhm_results:
                     fwhm_results[fg] = {}
                 if lens_vmi not in fwhm_results[fg]:
                     fwhm_results[fg][lens_vmi] = {}
                 
-                fwhm_results[fg][lens_vmi][ke] = fwhm_result
+                fwhm_results[fg][lens_vmi][ke] = node_result
+                _set_checkpoint_node(
+                    checkpoint_chunk_results,
+                    fg,
+                    lens_vmi,
+                    ke,
+                    fwhm_results[fg][lens_vmi][ke]
+                )
                 
                 # Mark this combination as completed (only on success)
                 completed_combinations.add((fg, lens_vmi, ke))
+                checkpoint_chunk_completed.add((fg, lens_vmi, ke))
                 processed_count += 1
-                
-                # Clean up single_processed_data to free memory
-                del single_processed_data
-                del final_positions
-                del rect_binned
                 
             except Exception as e:
                 print(f"    ERROR: {str(e)}")
                 failed_count += 1
-                continue
-            
-            # Save checkpoint if interval reached
-            if checkpoint_interval > 0 and combo_num % checkpoint_interval == 0:
-                save_checkpoint(fwhm_results, 'energy_resolution', combo_num, completed_combinations)
+            finally:
+                # Save incremental checkpoint shard by attempts.
+                if checkpoint_interval > 0 and attempted_count > 0 and attempted_count % checkpoint_interval == 0:
+                    if _count_checkpoint_nodes(checkpoint_chunk_results) > 0:
+                        save_checkpoint(
+                            checkpoint_chunk_results,
+                            'energy_resolution',
+                            attempted_count,
+                            checkpoint_chunk_completed
+                        )
+                        checkpoint_chunk_results = {}
+                        checkpoint_chunk_completed = set()
+                if gc_interval_combos > 0 and attempted_count > 0 and attempted_count % gc_interval_combos == 0:
+                    gc.collect()
         
-        # End of batch - save checkpoint
-        save_checkpoint(fwhm_results, 'energy_resolution', processed_count, completed_combinations)
+        # End of batch - flush incremental checkpoint shard
+        if _count_checkpoint_nodes(checkpoint_chunk_results) > 0:
+            save_checkpoint(
+                checkpoint_chunk_results,
+                'energy_resolution',
+                attempted_count,
+                checkpoint_chunk_completed
+            )
+            checkpoint_chunk_results = {}
+            checkpoint_chunk_completed = set()
         
         # End of batch - cleanup
         batch_time = time.time() - batch_start_time
@@ -4466,27 +6074,33 @@ def energy_resolution_analysis(processed_data, tolerable_offset=2.0,
     if processed_count > 0:
         print(f"  Average time per combination: {total_time/processed_count:.2f}s")
     
-    # Clean up checkpoint file after successful completion
-    checkpoint_file = 'energy_resolution_checkpoint.pkl'
-    if os.path.exists(checkpoint_file):
-        try:
-            os.remove(checkpoint_file)
-            print(f"  Cleaned up checkpoint file: {checkpoint_file}")
-        except:
-            pass
+    # Consolidate checkpoint shards after successful completion
+    consolidate_checkpoints('energy_resolution', cleanup_parts=True)
     
     return processed_data
 
 
 def energy_resolution_analysis_direct(processed_data, all_combinations,
-                                      source_position=(199, -1, 0.0),
+                                      source_position=(199, 0, 0),
                                       num_particles_per_energy=10000,
+                                      num_statistical_repeats=1,
                                       x_scan_range=(73.0, 166.0),
                                       bin_interval=0.05,
                                       outside_region_width=2,
                                       batch_size=50,
                                       enable_memory_optimization=True,
-                                      checkpoint_interval=25):
+                                      checkpoint_interval=100,
+                                      max_combo_retries=5,
+                                      require_full_particle_capture=True,
+                                      retry_backoff_s=0.5,
+                                      timing_verbose=True,
+                                      detector_x_mm=73.0,
+                                      detector_x_tol_mm=0.5,
+                                      detector_y_range_mm=(-35.0, 35.0),
+                                      detector_z_range_mm=(-35.0, 35.0),
+                                      gc_interval_combos=50,
+                                      intraction_volume = False,
+                                      ionization_volume_array_mm=0):
     """
     Perform energy resolution analysis directly on specified combinations WITHOUT focus filtering.
     
@@ -4499,36 +6113,115 @@ def energy_resolution_analysis_direct(processed_data, all_combinations,
     Args:
         processed_data: Dictionary containing processed SIMION data
         all_combinations: List of (fg, lens_vmi, ke) tuples to analyze
-        source_position: Fixed position for particle source (default: (199, -1, 0.0))
+        source_position: Fixed position for particle source (default: (199, 0, 0))
         num_particles_per_energy: Number of particles per energy point (default: 10000)
+        num_statistical_repeats: Statistical repeats per node in ONE SIMION run.
+            Internally generates num_particles_per_energy * num_statistical_repeats
+            particles and splits detected particles into repeat blocks.
         x_scan_range: Range of x-planes to scan for focus analysis (default: (73.0, 166.0))
         bin_interval: Bin size for rectangular coordinates (default: 0.05 mm)
         outside_region_width: Width of region outside data area (default: 2 mm)
         batch_size: Number of combinations to process per batch (default: 50)
         enable_memory_optimization: Enable aggressive memory cleanup (default: True)
-        checkpoint_interval: Save checkpoints every N combinations (default: 25, 0 to disable)
+        checkpoint_interval: Save checkpoint shard every N attempted combinations (default: 100, 0 to disable)
+        gc_interval_combos: Run gc.collect() every N attempted combinations (default: 50, 0 to disable)
+        detector_x_mm: Detector x center in mm (None to disable detector filtering)
+        detector_x_tol_mm: Detector x acceptance half-width in mm
+        detector_y_range_mm: Detector y acceptance range (min, max) in mm
+        detector_z_range_mm: Detector z acceptance range (min, max) in mm
     
     Returns:
-        dict: Updated processed_data with FWHM results in global section
+        dict: Updated processed_data with raw ion payload (`ion_n,y,z`) in global section
     """
     import numpy as np
-    
+
+    try:
+        num_statistical_repeats = int(num_statistical_repeats)
+    except (TypeError, ValueError):
+        num_statistical_repeats = 1
+    if num_statistical_repeats <= 0:
+        num_statistical_repeats = 1
+
+    try:
+        gc_interval_combos = int(gc_interval_combos)
+    except (TypeError, ValueError):
+        gc_interval_combos = 0
+    if gc_interval_combos < 0:
+        gc_interval_combos = 0
+
     total_combinations = len(all_combinations)
     if total_combinations == 0:
         print("No combinations provided for energy resolution analysis!")
         return processed_data
     
-    print(f"Direct energy resolution analysis: {total_combinations} combinations (no focus filtering)")
+    print(
+        f"Direct energy resolution analysis: {total_combinations} combinations (no focus filtering), "
+        f"stat repeats per node={num_statistical_repeats}"
+    )
+    detector_filter_enabled = (
+        detector_x_mm is not None
+        and detector_x_tol_mm is not None
+        and detector_y_range_mm is not None
+        and detector_z_range_mm is not None
+    )
+    if detector_filter_enabled:
+        print(
+            f"Detector acceptance enabled: x={detector_x_mm}±{detector_x_tol_mm} mm, "
+            f"y={tuple(detector_y_range_mm)} mm, z={tuple(detector_z_range_mm)} mm"
+        )
     
+    def _norm_combo(c):
+        fg, lens_vmi, ke = c
+        return (float(fg), float(lens_vmi), round(float(ke), 9))
+
+    requested_norm = set(_norm_combo(c) for c in all_combinations)
+
     # Try to load from checkpoint for recovery
     checkpoint_name = 'energy_resolution_direct'
     loaded_results, completed_combinations, last_checkpoint = load_latest_checkpoint(checkpoint_name)
     
-    if loaded_results is not None and len(completed_combinations) > 0:
-        print(f"  Resuming from checkpoint: {len(completed_combinations)} combinations already completed")
-        fwhm_results = loaded_results
-        # Filter out completed combinations
-        remaining_combinations = [c for c in all_combinations if tuple(c) not in completed_combinations]
+    if loaded_results is not None:
+        checkpoint_marker_count = len(completed_combinations)
+        if checkpoint_marker_count > 0:
+            print(f"  Resuming from checkpoint: {checkpoint_marker_count} combinations already completed")
+        else:
+            print("  Loaded checkpoint file with 0 completion markers; recovering from stored results...")
+        # Keep only checkpoint entries that belong to the current parameter request
+        fwhm_results = {}
+        dropped_incomplete = 0
+        for fg, fg_data in (loaded_results or {}).items():
+            for lens_vmi, lens_data in (fg_data or {}).items():
+                for ke, result in (lens_data or {}).items():
+                    combo_norm = _norm_combo((fg, lens_vmi, ke))
+                    if combo_norm not in requested_norm:
+                        continue
+                    if not _checkpoint_result_has_required_pair_details(result):
+                        dropped_incomplete += 1
+                        continue
+                    if fg not in fwhm_results:
+                        fwhm_results[fg] = {}
+                    if lens_vmi not in fwhm_results[fg]:
+                        fwhm_results[fg][lens_vmi] = {}
+                    fwhm_results[fg][lens_vmi][ke] = result
+
+        # IMPORTANT: Use actual stored results as source of truth.
+        # Do not trust completed-list alone, it can contain stale entries from old runs.
+        completed_norm = set()
+        for fg, fg_data in fwhm_results.items():
+            for lens_vmi, lens_data in fg_data.items():
+                for ke in lens_data.keys():
+                    completed_norm.add(_norm_combo((fg, lens_vmi, ke)))
+
+        completed_combinations = set(completed_norm)
+        stale_markers = checkpoint_marker_count - len(completed_norm)
+        if stale_markers > 0:
+            print(f"  Ignored {stale_markers} stale checkpoint completion markers")
+        if dropped_incomplete > 0:
+            print(
+                f"  Dropped {dropped_incomplete} incomplete checkpoint nodes "
+                f"(missing recoverable payload: dr_over_r_pairs or raw_ion_points_yz)"
+            )
+        remaining_combinations = [c for c in all_combinations if _norm_combo(c) not in completed_norm]
         print(f"  Remaining combinations: {len(remaining_combinations)}")
     else:
         # Use regular dict instead of defaultdict to avoid memory leaks
@@ -4551,6 +6244,7 @@ def energy_resolution_analysis_direct(processed_data, all_combinations,
                     if 'global' not in processed_data[fg][lens_vmi][ke]:
                         processed_data[fg][lens_vmi][ke]['global'] = {}
                     processed_data[fg][lens_vmi][ke]['global'].update(fwhm_results[fg][lens_vmi][ke])
+        consolidate_checkpoints('energy_resolution_direct', cleanup_parts=True)
         return processed_data
     
     # Calculate number of batches for remaining combinations
@@ -4562,16 +6256,28 @@ def energy_resolution_analysis_direct(processed_data, all_combinations,
         if initial_memory > 0:
             print(f"Initial memory usage: {initial_memory:.1f} MB")
     
-    # Files for energy resolution analysis
-    OUTPUT_FILENAME_FLY2 = 'WORKING_TITLE_energy_resolution_tao.fly2'
-    OUTPUT_FILENAME_LUA = "WORKING_TITLE_energy_resolution_tao.lua"
-    IOB_FILE = "WORKING_TITLE_energy_resolution_tao.iob"
-    OUT_FILE = "energy_resolution_out.txt"
+    # Files for energy resolution analysis (must be consistent with selected IOB project)
+    OUTPUT_FILENAME_FLY2, OUTPUT_FILENAME_LUA, IOB_FILE, OUT_FILE = _resolve_energy_resolution_project_files()
+    if IOB_FILE is None:
+        print("ERROR: IOB file not found! Checked 'WORKING_TITLE_energy_resolution_tao.iob' and 'WORKING_TITLE_tao.iob'")
+        return processed_data
+    print(f"Using project files: IOB={IOB_FILE}, LUA={OUTPUT_FILENAME_LUA}, FLY2={OUTPUT_FILENAME_FLY2}")
     
     # Track progress
-    processed_count = len(completed_combinations)
+    processed_count = total_combinations - len(remaining_combinations)
+    attempted_count = total_combinations - len(remaining_combinations)
     failed_count = 0
     start_time = time.time()
+    timing_totals = {
+        'particle_gen_s': 0.0,
+        'simion_s': 0.0,
+        'parse_s': 0.0,
+        'extract_s': 0.0,
+        'bin_abel_s': 0.0
+    }
+    timing_attempts = 0
+    checkpoint_chunk_results = {}
+    checkpoint_chunk_completed = set()
     
     # Memory monitoring
     MEMORY_WARNING_MB = 4000  # Warn at 4GB
@@ -4603,138 +6309,325 @@ def energy_resolution_analysis_direct(processed_data, all_combinations,
                     print(f"  Memory after cleanup: {current_memory:.1f} MB")
         
         batch_start_time = time.time()
+
+        def _cleanup_single_processed_data(obj):
+            if obj is None:
+                return
+            try:
+                for fg_key in list(obj.keys()):
+                    for lens_key in list(obj[fg_key].keys()):
+                        for ke_key in list(obj[fg_key][lens_key].keys()):
+                            if 'local' in obj[fg_key][lens_key][ke_key]:
+                                obj[fg_key][lens_key][ke_key]['local'].clear()
+                            if 'global' in obj[fg_key][lens_key][ke_key]:
+                                obj[fg_key][lens_key][ke_key]['global'].clear()
+                        obj[fg_key][lens_key].clear()
+                    obj[fg_key].clear()
+                obj.clear()
+            except Exception:
+                pass
         
         for combo_idx, (fg, lens_vmi, ke) in enumerate(batch_combinations):
-            combo_num = processed_count + combo_idx + 1
-            
-            # Local variables for this iteration - will be cleaned up
-            single_processed_data = None
-            final_positions = None
-            rect_binned = None
-            fwhm_result = None
-            
-            try:
-                # Step 1: Generate corresponding fly2 file
-                print(f"  [{combo_num}/{total_combinations}] Processing FG {fg}, Lens {lens_vmi}, KE {ke:.2f} eV...")
-                energy_resolution_utilis(
-                    filename=OUTPUT_FILENAME_FLY2,
-                    position=source_position,
-                    num_particles=num_particles_per_energy,
-                    ke=ke
-                )
-                
-                # Step 2: Generate corresponding lua file based on fg, lens_vmi, ke
-                single_param = get_parameters_for_combination(processed_data, fg, lens_vmi, ke)
-                
-                # Clear output file for this specific run
-                clear_file_contents(OUT_FILE)
-                
-                # Step 3: Run simion
-                run_optimized_simulations_with_ke(single_param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, OUT_FILE)
-                
-                # Process simulation data for this combination
-                # Use memory-optimized version
-                single_processed_data = process_data_memory_optimized(
-                    x_range=x_scan_range,
-                    file_path=OUT_FILE,
-                    focus_axis='z',
-                    fly2_file=OUTPUT_FILENAME_FLY2,
-                    y_range=(-0.5, 0.5),
-                    z_range=(-0.5, 0.5)
-                )
-                
-                if single_processed_data is None:
-                    print(f"    ERROR: Data processing failed")
-                    failed_count += 1
-                    continue
-                
-                # Step 4: Extract final positions
-                final_positions, success = _extract_final_positions(single_processed_data, fg, lens_vmi, ke)
-                
-                if not success or not final_positions:
-                    print(f"    WARNING: No final positions found")
-                    failed_count += 1
-                    # Explicit cleanup
-                    del single_processed_data
-                    single_processed_data = None
-                    continue
-                
-                # Center the positions
-                final_positions = _center_positions(final_positions)
-                
-                # Step 5: Apply rectangular binning
-                rect_binned, rect_edges, rect_centers = bin_positions(
-                    final_positions,
-                    bin_type='rectangular',
-                    bin_interval=bin_interval,
-                    outside_region_width=outside_region_width
-                )
-                
-                # Step 6: Perform Abel inversion and estimate FWHM
-                fwhm_result = _estimate_fwhm_and_resolution(rect_binned, bin_interval, fg, lens_vmi, ke)
-                
-                if fwhm_result is None:
-                    failed_count += 1
-                else:
-                    # Store result - use regular dict, only store essential data
+            combo_num = attempted_count + 1
+            attempted_count += 1
+            print(f"  [{combo_num}/{total_combinations}] Processing FG {fg}, Lens {lens_vmi}, KE {ke:.2f} eV...")
+
+            combo_success = False
+            last_failure_reason = "unknown"
+            last_detected_particles = 0
+            combo_timing = {
+                'particle_gen_s': 0.0,
+                'simion_s': 0.0,
+                'parse_s': 0.0,
+                'extract_s': 0.0,
+                'bin_abel_s': 0.0
+            }
+
+            for attempt in range(1, max_combo_retries + 1):
+                single_processed_data = None
+                ion_records = None
+                dr_over_r_stats = None
+                attempt_out_file = None
+                detected_particles = 0
+                expected_particles_total = int(num_particles_per_energy) * int(num_statistical_repeats)
+                out_file_size_mb = 0.0
+                attempt_timing = {
+                    'particle_gen_s': 0.0,
+                    'simion_s': 0.0,
+                    'parse_s': 0.0,
+                    'extract_s': 0.0,
+                    'bin_abel_s': 0.0
+                }
+
+                try:
+                    t0 = time.time()
+                    energy_resolution_utilis(
+                        filename=OUTPUT_FILENAME_FLY2,
+                        position=source_position,
+                        num_particles=int(num_particles_per_energy),
+                        ke=ke,
+                        num_groups=int(num_statistical_repeats),
+                        az_first_deg=0.0,
+                        az_step_deg=30.0,
+                        az_num=7,
+                        el_first_deg=0.0,
+                        el_step_deg=30.0,
+                        el_num =13,
+                        intraction_volume = intraction_volume,
+                        intraction_volume_array_mm = ionization_volume_array_mm
+                    )
+                    attempt_timing['particle_gen_s'] = time.time() - t0
+
+                    single_param = get_parameters_for_combination(processed_data, fg, lens_vmi, ke)
+                    attempt_out_file = make_energy_resolution_temp_out_file(OUT_FILE)
+
+                    t0 = time.time()
+                    sim_stats = run_optimized_simulations_with_ke(
+                        single_param, ke, OUTPUT_FILENAME_LUA, IOB_FILE, attempt_out_file
+                    )
+                    attempt_timing['simion_s'] = time.time() - t0
+                    if isinstance(sim_stats, dict) and sim_stats.get('successful', 0) <= 0:
+                        last_failure_reason = f"SIMION failed (stats={sim_stats})"
+                        raise RuntimeError(last_failure_reason)
+                    if not os.path.exists(attempt_out_file):
+                        last_failure_reason = f"SIMION output missing: {attempt_out_file}"
+                        raise RuntimeError(last_failure_reason)
+                    out_file_size_mb = os.path.getsize(attempt_out_file) / (1024 * 1024)
+                    if out_file_size_mb <= 0:
+                        last_failure_reason = "SIMION output file is empty"
+                        raise RuntimeError(last_failure_reason)
+
+                    t0 = time.time()
+                    ion_records, success = _extract_ion_records_from_out_file(
+                        attempt_out_file,
+                        detector_x_mm=detector_x_mm,
+                        detector_x_tol_mm=detector_x_tol_mm,
+                        detector_y_range_mm=detector_y_range_mm,
+                        detector_z_range_mm=detector_z_range_mm
+                    )
+                    attempt_timing['parse_s'] = time.time() - t0
+                    attempt_timing['extract_s'] = 0.0
+                    if not success or not ion_records:
+                        last_failure_reason = "No ion rows found in output"
+                        raise RuntimeError(last_failure_reason)
+
+                    detected_particles = len(ion_records)
+                    last_detected_particles = detected_particles
+                    if require_full_particle_capture and detected_particles != expected_particles_total:
+                        if detector_filter_enabled:
+                            last_failure_reason = (
+                                f"Particle mismatch after detector filter: detected {detected_particles} "
+                                f"!= expected {expected_particles_total}"
+                            )
+                        else:
+                            last_failure_reason = (
+                                f"Particle mismatch: detected {detected_particles} != expected {expected_particles_total}"
+                            )
+                        raise RuntimeError(last_failure_reason)
+
+                    t0 = time.time()
+                    raw_ion_points = _convert_ion_records_to_raw_yz(ion_records)
+                    if not raw_ion_points:
+                        last_failure_reason = "No valid ion_n/y/z rows after extraction"
+                        raise RuntimeError(last_failure_reason)
+
+                    # Pipeline step 2-3: pair first, then compute dr/rmax.
+                    dr_over_r_stats = _compute_dr_over_rmax_statistics_from_records(
+                        ion_records=ion_records,
+                        particles_per_run=num_particles_per_energy,
+                        requested_runs=num_statistical_repeats,
+                        radius_origin_y=source_position[1] if len(source_position) > 1 else 0.0,
+                        radius_origin_z=source_position[2] if len(source_position) > 2 else 0.0
+                    )
+                    attempt_timing['bin_abel_s'] = time.time() - t0
+                    if not dr_over_r_stats.get('success'):
+                        last_failure_reason = dr_over_r_stats.get('failure_reason', 'Pairing/dr-rmax failed')
+                        raise RuntimeError(last_failure_reason)
+
+                    fwhm_runs = []
+                    fwhm_mean = None
+                    fwhm_var = None
+                    fwhm_std = None
+
+                    er_runs = dr_over_r_stats.get('energy_resolution_runs', [])
+                    valid_run_count = int(dr_over_r_stats.get('valid_run_count', 0))
+                    er_mean = dr_over_r_stats.get('energy_resolution_mean')
+                    er_var = dr_over_r_stats.get('energy_resolution_variance')
+                    er_std = dr_over_r_stats.get('energy_resolution_std')
+
+                    max_r_runs = dr_over_r_stats.get('max_r_runs', [])
+                    max_r_mean = dr_over_r_stats.get('max_r_mean')
+                    max_r_var = dr_over_r_stats.get('max_r_variance')
+                    max_r_std = dr_over_r_stats.get('max_r_std')
+
+                    detected_runs = dr_over_r_stats.get('detected_particles_runs', [])
+                    detected_particles_mean = dr_over_r_stats.get('detected_particles_mean', detected_particles)
+                    failure_reason_summary = dr_over_r_stats.get('failure_reason')
+                    pair_count_total = int(dr_over_r_stats.get('pair_count_total', 0))
+
                     if fg not in fwhm_results:
                         fwhm_results[fg] = {}
                     if lens_vmi not in fwhm_results[fg]:
                         fwhm_results[fg][lens_vmi] = {}
-                    
-                    # Only store essential fields to minimize memory
+
                     fwhm_results[fg][lens_vmi][ke] = {
-                        'fwhm': fwhm_result.get('fwhm'),
-                        'energy_resolution': fwhm_result.get('energy_resolution'),
-                        'max_r': fwhm_result.get('max_r')
+                        'fwhm': fwhm_mean,
+                        'fwhm_mean': fwhm_mean,
+                        'fwhm_variance': fwhm_var,
+                        'fwhm_std': fwhm_std,
+                        'fwhm_runs': fwhm_runs,
+                        'energy_resolution': er_mean,
+                        'energy_resolution_mean': er_mean,
+                        'energy_resolution_variance': er_var,
+                        'energy_resolution_std': er_std,
+                        'energy_resolution_runs': er_runs,
+                        'max_r': max_r_mean,
+                        'max_r_mean': max_r_mean,
+                        'max_r_variance': max_r_var,
+                        'max_r_std': max_r_std,
+                        'max_r_runs': max_r_runs,
+                        'r_max_all_points': dr_over_r_stats.get('r_max_all_points'),
+                        'r_max_all_points_runs': dr_over_r_stats.get('r_max_all_points_runs', []),
+                        'all_point_count_runs': dr_over_r_stats.get('all_point_count_runs', []),
+                        'generated_particles': expected_particles_total,
+                        'generated_particles_per_run': int(num_particles_per_energy),
+                        # IMPORTANT: store total detected count, not per-run mean.
+                        'detected_particles': dr_over_r_stats.get('detected_particles_total', detected_particles),
+                        'detected_particles_runs': detected_runs,
+                        'pair_count': pair_count_total,
+                        'pair_count_runs': dr_over_r_stats.get('pair_count_runs', []),
+                        'dr_values': dr_over_r_stats.get('dr_values', []),
+                        'r_values': dr_over_r_stats.get('r_values', []),
+                        'dr_over_r_values': dr_over_r_stats.get('dr_over_r_values', []),
+                        'dr_over_r_pairs': dr_over_r_stats.get('pair_details', []),
+                        'raw_ion_points_yz': raw_ion_points,
+                        'raw_point_count': len(raw_ion_points),
+                        'raw_point_format': 'ion_n,y,z',
+                        'total_runs': int(num_statistical_repeats),
+                        'valid_run_count': valid_run_count,
+                        'valid': bool(valid_run_count > 0 and er_mean is not None),
+                        'failure_reason': failure_reason_summary,
+                        'count_check_passed': True,
+                        'plot_marker': None,
+                        'plot_skip': False,
+                        'pipeline_stage': 'dr_over_rmax'
                     }
-                    
-                    # Mark this combination as completed
+                    _set_checkpoint_node(
+                        checkpoint_chunk_results,
+                        fg,
+                        lens_vmi,
+                        ke,
+                        fwhm_results[fg][lens_vmi][ke]
+                    )
+
                     completed_combinations.add((fg, lens_vmi, ke))
+                    checkpoint_chunk_completed.add((fg, lens_vmi, ke))
                     processed_count += 1
-                
-            except Exception as e:
-                print(f"    ERROR: {str(e)}")
+                    combo_success = True
+                    timing_attempts += 1
+                    for key in timing_totals:
+                        timing_totals[key] += attempt_timing[key]
+                        combo_timing[key] += attempt_timing[key]
+
+                    if timing_verbose:
+                        attempt_total_s = sum(attempt_timing.values())
+                        print(
+                            f"    Attempt {attempt} OK: detected={detected_particles}/{expected_particles_total}, "
+                            f"pairs={pair_count_total}, "
+                            f"valid_repeats={valid_run_count}/{num_statistical_repeats}, "
+                            f"out={out_file_size_mb:.2f}MB, "
+                            f"timing[s] gen={attempt_timing['particle_gen_s']:.2f} "
+                            f"simion={attempt_timing['simion_s']:.2f} "
+                            f"parse={attempt_timing['parse_s']:.2f} "
+                            f"extract={attempt_timing['extract_s']:.2f} "
+                            f"pair-metric={attempt_timing['bin_abel_s']:.2f} "
+                            f"total={attempt_total_s:.2f}"
+                        )
+                    break
+
+                except Exception as e:
+                    if not last_failure_reason or last_failure_reason == "unknown":
+                        last_failure_reason = str(e)
+                    for key in combo_timing:
+                        combo_timing[key] += attempt_timing[key]
+                    if timing_verbose:
+                        attempt_total_s = sum(attempt_timing.values())
+                        print(
+                            f"    Attempt {attempt} FAILED: {last_failure_reason}; "
+                            f"detected={detected_particles}/{expected_particles_total}, "
+                            f"out={out_file_size_mb:.2f}MB, "
+                            f"timing[s] gen={attempt_timing['particle_gen_s']:.2f} "
+                            f"simion={attempt_timing['simion_s']:.2f} "
+                            f"parse={attempt_timing['parse_s']:.2f} "
+                            f"extract={attempt_timing['extract_s']:.2f} "
+                            f"pair-metric={attempt_timing['bin_abel_s']:.2f} "
+                            f"total={attempt_total_s:.2f}"
+                        )
+                    is_particle_mismatch = isinstance(last_failure_reason, str) and last_failure_reason.startswith("Particle mismatch")
+                    if is_particle_mismatch:
+                        print("    Mark current combination invalid immediately (requires 100% 4π capture).")
+                        break
+                    if attempt < max_combo_retries:
+                        print(f"    Retry {attempt}/{max_combo_retries} due to: {last_failure_reason}")
+                        time.sleep(retry_backoff_s * attempt)
+                    else:
+                        print(f"    ERROR: {last_failure_reason}")
+
+                finally:
+                    remove_file_with_retry(attempt_out_file)
+                    _cleanup_single_processed_data(single_processed_data)
+                    if ion_records is not None:
+                        del ion_records
+                    if dr_over_r_stats is not None:
+                        del dr_over_r_stats
+
+            if not combo_success:
                 failed_count += 1
-            
-            finally:
-                # CRITICAL: Explicit cleanup of all local variables
-                if single_processed_data is not None:
-                    # Clear nested structures
-                    try:
-                        for fg_key in list(single_processed_data.keys()):
-                            for lens_key in list(single_processed_data[fg_key].keys()):
-                                for ke_key in list(single_processed_data[fg_key][lens_key].keys()):
-                                    if 'local' in single_processed_data[fg_key][lens_key][ke_key]:
-                                        single_processed_data[fg_key][lens_key][ke_key]['local'].clear()
-                                    if 'global' in single_processed_data[fg_key][lens_key][ke_key]:
-                                        single_processed_data[fg_key][lens_key][ke_key]['global'].clear()
-                                single_processed_data[fg_key][lens_key].clear()
-                            single_processed_data[fg_key].clear()
-                        single_processed_data.clear()
-                    except:
-                        pass
-                    del single_processed_data
-                
-                if final_positions is not None:
-                    del final_positions
-                if rect_binned is not None:
-                    del rect_binned
-                if fwhm_result is not None:
-                    del fwhm_result
-                
-                # Force garbage collection every 10 combinations
-                if combo_idx % 10 == 0:
-                    gc.collect()
-            
-            # Save checkpoint if interval reached
-            if checkpoint_interval > 0 and combo_num % checkpoint_interval == 0:
-                save_checkpoint(fwhm_results, 'energy_resolution_direct', combo_num, completed_combinations)
-                # Force GC after checkpoint save
+                if fg not in fwhm_results:
+                    fwhm_results[fg] = {}
+                if lens_vmi not in fwhm_results[fg]:
+                    fwhm_results[fg][lens_vmi] = {}
+                pipeline_stage = 'count_check' if isinstance(last_failure_reason, str) and 'Particle mismatch' in last_failure_reason else 'failed'
+                fwhm_results[fg][lens_vmi][ke] = _build_invalid_energy_result(
+                    expected_particles_total=expected_particles_total,
+                    detected_particles=last_detected_particles,
+                    particles_per_run=num_particles_per_energy,
+                    requested_runs=num_statistical_repeats,
+                    failure_reason=last_failure_reason,
+                    pipeline_stage=pipeline_stage
+                )
+                _set_checkpoint_node(
+                    checkpoint_chunk_results,
+                    fg,
+                    lens_vmi,
+                    ke,
+                    fwhm_results[fg][lens_vmi][ke]
+                )
+            if gc_interval_combos > 0 and attempted_count > 0 and attempted_count % gc_interval_combos == 0:
                 gc.collect()
+            
+            # Save incremental checkpoint shard by attempts.
+            if checkpoint_interval > 0 and attempted_count > 0 and attempted_count % checkpoint_interval == 0:
+                if _count_checkpoint_nodes(checkpoint_chunk_results) > 0:
+                    save_checkpoint(
+                        checkpoint_chunk_results,
+                        'energy_resolution_direct',
+                        attempted_count,
+                        checkpoint_chunk_completed
+                    )
+                    checkpoint_chunk_results = {}
+                    checkpoint_chunk_completed = set()
         
-        # End of batch - save checkpoint
-        save_checkpoint(fwhm_results, 'energy_resolution_direct', processed_count, completed_combinations)
+        # End of batch - flush incremental checkpoint shard
+        if _count_checkpoint_nodes(checkpoint_chunk_results) > 0:
+            save_checkpoint(
+                checkpoint_chunk_results,
+                'energy_resolution_direct',
+                attempted_count,
+                checkpoint_chunk_completed
+            )
+            checkpoint_chunk_results = {}
+            checkpoint_chunk_completed = set()
         
         # End of batch - aggressive cleanup
         batch_time = time.time() - batch_start_time
@@ -4777,15 +6670,18 @@ def energy_resolution_analysis_direct(processed_data, all_combinations,
     print(f"  Total time: {total_time:.1f}s ({total_time/60:.1f} min)")
     if processed_count > 0:
         print(f"  Average time per combination: {total_time/processed_count:.2f}s")
+    if timing_attempts > 0:
+        total_stage_s = sum(timing_totals.values())
+        if total_stage_s > 0:
+            print("  Timing breakdown (successful attempts):")
+            print(f"    particle generation: {timing_totals['particle_gen_s']:.2f}s ({100*timing_totals['particle_gen_s']/total_stage_s:.1f}%)")
+            print(f"    SIMION run:          {timing_totals['simion_s']:.2f}s ({100*timing_totals['simion_s']/total_stage_s:.1f}%)")
+            print(f"    output parsing:      {timing_totals['parse_s']:.2f}s ({100*timing_totals['parse_s']/total_stage_s:.1f}%)")
+            print(f"    final extraction:    {timing_totals['extract_s']:.2f}s ({100*timing_totals['extract_s']/total_stage_s:.1f}%)")
+            print(f"    dr/r pairing:        {timing_totals['bin_abel_s']:.2f}s ({100*timing_totals['bin_abel_s']/total_stage_s:.1f}%)")
     
-    # Clean up checkpoint file after successful completion
-    checkpoint_file = 'energy_resolution_direct_checkpoint.pkl'
-    if os.path.exists(checkpoint_file):
-        try:
-            os.remove(checkpoint_file)
-            print(f"  Cleaned up checkpoint file: {checkpoint_file}")
-        except:
-            pass
+    # Consolidate checkpoint shards after successful completion
+    consolidate_checkpoints('energy_resolution_direct', cleanup_parts=True)
     
     return processed_data
 
@@ -4971,11 +6867,11 @@ def plot_heatmap_energy_lens(processed_data, fg, cmap='viridis', figsize=(12, 8)
     # Add labels and title
     ax.set_xlabel('Kinetic Energy (eV)')
     ax.set_ylabel('Lens VMI')
-    ax.set_title(f'Energy Resolution (%) vs Lens VMI and Kinetic Energy\nField Gradient: {fg}')
+    ax.set_title(f'Energy Resolution (ΔE/E) vs Lens VMI and Kinetic Energy\nField Gradient: {fg}')
     
     # Add colorbar
     cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label('Energy Resolution (%)')
+    cbar.set_label('Energy Resolution (ΔE/E)')
     
     # Annotate cells with values if requested
     if show_values:
@@ -5036,7 +6932,7 @@ def plot_heatmap_all_fg(processed_data, cmap='viridis', figsize=(14, 10),
     if vmin is None:
         vmin = global_min if global_min != float('inf') else 0
     if vmax is None:
-        vmax = global_max if global_max != float('-inf') else 100
+        vmax = global_max if global_max != float('-inf') else 1
     
     # Create figure with slider
     fig, ax = plt.subplots(figsize=figsize)
@@ -5054,10 +6950,10 @@ def plot_heatmap_all_fg(processed_data, cmap='viridis', figsize=(14, 10),
     plt.setp(ax.get_xticklabels(), rotation=45, ha='right', rotation_mode='anchor')
     ax.set_xlabel('Kinetic Energy (eV)')
     ax.set_ylabel('Lens VMI')
-    ax.set_title(f'Energy Resolution (%) - Field Gradient: {initial_fg}')
+    ax.set_title(f'Energy Resolution (ΔE/E) - Field Gradient: {initial_fg}')
     
     cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label('Energy Resolution (%)')
+    cbar.set_label('Energy Resolution (ΔE/E)')
     
     # Create slider
     ax_slider = plt.axes([0.2, 0.05, 0.6, 0.03])
@@ -5087,7 +6983,7 @@ def plot_heatmap_all_fg(processed_data, cmap='viridis', figsize=(14, 10),
             plt.setp(ax.get_xticklabels(), rotation=45, ha='right', rotation_mode='anchor')
             ax.set_xlabel('Kinetic Energy (eV)')
             ax.set_ylabel('Lens VMI')
-            ax.set_title(f'Energy Resolution (%) - Field Gradient: {fg}')
+            ax.set_title(f'Energy Resolution (ΔE/E) - Field Gradient: {fg}')
             
             fig.canvas.draw_idle()
     
@@ -5199,7 +7095,7 @@ def plot_stored_heatmaps(all_heatmaps, cmap='viridis', figsize=(14, 10),
     if vmin is None:
         vmin = global_min if global_min != float('inf') else 0
     if vmax is None:
-        vmax = global_max if global_max != float('-inf') else 100
+        vmax = global_max if global_max != float('-inf') else 1
     
     # Create figure with slider
     fig, ax = plt.subplots(figsize=figsize)
@@ -5219,10 +7115,10 @@ def plot_stored_heatmaps(all_heatmaps, cmap='viridis', figsize=(14, 10),
     plt.setp(ax.get_xticklabels(), rotation=45, ha='right', rotation_mode='anchor')
     ax.set_xlabel('Kinetic Energy (eV)')
     ax.set_ylabel('Lens VMI')
-    ax.set_title(f'Energy Resolution (%) - Field Gradient: {initial_fg}')
+    ax.set_title(f'Energy Resolution (ΔE/E) - Field Gradient: {initial_fg}')
     
     cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label('Energy Resolution (%)')
+    cbar.set_label('Energy Resolution (ΔE/E)')
     
     # Create slider
     ax_slider = plt.axes([0.2, 0.05, 0.6, 0.03])
@@ -5254,7 +7150,7 @@ def plot_stored_heatmaps(all_heatmaps, cmap='viridis', figsize=(14, 10),
             plt.setp(ax.get_xticklabels(), rotation=45, ha='right', rotation_mode='anchor')
             ax.set_xlabel('Kinetic Energy (eV)')
             ax.set_ylabel('Lens VMI')
-            ax.set_title(f'Energy Resolution (%) - Field Gradient: {fg}')
+            ax.set_title(f'Energy Resolution (ΔE/E) - Field Gradient: {fg}')
             
             fig.canvas.draw_idle()
     
@@ -5321,6 +7217,15 @@ def plot_energy_resolution_vs_ke(processed_data, figsize=(14, 10)):
         valinit=0,
         valstep=1
     )
+
+    def _safe_float(value):
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            return None
+        if np.isnan(val) or np.isinf(val):
+            return None
+        return val
     
     def update(val=None):
         ax.clear()
@@ -5343,40 +7248,80 @@ def plot_energy_resolution_vs_ke(processed_data, figsize=(14, 10)):
         # Collect energy resolution data for this fg, lens_vmi combination
         ke_values = []
         energy_resolutions = []
+        energy_resolution_stds = []
         
         for ke in sorted(processed_data[fg][lens_vmi].keys()):
             global_data = processed_data[fg][lens_vmi][ke].get('global', {})
-            energy_resolution = global_data.get('energy_resolution', None)
-            if energy_resolution is not None and not np.isnan(energy_resolution):
+            energy_resolution = global_data.get('energy_resolution_mean', global_data.get('energy_resolution'))
+            energy_resolution = _safe_float(energy_resolution)
+            if energy_resolution is not None:
+                er_std = _safe_float(global_data.get('energy_resolution_std'))
+                if er_std is None:
+                    er_var = _safe_float(global_data.get('energy_resolution_variance'))
+                    if er_var is not None:
+                        er_std = float(np.sqrt(max(er_var, 0.0)))
+
                 ke_values.append(ke)
                 energy_resolutions.append(energy_resolution)
+                energy_resolution_stds.append(np.nan if er_std is None else er_std)
         
         if ke_values:
             # Plot the curve
-            ax.plot(ke_values, energy_resolutions, 'b-o', linewidth=2, markersize=8)
+            ke_arr = np.array(ke_values, dtype=float)
+            er_arr = np.array(energy_resolutions, dtype=float)
+            er_std_arr = np.array(energy_resolution_stds, dtype=float)
+
+            ax.plot(ke_arr, er_arr, 'b-o', linewidth=2, markersize=8)
+
+            # Keep original curve style; only add error bars when variance/std exists.
+            valid_std_mask = np.isfinite(er_std_arr)
+            if np.any(valid_std_mask):
+                ax.errorbar(
+                    ke_arr[valid_std_mask],
+                    er_arr[valid_std_mask],
+                    yerr=er_std_arr[valid_std_mask],
+                    fmt='none',
+                    ecolor='b',
+                    elinewidth=1.2,
+                    capsize=3,
+                    alpha=0.6
+                )
+
             ax.set_xlabel('Kinetic Energy (eV)', fontsize=12)
-            ax.set_ylabel('Energy Resolution (%)', fontsize=12)
+            ax.set_ylabel('Energy Resolution (ΔE/E)', fontsize=12)
             ax.set_title(f'Energy Resolution vs Kinetic Energy\nField Gradient: {fg}, Lens VMI: {lens_vmi:.3f}', fontsize=14)
             ax.grid(True, alpha=0.3)
             
             # Add data point labels
-            for ke, er in zip(ke_values, energy_resolutions):
-                ax.annotate(f'{er:.1f}%', (ke, er), textcoords="offset points",
+            for ke, er in zip(ke_arr, er_arr):
+                ax.annotate(f'{er:.4f}', (ke, er), textcoords="offset points",
                            xytext=(0, 10), ha='center', fontsize=9)
             
             # Set axis limits with some padding
             if len(ke_values) > 1:
-                ke_range = max(ke_values) - min(ke_values)
-                ax.set_xlim(min(ke_values) - ke_range * 0.1, max(ke_values) + ke_range * 0.1)
+                ke_range = max(ke_arr) - min(ke_arr)
+                ax.set_xlim(min(ke_arr) - ke_range * 0.1, max(ke_arr) + ke_range * 0.1)
             
-            if len(energy_resolutions) > 1:
-                er_range = max(energy_resolutions) - min(energy_resolutions)
-                ax.set_ylim(min(energy_resolutions) - er_range * 0.1, max(energy_resolutions) + er_range * 0.1)
+            if len(er_arr) > 1:
+                if np.any(valid_std_mask):
+                    er_low = np.min(er_arr[valid_std_mask] - er_std_arr[valid_std_mask])
+                    er_high = np.max(er_arr[valid_std_mask] + er_std_arr[valid_std_mask])
+                    if np.any(~valid_std_mask):
+                        er_low = min(er_low, np.min(er_arr[~valid_std_mask]))
+                        er_high = max(er_high, np.max(er_arr[~valid_std_mask]))
+                else:
+                    er_low = np.min(er_arr)
+                    er_high = np.max(er_arr)
+
+                er_range = er_high - er_low
+                if er_range <= 0:
+                    er_range = max(abs(er_high), 1.0) * 0.1
+                ax.set_ylim(er_low - er_range * 0.1, er_high + er_range * 0.1)
         else:
             ax.text(0.5, 0.5, 'No energy resolution data available\nfor this combination',
                    transform=ax.transAxes, ha='center', va='center', fontsize=14)
             ax.set_xlabel('Kinetic Energy (eV)', fontsize=12)
-            ax.set_ylabel('Energy Resolution (%)', fontsize=12)
+            ax.set_ylabel('Energy Resolution (ΔE/E)', fontsize=12)
             ax.set_title(f'Energy Resolution vs Kinetic Energy\nField Gradient: {fg}, Lens VMI: {lens_vmi:.3f}', fontsize=14)
         
         fig.canvas.draw_idle()
