@@ -6,11 +6,16 @@ import sys
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.widgets import Slider
+from matplotlib.widgets import Slider, RadioButtons
 
 DEFAULT_ORIGIN_X = 199.0
 DEFAULT_ORIGIN_Y = -1.0
 DEFAULT_ORIGIN_Z = 0.0
+
+# Keep method interfaces visible while optionally disabling heavy recomputation paths.
+ENABLE_METHOD_ABS = False
+ENABLE_METHOD_LN_RATIO = False
+ENABLE_METHOD_SQRT = False
 
 
 def _safe_float(value):
@@ -49,6 +54,59 @@ def _sorted_keys(values):
         return (1, str(item))
 
     return sorted(values, key=sort_key)
+
+
+def _normalize_axis_limits(limits):
+    if limits is None:
+        return None
+    if not isinstance(limits, (list, tuple, np.ndarray)) or len(limits) != 2:
+        raise ValueError(f"Axis limits must be a 2-item tuple/list, got: {limits!r}")
+    low = _safe_float(limits[0])
+    high = _safe_float(limits[1])
+    if low is None or high is None:
+        raise ValueError(f"Axis limits must be finite numbers, got: {limits!r}")
+    if low == high:
+        raise ValueError(f"Axis limits must not be identical, got: {limits!r}")
+    if low > high:
+        low, high = high, low
+    return (float(low), float(high))
+
+
+def _parse_axis_range(text, axis_name):
+    if text is None:
+        return None
+    raw = str(text).strip()
+    if not raw:
+        return None
+    parts = [part.strip() for part in raw.split(",")]
+    if len(parts) != 2:
+        raise ValueError(f"--{axis_name} expects 'min,max', got: {text!r}")
+    return _normalize_axis_limits(parts)
+
+
+def _zoom_limits(limits, center, scale):
+    low, high = limits
+    if not np.isfinite(low) or not np.isfinite(high):
+        return None
+    if scale <= 0:
+        return (float(low), float(high))
+    if center is None or not np.isfinite(center):
+        center = 0.5 * (low + high)
+    new_low = center - (center - low) * scale
+    new_high = center + (high - center) * scale
+    if not np.isfinite(new_low) or not np.isfinite(new_high):
+        return None
+    if abs(new_high - new_low) <= 1e-15:
+        return None
+    return (float(new_low), float(new_high))
+
+
+def _pan_limits(limits, delta):
+    low, high = limits
+    if not np.isfinite(low) or not np.isfinite(high):
+        return None
+    shift = float(delta)
+    return (float(low + shift), float(high + shift))
 
 
 def find_latest_summary_file(results_dir):
@@ -233,7 +291,20 @@ def _extract_ra_rb_yz_from_pair(pair, origin_y=DEFAULT_ORIGIN_Y, origin_z=DEFAUL
     rb = _safe_float(pair.get("r_b"))
     if ra is None or rb is None:
         return None, None
-    return float(ra), float(rb)
+    return float(abs(ra)), float(abs(rb))
+
+
+def _sorted_abs_radii(r_a, r_b):
+    try:
+        a = float(abs(r_a))
+        b = float(abs(r_b))
+    except (TypeError, ValueError):
+        return None, None
+    if not (np.isfinite(a) and np.isfinite(b)):
+        return None, None
+    if a <= b:
+        return a, b
+    return b, a
 
 
 def _extract_raw_ion_points_yz(global_data):
@@ -325,14 +396,40 @@ def _build_pair_radii_from_raw_points(global_data, origin_y=DEFAULT_ORIGIN_Y, or
     return pair_radii
 
 
+def _extract_ra_rb_from_pair_row(row, origin_y=DEFAULT_ORIGIN_Y, origin_z=DEFAULT_ORIGIN_Z):
+    if not isinstance(row, (list, tuple, np.ndarray)) or len(row) < 8:
+        return None, None
+    y_a = _safe_float(row[4])
+    z_a = _safe_float(row[5])
+    y_b = _safe_float(row[6])
+    z_b = _safe_float(row[7])
+    if y_a is None or z_a is None or y_b is None or z_b is None:
+        return None, None
+    ra = float(np.sqrt((float(y_a) - origin_y) ** 2 + (float(z_a) - origin_z) ** 2))
+    rb = float(np.sqrt((float(y_b) - origin_y) ** 2 + (float(z_b) - origin_z) ** 2))
+    if not (np.isfinite(ra) and np.isfinite(rb)):
+        return None, None
+    return float(ra), float(rb)
+
+
 def _extract_pair_radii(global_data, origin_y=DEFAULT_ORIGIN_Y, origin_z=DEFAULT_ORIGIN_Z):
     pairs = global_data.get("dr_over_r_pairs", [])
     pair_radii = []
-    if isinstance(pairs, list):
+    if isinstance(pairs, np.ndarray):
+        arr = np.asarray(pairs)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        if arr.ndim == 2:
+            for row in arr:
+                ra, rb = _extract_ra_rb_from_pair_row(row, origin_y=origin_y, origin_z=origin_z)
+                if ra is not None and rb is not None:
+                    pair_radii.append((ra, rb))
+    elif isinstance(pairs, list):
         for pair in pairs:
-            if not isinstance(pair, dict):
-                continue
-            ra, rb = _extract_ra_rb_yz_from_pair(pair, origin_y=origin_y, origin_z=origin_z)
+            if isinstance(pair, dict):
+                ra, rb = _extract_ra_rb_yz_from_pair(pair, origin_y=origin_y, origin_z=origin_z)
+            else:
+                ra, rb = _extract_ra_rb_from_pair_row(pair, origin_y=origin_y, origin_z=origin_z)
             if ra is None or rb is None:
                 continue
             if np.isfinite(ra) and np.isfinite(rb):
@@ -475,6 +572,43 @@ def _compute_abs_ra_rb_er(global_data, origin_y=DEFAULT_ORIGIN_Y, origin_z=DEFAU
     return er_mean, er_var, er_std, int(arr.size), skipped_negative
 
 
+def _compute_ln_r2_over_ln_r1_er(global_data, origin_y=DEFAULT_ORIGIN_Y, origin_z=DEFAULT_ORIGIN_Z):
+    pair_radii, _ = _extract_pair_radii(global_data, origin_y=origin_y, origin_z=origin_z)
+    if not pair_radii:
+        return None, None, None, 0, 0, 0
+
+    metric_values = []
+    skipped_non_positive = 0
+    skipped_non_finite = 0
+
+    for r_a, r_b in pair_radii:
+        r1, r2 = _sorted_abs_radii(r_a, r_b)
+        if r1 is None or r2 is None:
+            skipped_non_finite += 1
+            continue
+        if r1 <= 0 or r2 <= 0:
+            skipped_non_positive += 1
+            continue
+        ratio = float(r2 / r1)
+        if ratio <= 0 or not np.isfinite(ratio):
+            skipped_non_finite += 1
+            continue
+        value = abs(float(np.log(ratio)))
+        if np.isfinite(value):
+            metric_values.append(float(value))
+        else:
+            skipped_non_finite += 1
+
+    if not metric_values:
+        return None, None, None, 0, skipped_non_positive, skipped_non_finite
+
+    arr = np.array(metric_values, dtype=float)
+    er_mean = float(np.mean(arr))
+    er_var = float(np.var(arr))
+    er_std = float(np.sqrt(er_var))
+    return er_mean, er_var, er_std, int(arr.size), skipped_non_positive, skipped_non_finite
+
+
 def build_sqrt_ra2_minus_rb2_summary(
     summary_data,
     origin_y=DEFAULT_ORIGIN_Y,
@@ -560,6 +694,53 @@ def build_abs_ra_rb_over_rmax_summary(
                         "pair_count": pair_count,
                         "r_max_used": rmax_used,
                         "r_max_scope": rmax_scope,
+                        "valid": er_mean is not None,
+                        **metadata,
+                    },
+                    "local": {},
+                }
+    return alt_summary
+
+
+def build_ln_r2_over_ln_r1_summary(
+    summary_data,
+    origin_y=DEFAULT_ORIGIN_Y,
+    origin_z=DEFAULT_ORIGIN_Z,
+):
+    alt_summary = {}
+    for fg, fg_data in summary_data.items():
+        if not isinstance(fg_data, dict):
+            continue
+        alt_summary.setdefault(fg, {})
+        for lens, lens_data in fg_data.items():
+            if not isinstance(lens_data, dict):
+                continue
+            alt_summary[fg].setdefault(lens, {})
+            for ke, ke_data in lens_data.items():
+                global_data = {}
+                if isinstance(ke_data, dict):
+                    global_data = ke_data.get("global", {})
+                if not isinstance(global_data, dict):
+                    global_data = {}
+
+                metadata = _build_plot_metadata(global_data)
+                if _is_count_check_invalid(global_data):
+                    er_mean, er_var, er_std, pair_count, skipped_non_positive, skipped_non_finite = (None, None, None, 0, 0, 0)
+                else:
+                    er_mean, er_var, er_std, pair_count, skipped_non_positive, skipped_non_finite = _compute_ln_r2_over_ln_r1_er(
+                        global_data,
+                        origin_y=origin_y,
+                        origin_z=origin_z,
+                    )
+                alt_summary[fg][lens][ke] = {
+                    "global": {
+                        "energy_resolution": er_mean,
+                        "energy_resolution_mean": er_mean,
+                        "energy_resolution_variance": er_var,
+                        "energy_resolution_std": er_std,
+                        "pair_count": pair_count,
+                        "skipped_non_positive_pairs": skipped_non_positive,
+                        "skipped_non_finite_pairs": skipped_non_finite,
                         "valid": er_mean is not None,
                         **metadata,
                     },
@@ -702,19 +883,34 @@ def count_pair_coordinate_coverage(summary_data):
                 if not isinstance(global_data, dict):
                     continue
                 pairs = global_data.get("dr_over_r_pairs", [])
-                if not isinstance(pairs, list):
+                if isinstance(pairs, np.ndarray):
+                    arr = np.asarray(pairs)
+                    if arr.ndim == 1:
+                        arr = arr.reshape(1, -1)
+                    if arr.ndim == 2:
+                        total_pairs += int(arr.shape[0])
+                        if arr.shape[1] >= 8:
+                            pairs_with_coords += int(arr.shape[0])
                     continue
-                for pair in pairs:
-                    if not isinstance(pair, dict):
-                        continue
-                    total_pairs += 1
-                    if (
-                        _safe_float(pair.get("y_a")) is not None
-                        and _safe_float(pair.get("z_a")) is not None
-                        and _safe_float(pair.get("y_b")) is not None
-                        and _safe_float(pair.get("z_b")) is not None
-                    ):
-                        pairs_with_coords += 1
+                if isinstance(pairs, list):
+                    for pair in pairs:
+                        total_pairs += 1
+                        if isinstance(pair, dict):
+                            if (
+                                _safe_float(pair.get("y_a")) is not None
+                                and _safe_float(pair.get("z_a")) is not None
+                                and _safe_float(pair.get("y_b")) is not None
+                                and _safe_float(pair.get("z_b")) is not None
+                            ):
+                                pairs_with_coords += 1
+                        elif isinstance(pair, (list, tuple, np.ndarray)) and len(pair) >= 8:
+                            if (
+                                _safe_float(pair[4]) is not None
+                                and _safe_float(pair[5]) is not None
+                                and _safe_float(pair[6]) is not None
+                                and _safe_float(pair[7]) is not None
+                            ):
+                                pairs_with_coords += 1
     return total_pairs, pairs_with_coords
 
 
@@ -768,26 +964,58 @@ def _build_method_entry(method_key, summary_data, origin_y=DEFAULT_ORIGIN_Y, ori
     if method_key == "rmax":
         return {
             "key": "rmax",
-            "label": "dr = |ra-rb| / rmax(all points)",
+            "label": "metric = |r2-r1| / rmax",
             "summary": build_abs_ra_rb_over_rmax_summary(summary_data, origin_y=origin_y, origin_z=origin_z),
             "color": "tab:blue",
             "marker": "o",
         }
     if method_key == "abs":
+        if not ENABLE_METHOD_ABS:
+            return {
+                "key": "abs",
+                "label": "metric = |r2-r1| / rmean (disabled; showing saved)",
+                "summary": summary_data,
+                "color": "tab:orange",
+                "marker": "s",
+            }
         return {
             "key": "abs",
-            "label": "dr = |ra-rb| / r_mean(pair)",
+            "label": "metric = |r2-r1| / rmean",
             "summary": build_abs_ra_rb_summary(summary_data, origin_y=origin_y, origin_z=origin_z),
             "color": "tab:orange",
             "marker": "s",
         }
     if method_key == "sqrt":
+        if not ENABLE_METHOD_SQRT:
+            return {
+                "key": "sqrt",
+                "label": "metric = sqrt(ra^2-rb^2)/rmean (disabled; showing saved)",
+                "summary": summary_data,
+                "color": "tab:green",
+                "marker": "^",
+            }
         return {
             "key": "sqrt",
             "label": "dr = sqrt(ra^2-rb^2) / r_mean(pair)",
             "summary": build_sqrt_ra2_minus_rb2_summary(summary_data, origin_y=origin_y, origin_z=origin_z),
             "color": "tab:green",
             "marker": "^",
+        }
+    if method_key == "ln_ratio":
+        if not ENABLE_METHOD_LN_RATIO:
+            return {
+                "key": "ln_ratio",
+                "label": "metric = |ln(|r2|/|r1|)| (disabled; showing saved)",
+                "summary": summary_data,
+                "color": "tab:purple",
+                "marker": "D",
+            }
+        return {
+            "key": "ln_ratio",
+            "label": "metric = |ln(|r2|/|r1|)|, |r2|>|r1|",
+            "summary": build_ln_r2_over_ln_r1_summary(summary_data, origin_y=origin_y, origin_z=origin_z),
+            "color": "tab:purple",
+            "marker": "D",
         }
     raise ValueError(f"Unsupported method: {method_key}")
 
@@ -796,6 +1024,10 @@ def launch_multi_method_gui(
     method_entries,
     title_prefix="Energy Resolution Compare",
     y_as_percent=True,
+    xlim=None,
+    ylim=None,
+    group_options=None,
+    default_group=None,
 ):
     if not method_entries:
         return False
@@ -820,6 +1052,30 @@ def launch_multi_method_gui(
 
     fig, ax_curve = plt.subplots(figsize=(14, 10))
     plt.subplots_adjust(bottom=0.25)
+    default_view = {
+        "xlim": _normalize_axis_limits(xlim),
+        "ylim": _normalize_axis_limits(ylim),
+    }
+    view_state = {
+        "xlim": default_view["xlim"],
+        "ylim": default_view["ylim"],
+    }
+    group_label_map = {}
+    if group_options:
+        for item in group_options:
+            if not isinstance(item, dict):
+                continue
+            key = item.get("key")
+            label = item.get("label", key)
+            if key is None:
+                continue
+            group_label_map[str(label)] = key
+    active_group = {"key": None}
+    if group_label_map:
+        if default_group is not None and any(val == default_group for val in group_label_map.values()):
+            active_group["key"] = default_group
+        else:
+            active_group["key"] = next(iter(group_label_map.values()))
 
     ax_fg_slider = plt.axes([0.2, 0.10, 0.6, 0.03])
     fg_slider = Slider(
@@ -840,6 +1096,19 @@ def launch_multi_method_gui(
         valinit=0,
         valstep=1,
     )
+
+    group_radio = None
+    if group_label_map and len(group_label_map) >= 2:
+        ax_group_radio = plt.axes([0.02, 0.05, 0.15, 0.18])
+        radio_labels = list(group_label_map.keys())
+        active_idx = 0
+        if active_group["key"] is not None:
+            for idx, label in enumerate(radio_labels):
+                if group_label_map[label] == active_group["key"]:
+                    active_idx = idx
+                    break
+        group_radio = RadioButtons(ax_group_radio, radio_labels, active=active_idx)
+        ax_group_radio.set_title("Method", fontsize=9)
 
     def update(_=None):
         ax_curve.clear()
@@ -886,6 +1155,9 @@ def launch_multi_method_gui(
         invalid_ke_by_method = []
 
         for method_idx, entry in enumerate(method_entries):
+            entry_group = entry.get("group")
+            if active_group["key"] is not None and entry_group is not None and entry_group != active_group["key"]:
+                continue
             vals = []
             stds = []
             invalid_flags = []
@@ -982,11 +1254,106 @@ def launch_multi_method_gui(
             fontsize=9,
             bbox=dict(facecolor="white", alpha=0.75, edgecolor="gray"),
         )
+        ax_curve.text(
+            0.02,
+            0.03,
+            "Wheel: zoom | +/-: zoom | arrows: pan | r: reset",
+            transform=ax_curve.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=8,
+            bbox=dict(facecolor="white", alpha=0.60, edgecolor="gray"),
+        )
+
+        if view_state["xlim"] is not None:
+            ax_curve.set_xlim(view_state["xlim"])
+        if view_state["ylim"] is not None:
+            ax_curve.set_ylim(view_state["ylim"])
 
         fig.canvas.draw_idle()
 
+    def _apply_zoom(scale, x_center=None, y_center=None):
+        cur_xlim = view_state["xlim"] if view_state["xlim"] is not None else tuple(ax_curve.get_xlim())
+        cur_ylim = view_state["ylim"] if view_state["ylim"] is not None else tuple(ax_curve.get_ylim())
+
+        x_mid = 0.5 * (cur_xlim[0] + cur_xlim[1]) if x_center is None else x_center
+        y_mid = 0.5 * (cur_ylim[0] + cur_ylim[1]) if y_center is None else y_center
+        new_xlim = _zoom_limits(cur_xlim, x_mid, scale)
+        new_ylim = _zoom_limits(cur_ylim, y_mid, scale)
+        if new_xlim is None or new_ylim is None:
+            return
+        view_state["xlim"] = new_xlim
+        view_state["ylim"] = new_ylim
+        ax_curve.set_xlim(new_xlim)
+        ax_curve.set_ylim(new_ylim)
+        fig.canvas.draw_idle()
+
+    def _apply_pan(dx_fraction=0.0, dy_fraction=0.0):
+        cur_xlim = view_state["xlim"] if view_state["xlim"] is not None else tuple(ax_curve.get_xlim())
+        cur_ylim = view_state["ylim"] if view_state["ylim"] is not None else tuple(ax_curve.get_ylim())
+        x_span = cur_xlim[1] - cur_xlim[0]
+        y_span = cur_ylim[1] - cur_ylim[0]
+        new_xlim = _pan_limits(cur_xlim, x_span * float(dx_fraction))
+        new_ylim = _pan_limits(cur_ylim, y_span * float(dy_fraction))
+        if new_xlim is None or new_ylim is None:
+            return
+        view_state["xlim"] = new_xlim
+        view_state["ylim"] = new_ylim
+        ax_curve.set_xlim(new_xlim)
+        ax_curve.set_ylim(new_ylim)
+        fig.canvas.draw_idle()
+
+    def on_scroll(event):
+        if event.inaxes != ax_curve:
+            return
+        button = str(event.button).lower()
+        if button == "up":
+            scale = 0.85
+        elif button == "down":
+            scale = 1.15
+        else:
+            return
+        _apply_zoom(scale, x_center=event.xdata, y_center=event.ydata)
+
+    def on_key(event):
+        key = (event.key or "").lower()
+        if key in ("r", "home"):
+            view_state["xlim"] = default_view["xlim"]
+            view_state["ylim"] = default_view["ylim"]
+            update()
+            return
+        if key in ("+", "="):
+            _apply_zoom(0.85)
+            return
+        if key in ("-", "_"):
+            _apply_zoom(1.15)
+            return
+        if key == "left":
+            _apply_pan(dx_fraction=-0.10)
+            return
+        if key == "right":
+            _apply_pan(dx_fraction=0.10)
+            return
+        if key == "up":
+            _apply_pan(dy_fraction=0.10)
+            return
+        if key == "down":
+            _apply_pan(dy_fraction=-0.10)
+            return
+
+    def on_group_select(label):
+        selected_key = group_label_map.get(str(label))
+        if selected_key is None:
+            return
+        active_group["key"] = selected_key
+        update()
+
     fg_slider.on_changed(update)
     lens_slider.on_changed(update)
+    if group_radio is not None:
+        group_radio.on_clicked(on_group_select)
+    fig.canvas.mpl_connect("scroll_event", on_scroll)
+    fig.canvas.mpl_connect("key_press_event", on_key)
     update()
     plt.show()
     return True
@@ -999,6 +1366,8 @@ def launch_comparison_gui(
     y_as_percent=True,
     method_a_label="Method A",
     method_b_label="Method B",
+    xlim=None,
+    ylim=None,
 ):
     method_entries = [
         {
@@ -1020,6 +1389,8 @@ def launch_comparison_gui(
         method_entries,
         title_prefix=title_prefix,
         y_as_percent=y_as_percent,
+        xlim=xlim,
+        ylim=ylim,
     )
 
 
@@ -1052,7 +1423,7 @@ def _count_rmax_scope(metric_summary):
 
 def _resolve_method_keys(method):
     if method == "all":
-        return ["rmax", "abs", "sqrt"]
+        return ["rmax", "sqrt"]
     if method in ("rmax_vs_abs_legacy", "compare"):
         return ["rmax", "abs"]
     return [method]
@@ -1080,6 +1451,8 @@ def launch_energy_resolution_gui(
     origin_z=DEFAULT_ORIGIN_Z,
     y_as_percent=True,
     title_prefix="Result Viewer",
+    xlim=None,
+    ylim=None,
 ):
     method_entries = build_method_entries(
         summary_data,
@@ -1091,6 +1464,8 @@ def launch_energy_resolution_gui(
         method_entries,
         title_prefix=title_prefix,
         y_as_percent=y_as_percent,
+        xlim=xlim,
+        ylim=ylim,
     )
 
 
@@ -1112,12 +1487,12 @@ def main():
     )
     parser.add_argument(
         "--method",
-        choices=("rmax", "abs", "sqrt", "all"),
+        choices=("rmax", "sqrt", "all"),
         default="rmax",
         help=(
             "Method to display: "
-            "rmax=|ra-rb|/rmax(all points), abs=|ra-rb|/r_mean(pair), "
-            "sqrt=sqrt(ra^2-rb^2)/r_mean(pair), all=plot all three."
+            "rmax=|ra-rb|/rmax(all points), sqrt=sqrt(ra^2-rb^2)/r_mean(pair). "
+            "Current build disables sqrt recomputation (falls back to saved metric)."
         ),
     )
     parser.add_argument(
@@ -1154,7 +1529,21 @@ def main():
         action="store_true",
         help="Only print summary stats and exit.",
     )
+    parser.add_argument(
+        "--xlim",
+        type=str,
+        default=None,
+        help="Initial x-axis limits as 'min,max' in eV.",
+    )
+    parser.add_argument(
+        "--ylim",
+        type=str,
+        default=None,
+        help="Initial y-axis limits as 'min,max' (percent unless --fraction).",
+    )
     args = parser.parse_args()
+    xlim = _parse_axis_range(args.xlim, "xlim")
+    ylim = _parse_axis_range(args.ylim, "ylim")
 
     target_file = args.input
     if not target_file:
@@ -1174,6 +1563,10 @@ def main():
         "Radius origin (yz plane): "
         f"({args.origin_x:.6g}, {args.origin_y:.6g}, {args.origin_z:.6g})"
     )
+    if xlim is not None:
+        print(f"Initial xlim: [{xlim[0]:.6g}, {xlim[1]:.6g}]")
+    if ylim is not None:
+        print(f"Initial ylim: [{ylim[0]:.6g}, {ylim[1]:.6g}]")
     print(f"Source valid points (saved metric): {valid_points}/{total_points}")
     total_pairs, pairs_with_coords = count_pair_coordinate_coverage(summary_data)
     if total_pairs > 0:
@@ -1261,6 +1654,8 @@ def main():
         method_entries,
         title_prefix=f"Result Viewer: {os.path.basename(target_file)}",
         y_as_percent=not args.fraction,
+        xlim=xlim,
+        ylim=ylim,
     )
     if not launched:
         raise RuntimeError("Viewer could not find plottable data.")

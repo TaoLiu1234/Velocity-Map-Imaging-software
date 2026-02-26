@@ -58,15 +58,15 @@ CLEANUP_TEMP_FILES_AFTER_SUCCESS = True
 # === PARAMETER RANGES ===
 KE_MIN = 1
 KE_MAX = 15.5
-NUM_KE_POINTS = 2
+NUM_KE_POINTS = 3
 
 FIELD_MIN = 50
 FIELD_MAX = 300
-NUM_FIELD_POINTS = 2
+NUM_FIELD_POINTS = 3
 
 LENS_MIN = 1.3
 LENS_MAX = 3
-NUM_LENS_POINTS = 2
+NUM_LENS_POINTS = 3
 
 # === ENERGY RESOLUTION SETTINGS ===
 NUM_PARTICLES_PER_ENERGY = 91
@@ -83,9 +83,7 @@ GC_INTERVAL_COMBOS = 50
 
 # === INTERACTION VOLUME (Source Motion) ===
 Interaction_volume = True
-Interaction_volume_range = 1  # mm
-SCAN_INTERACTION_VOLUME_RANGE = True
-INTERACTION_VOLUME_RANGE_SCAN = [0.0, 0.5] # mm
+INTERACTION_VOLUME_RANGE_SCAN = [0.0, 0.5,1,1.5] # mm
 
 NUM_RUNS_PER_NODE = 15 if Interaction_volume else 1
 
@@ -119,6 +117,13 @@ def _safe_float(val):
     except (TypeError, ValueError):
         return None
 
+def _safe_int(val):
+    """Safely convert to int, return None on failure."""
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
+
 def _sorted_keys(keys):
     """Sort dictionary keys numerically."""
     numeric_keys = []
@@ -148,6 +153,32 @@ def _to_builtin(obj):
 # DATA PROCESSING
 # ============================================================================
 
+SUMMARY_BASE_FIELDS = (
+    'fwhm',
+    'energy_resolution',
+    'max_r',
+    'generated_particles',
+    'detected_particles',
+    'valid',
+    'failure_reason',
+)
+
+SUMMARY_OPTIONAL_FIELDS = (
+    'fwhm_mean', 'fwhm_variance', 'fwhm_std', 'fwhm_runs',
+    'energy_resolution_mean', 'energy_resolution_variance', 'energy_resolution_std', 'energy_resolution_runs',
+    'max_r_mean', 'max_r_variance', 'max_r_std', 'max_r_runs',
+    'r_max_all_points', 'r_max_all_points_runs', 'all_point_count_runs',
+    'generated_particles_per_run',
+    'detected_particles_runs', 'valid_run_count', 'total_runs',
+    'pair_count', 'pair_count_runs',
+    'raw_point_count', 'raw_point_format',
+    'failure_reasons',
+    'count_check_passed', 'plot_marker', 'plot_skip', 'pipeline_stage',
+)
+
+SUMMARY_PAIR_FIELDS = ('dr_over_r_pairs',)
+SUMMARY_RAW_FIELDS = ('raw_ion_points_yz',)
+
 def create_empty_processed_data(field_gradients, lens_vmis, energies):
     """Create empty data structure for energy resolution results."""
     data = {}
@@ -171,6 +202,12 @@ def build_energy_resolution_summary(
     include_raw_payload=False
 ):
     """Extract v5.4-compatible summary structure from processed data."""
+    optional_fields = list(SUMMARY_OPTIONAL_FIELDS)
+    if include_pair_payload:
+        optional_fields.extend(SUMMARY_PAIR_FIELDS)
+    if include_raw_payload:
+        optional_fields.extend(SUMMARY_RAW_FIELDS)
+
     summary = {}
     for fg, fg_data in processed_data.items():
         if not isinstance(fg_data, dict):
@@ -185,39 +222,18 @@ def build_energy_resolution_summary(
             for ke, ke_data in lens_data.items():
                 if not isinstance(ke_data, dict):
                     continue
-                global_data = ke_data.get('global', {}) if isinstance(ke_data.get('global', {}), dict) else {}
-                global_summary = {
-                    'fwhm': _to_builtin(global_data.get('fwhm')),
-                    'energy_resolution': _to_builtin(global_data.get('energy_resolution')),
-                    'max_r': _to_builtin(global_data.get('max_r')),
-                    'generated_particles': _to_builtin(global_data.get('generated_particles')),
-                    'detected_particles': _to_builtin(global_data.get('detected_particles')),
-                    'valid': _to_builtin(global_data.get('valid')),
-                    'failure_reason': _to_builtin(global_data.get('failure_reason'))
-                }
-                optional_fields = [
-                    'fwhm_mean', 'fwhm_variance', 'fwhm_std', 'fwhm_runs',
-                    'energy_resolution_mean', 'energy_resolution_variance', 'energy_resolution_std', 'energy_resolution_runs',
-                    'max_r_mean', 'max_r_variance', 'max_r_std', 'max_r_runs',
-                    'r_max_all_points', 'r_max_all_points_runs', 'all_point_count_runs',
-                    'generated_particles_per_run',
-                    'detected_particles_runs', 'valid_run_count', 'total_runs',
-                    'pair_count', 'pair_count_runs',
-                    'raw_point_count', 'raw_point_format',
-                    'failure_reasons',
-                    'count_check_passed', 'plot_marker', 'plot_skip', 'pipeline_stage'
-                ]
-                if include_pair_payload:
-                    optional_fields.extend([
-                        'dr_over_r_pairs',
-                    ])
-                if include_raw_payload:
-                    optional_fields.extend([
-                        'raw_ion_points_yz',
-                    ])
+                global_data = ke_data.get('global')
+                if not isinstance(global_data, dict):
+                    global_data = {}
+
+                global_summary = {}
+                for key in SUMMARY_BASE_FIELDS:
+                    global_summary[key] = _to_builtin(global_data.get(key))
+
                 for key in optional_fields:
                     if key in global_data:
                         global_summary[key] = _to_builtin(global_data.get(key))
+
                 lens_summary[_normalize_numeric_key(ke)] = {
                     'global': global_summary,
                     'local': {}
@@ -228,62 +244,67 @@ def build_energy_resolution_summary(
             summary[fg_key] = fg_summary
     return summary
 
-def count_valid_energy_points(data):
-    valid = 0
-    total = 0
-    unique_er_values = set()
-    for fg_data in data.values():
-        for lens_data in fg_data.values():
-            for ke_data in lens_data.values():
-                total += 1
-                global_data = ke_data.get('global', {}) if isinstance(ke_data, dict) else {}
-                er = global_data.get('energy_resolution')
-                if er is None:
-                    er = global_data.get('energy_resolution_mean')
-                if er is None:
-                    continue
-                try:
-                    if np.isnan(er):
-                        continue
-                except Exception:
-                    pass
-                valid += 1
-                try:
-                    unique_er_values.add(round(float(er), 6))
-                except Exception:
-                    pass
-    return valid, total, len(unique_er_values)
-
-def count_raw_payload_points(summary_data):
-    nodes_with_raw = 0
+def collect_summary_statistics(summary_data):
+    """
+    Single-pass summary statistics to avoid repeated full-tree traversals.
+    Returns:
+      valid_points, total_points, unique_er_count, raw_nodes, raw_point_total, valid_runs, total_runs
+    """
+    valid_points = 0
     total_points = 0
-    for fg_data in summary_data.values():
-        for lens_data in fg_data.values():
-            for ke_data in lens_data.values():
-                global_data = ke_data.get('global', {}) if isinstance(ke_data, dict) else {}
-                raw_points = global_data.get('raw_ion_points_yz', [])
-                if isinstance(raw_points, list) and len(raw_points) > 0:
-                    nodes_with_raw += 1
-                    total_points += len(raw_points)
-    return nodes_with_raw, total_points
-
-def count_valid_run_samples(summary_data):
+    unique_er_values = set()
+    raw_nodes = 0
+    raw_point_total = 0
     valid_runs = 0
     total_runs = 0
+
     for fg_data in summary_data.values():
+        if not isinstance(fg_data, dict):
+            continue
         for lens_data in fg_data.values():
+            if not isinstance(lens_data, dict):
+                continue
             for ke_data in lens_data.values():
-                global_data = ke_data.get('global', {}) if isinstance(ke_data, dict) else {}
-                point_total_runs = global_data.get('total_runs')
-                point_valid_runs = global_data.get('valid_run_count')
+                if not isinstance(ke_data, dict):
+                    continue
+
+                total_points += 1
+                global_data = ke_data.get('global')
+                if not isinstance(global_data, dict):
+                    global_data = {}
+
+                # Align with viewer preference: mean first, then fallback to energy_resolution.
+                er_num = _safe_float(global_data.get('energy_resolution_mean', global_data.get('energy_resolution')))
+                if er_num is not None and np.isfinite(er_num):
+                    valid_points += 1
+                    unique_er_values.add(round(float(er_num), 6))
+
+                raw_points = global_data.get('raw_ion_points_yz', [])
+                if isinstance(raw_points, list) and raw_points:
+                    raw_nodes += 1
+                    raw_point_total += len(raw_points)
+
+                point_total_runs = _safe_int(global_data.get('total_runs'))
+                point_valid_runs = _safe_int(global_data.get('valid_run_count'))
                 if point_total_runs is None or point_valid_runs is None:
                     total_runs += 1
-                    if global_data.get('valid'):
+                    if bool(global_data.get('valid')):
                         valid_runs += 1
-                    continue
-                total_runs += int(point_total_runs)
-                valid_runs += int(point_valid_runs)
-    return valid_runs, total_runs
+                else:
+                    point_total_runs = max(point_total_runs, 0)
+                    point_valid_runs = max(min(point_valid_runs, point_total_runs), 0)
+                    total_runs += point_total_runs
+                    valid_runs += point_valid_runs
+
+    return (
+        valid_points,
+        total_points,
+        len(unique_er_values),
+        raw_nodes,
+        raw_point_total,
+        valid_runs,
+        total_runs,
+    )
 
 def save_pickle_atomic(obj, filepath):
     """Atomically save pickle file (write to temp, then rename)."""
@@ -445,24 +466,31 @@ def _normalize_visualization_method(method):
     )
     return 'rmax'
 
+def _is_non_interactive_matplotlib_backend():
+    try:
+        import matplotlib
+        backend = str(matplotlib.get_backend() or '').lower()
+    except Exception:
+        return False
+    return backend.endswith('agg') or backend in {'pdf', 'ps', 'svg', 'template', 'cairo'}
+
 def resolve_interaction_volume_ranges():
     if not Interaction_volume:
         return [0.0]
-    if SCAN_INTERACTION_VOLUME_RANGE:
-        if not isinstance(INTERACTION_VOLUME_RANGE_SCAN, (list, tuple, np.ndarray)):
-            raise ValueError("INTERACTION_VOLUME_RANGE_SCAN must be a list/tuple/ndarray")
-        ranges = []
-        for value in INTERACTION_VOLUME_RANGE_SCAN:
-            numeric = _safe_float(value)
-            if numeric is None:
-                continue
-            ranges.append(float(numeric))
-    else:
-        numeric = _safe_float(Interaction_volume_range)
-        ranges = [float(numeric if numeric is not None else 0.0)]
+
+    if not isinstance(INTERACTION_VOLUME_RANGE_SCAN, (list, tuple, np.ndarray)):
+        raise ValueError("INTERACTION_VOLUME_RANGE_SCAN must be a list/tuple/ndarray")
+
+    ranges = []
+    for value in INTERACTION_VOLUME_RANGE_SCAN:
+        numeric = _safe_float(value)
+        if numeric is None or not np.isfinite(numeric):
+            continue
+        ranges.append(float(numeric))
+
     unique_ranges = sorted(set(ranges))
     if not unique_ranges:
-        raise ValueError("No valid interaction volume ranges resolved")
+        raise ValueError("No valid numeric values in INTERACTION_VOLUME_RANGE_SCAN")
     return unique_ranges
 
 def launch_interaction_range_gui(scan_summaries, method='selector'):
@@ -785,9 +813,15 @@ for range_index, range_mm in enumerate(interaction_ranges_mm, start=1):
         include_pair_payload=SAVE_PAIR_PAYLOAD_IN_SUMMARY,
         include_raw_payload=SAVE_RAW_POINT_PAYLOAD_IN_SUMMARY
     )
-    valid_points, total_points, unique_er_count = count_valid_energy_points(range_summary)
-    raw_nodes, raw_point_total = count_raw_payload_points(range_summary)
-    valid_runs, total_runs = count_valid_run_samples(range_summary)
+    (
+        valid_points,
+        total_points,
+        unique_er_count,
+        raw_nodes,
+        raw_point_total,
+        valid_runs,
+        total_runs,
+    ) = collect_summary_statistics(range_summary)
     print(f"  Range analysis completed in {range_elapsed_s:.1f}s ({range_elapsed_s/60:.1f} min)")
     print(f"  Valid energy-resolution points: {valid_points}/{total_points}")
     print(f"  Unique energy-resolution values: {unique_er_count}")
@@ -940,22 +974,19 @@ for record in scan_records:
 # === STEP 6: Visualization ===
 if ENABLE_VISUALIZATION:
     print("\nSTEP 6: Launching visualization...")
-    print("Interactive GUI with all interaction-volume-range curves...")
-    try:
-        visual_method = _normalize_visualization_method(VISUALIZATION_METHOD)
-        launched = launch_interaction_range_gui(scan_summaries, method=visual_method)
-        if not launched:
-            raise RuntimeError("No plottable data in GUI helper")
-    except Exception as e:
-        print(f"Interactive GUI failed: {e}")
-        import traceback
-        traceback.print_exc()
-        first_range = _sorted_keys(scan_summaries.keys())[0]
-        print(f"Falling back to Utilis heatmap slider (IV range={first_range:g} mm)...")
+    if _is_non_interactive_matplotlib_backend():
+        print("  Detected non-interactive matplotlib backend; skip GUI launch.")
+        print("  Use 'python view_results_v56.py' to open saved results later.")
+    else:
+        print("Interactive GUI with all interaction-volume-range curves...")
         try:
-            Utilis.plot_heatmap_all_fg(scan_summaries[first_range])
-        except Exception as e2:
-            print(f"Fallback slider also failed: {e2}")
+            visual_method = _normalize_visualization_method(VISUALIZATION_METHOD)
+            launched = launch_interaction_range_gui(scan_summaries, method=visual_method)
+            if not launched:
+                print("  No plottable GUI data for selected method.")
+        except Exception as e:
+            print(f"Interactive GUI failed: {e}")
+            print("  You can still inspect saved outputs with: python view_results_v56.py")
 else:
     print("\nVisualization skipped (ENABLE_VISUALIZATION=False)")
 
