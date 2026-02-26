@@ -86,37 +86,16 @@ from scipy.interpolate import griddata
 # ============================================================================
 
 _CHECKPOINT_COMPACT_KEYS = {
-    'fwhm',
-    'fwhm_mean',
-    'fwhm_variance',
-    'fwhm_std',
-    'fwhm_runs',
     'energy_resolution',
     'energy_resolution_mean',
     'energy_resolution_variance',
     'energy_resolution_std',
-    'energy_resolution_runs',
-    'max_r',
-    'max_r_mean',
-    'max_r_variance',
-    'max_r_std',
-    'max_r_runs',
     'r_max_all_points',
-    'r_max_all_points_runs',
-    'all_point_count_runs',
     'generated_particles',
     'generated_particles_per_run',
     'detected_particles',
-    'detected_particles_runs',
     'pair_count',
-    'pair_count_runs',
-    'dr_values',
-    'r_values',
-    'dr_over_r_values',
     'dr_over_r_pairs',
-    'raw_ion_points_yz',
-    'raw_point_count',
-    'raw_point_format',
     'total_runs',
     'valid_run_count',
     'valid',
@@ -157,51 +136,6 @@ def cleanup_memory(force=False):
         gc.collect(2)
     else:
         gc.collect()
-
-
-_CHECKPOINT_COMPACT_KEYS = {
-    'fwhm',
-    'fwhm_mean',
-    'fwhm_variance',
-    'fwhm_std',
-    'fwhm_runs',
-    'energy_resolution',
-    'energy_resolution_mean',
-    'energy_resolution_variance',
-    'energy_resolution_std',
-    'energy_resolution_runs',
-    'max_r',
-    'max_r_mean',
-    'max_r_variance',
-    'max_r_std',
-    'max_r_runs',
-    'r_max_all_points',
-    'r_max_all_points_runs',
-    'all_point_count_runs',
-    'generated_particles',
-    'generated_particles_per_run',
-    'detected_particles',
-    'detected_particles_runs',
-    'pair_count',
-    'pair_count_runs',
-    'dr_values',
-    'r_values',
-    'dr_over_r_values',
-    'dr_over_r_pairs',
-    'raw_ion_points_yz',
-    'raw_point_count',
-    'raw_point_format',
-    'total_runs',
-    'valid_run_count',
-    'valid',
-    'failure_reason',
-    'count_check_passed',
-    'plot_marker',
-    'plot_skip',
-    'pipeline_stage'
-}
-
-
 
 
 # ============================================================================
@@ -268,6 +202,89 @@ def _is_compact_checkpoint_data(data):
 
 
 
+def _compact_pair_row_from_dict(pair, fallback_pair_index=1):
+    if not isinstance(pair, dict):
+        return None
+    try:
+        y_a = float(pair.get('y_a'))
+        z_a = float(pair.get('z_a'))
+        y_b = float(pair.get('y_b'))
+        z_b = float(pair.get('z_b'))
+    except (TypeError, ValueError):
+        return None
+    if not (np.isfinite(y_a) and np.isfinite(z_a) and np.isfinite(y_b) and np.isfinite(z_b)):
+        return None
+    try:
+        run_index = int(pair.get('run_index', 0))
+    except (TypeError, ValueError):
+        run_index = 0
+    try:
+        pair_index = int(pair.get('pair_index', fallback_pair_index))
+    except (TypeError, ValueError):
+        pair_index = int(fallback_pair_index)
+    try:
+        ion_a = int(pair.get('ion_a', -1))
+    except (TypeError, ValueError):
+        ion_a = -1
+    try:
+        ion_b = int(pair.get('ion_b', -1))
+    except (TypeError, ValueError):
+        ion_b = -1
+    return (
+        float(run_index),
+        float(pair_index),
+        float(ion_a),
+        float(ion_b),
+        float(y_a),
+        float(z_a),
+        float(y_b),
+        float(z_b),
+    )
+
+
+def _compact_pair_row_from_sequence(row):
+    if not isinstance(row, (list, tuple, np.ndarray)) or len(row) < 8:
+        return None
+    numeric = []
+    for idx in range(8):
+        try:
+            value = float(row[idx])
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(value):
+            return None
+        numeric.append(value)
+    return tuple(numeric)
+
+
+def _compact_pair_details(pairs):
+    if pairs is None:
+        return np.empty((0, 8), dtype=np.float32)
+
+    compact_rows = []
+    if isinstance(pairs, np.ndarray):
+        arr = np.asarray(pairs)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        if arr.ndim == 2:
+            for row in arr:
+                compact = _compact_pair_row_from_sequence(row)
+                if compact is not None:
+                    compact_rows.append(compact)
+    elif isinstance(pairs, list):
+        for idx, pair in enumerate(pairs, start=1):
+            if isinstance(pair, dict):
+                compact = _compact_pair_row_from_dict(pair, fallback_pair_index=idx)
+            else:
+                compact = _compact_pair_row_from_sequence(pair)
+            if compact is not None:
+                compact_rows.append(compact)
+
+    if not compact_rows:
+        return np.empty((0, 8), dtype=np.float32)
+    return np.asarray(compact_rows, dtype=np.float32)
+
+
 def _compact_checkpoint_results(data):
     if not data:
         return {}
@@ -285,37 +302,16 @@ def _compact_checkpoint_results(data):
                 if not isinstance(result, dict):
                     continue
                 compact_result = {
-                    'fwhm': result.get('fwhm'),
-                    'fwhm_mean': result.get('fwhm_mean'),
-                    'fwhm_variance': result.get('fwhm_variance'),
-                    'fwhm_std': result.get('fwhm_std'),
-                    'fwhm_runs': result.get('fwhm_runs'),
                     'energy_resolution': result.get('energy_resolution'),
                     'energy_resolution_mean': result.get('energy_resolution_mean'),
                     'energy_resolution_variance': result.get('energy_resolution_variance'),
                     'energy_resolution_std': result.get('energy_resolution_std'),
-                    'energy_resolution_runs': result.get('energy_resolution_runs'),
-                    'max_r': result.get('max_r'),
-                    'max_r_mean': result.get('max_r_mean'),
-                    'max_r_variance': result.get('max_r_variance'),
-                    'max_r_std': result.get('max_r_std'),
-                    'max_r_runs': result.get('max_r_runs'),
                     'r_max_all_points': result.get('r_max_all_points'),
-                    'r_max_all_points_runs': result.get('r_max_all_points_runs', []),
-                    'all_point_count_runs': result.get('all_point_count_runs', []),
                     'generated_particles': result.get('generated_particles'),
                     'generated_particles_per_run': result.get('generated_particles_per_run'),
                     'detected_particles': result.get('detected_particles'),
-                    'detected_particles_runs': result.get('detected_particles_runs'),
                     'pair_count': result.get('pair_count'),
-                    'pair_count_runs': result.get('pair_count_runs'),
-                    'dr_values': result.get('dr_values', []),
-                    'r_values': result.get('r_values', []),
-                    'dr_over_r_values': result.get('dr_over_r_values', []),
-                    'dr_over_r_pairs': result.get('dr_over_r_pairs', []),
-                    'raw_ion_points_yz': result.get('raw_ion_points_yz', []),
-                    'raw_point_count': result.get('raw_point_count'),
-                    'raw_point_format': result.get('raw_point_format'),
+                    'dr_over_r_pairs': _compact_pair_details(result.get('dr_over_r_pairs', [])),
                     'total_runs': result.get('total_runs'),
                     'valid_run_count': result.get('valid_run_count'),
                     'valid': result.get('valid'),
@@ -555,7 +551,11 @@ def _checkpoint_result_has_required_pair_details(result_dict):
             return True
         return result_dict.get('valid') is False
     pairs = result_dict.get('dr_over_r_pairs')
-    has_pairs = isinstance(pairs, list) and len(pairs) > 0
+    has_pairs = False
+    if isinstance(pairs, list):
+        has_pairs = len(pairs) > 0
+    elif isinstance(pairs, np.ndarray):
+        has_pairs = pairs.size > 0
     return has_pairs or has_raw_points
 
 
@@ -1940,10 +1940,10 @@ def _compute_dr_over_rmax_statistics_from_records(ion_records, particles_per_run
 
     pair_count_runs = []
     run_er_values = []
-    all_ratio_values = []
-    all_dr_values = []
-    all_r_mean_values = []
-    pair_details = []
+    ratio_count = 0
+    ratio_sum = 0.0
+    ratio_sum_sq = 0.0
+    pair_rows = []
     repeat_failures = []
 
     for run_idx in range(repeat_blocks):
@@ -1960,7 +1960,8 @@ def _compute_dr_over_rmax_statistics_from_records(ion_records, particles_per_run
         if not isinstance(block_pairs, list):
             block_pairs = []
 
-        run_ratios = []
+        run_ratio_count = 0
+        run_ratio_sum = 0.0
         run_pair_count = 0
         for pair in block_pairs:
             try:
@@ -1976,45 +1977,53 @@ def _compute_dr_over_rmax_statistics_from_records(ion_records, particles_per_run
             r_a = float(math.sqrt((y_a - origin_y) ** 2 + (z_a - origin_z) ** 2))
             r_b = float(math.sqrt((y_b - origin_y) ** 2 + (z_b - origin_z) ** 2))
             dr = float(abs(r_a - r_b))
-            r_mean = float(0.5 * (r_a + r_b))
             ratio = float(dr / rmax_all_points) if rmax_all_points > 0 else None
 
             if ratio is not None and np.isfinite(ratio):
+                pair_idx_in_run = run_pair_count + 1
                 run_pair_count += 1
-                run_ratios.append(ratio)
-                all_ratio_values.append(ratio)
-                all_dr_values.append(dr)
-                all_r_mean_values.append(r_mean)
-                pair_details.append({
-                    'run_index': run_idx + 1,
-                    'ion_a': int(pair.get('ion_a', -1)),
-                    'ion_b': int(pair.get('ion_b', -1)),
-                    'y_a': y_a,
-                    'z_a': z_a,
-                    'y_b': y_b,
-                    'z_b': z_b,
-                    'r_a': r_a,
-                    'r_b': r_b,
-                    'dr': dr,
-                    'r': r_mean,
-                    'dr_over_r': ratio,
-                    'initial_el': pair.get('initial_el')
-                })
+                run_ratio_count += 1
+                run_ratio_sum += float(ratio)
+                ratio_count += 1
+                ratio_sum += float(ratio)
+                ratio_sum_sq += float(ratio) * float(ratio)
+                try:
+                    ion_a = int(pair.get('ion_a', -1))
+                except (TypeError, ValueError):
+                    ion_a = -1
+                try:
+                    ion_b = int(pair.get('ion_b', -1))
+                except (TypeError, ValueError):
+                    ion_b = -1
+                pair_rows.append((
+                    float(run_idx + 1),
+                    float(pair_idx_in_run),
+                    float(ion_a),
+                    float(ion_b),
+                    float(y_a),
+                    float(z_a),
+                    float(y_b),
+                    float(z_b),
+                ))
 
         pair_count_runs.append(run_pair_count)
-        if run_ratios:
-            run_er_values.append(float(np.mean(run_ratios)))
+        if run_ratio_count > 0:
+            run_er_values.append(float(run_ratio_sum / run_ratio_count))
         else:
             run_er_values.append(None)
             repeat_failures.append(f"repeat#{run_idx + 1}: no valid az/el symmetric pairs")
 
-    if not all_ratio_values:
+    if ratio_count <= 0:
         return {
             'success': False,
             'failure_reason': "No valid mirrored pairs found for dr/rmax"
         }
 
-    ratio_arr = np.array(all_ratio_values, dtype=float)
+    er_mean = float(ratio_sum / ratio_count)
+    er_var = float((ratio_sum_sq / ratio_count) - (er_mean * er_mean))
+    if er_var < 0:
+        er_var = 0.0
+    er_std = float(math.sqrt(er_var))
     max_r_arr = np.array([v for v in all_r_max_runs if v is not None], dtype=float)
     er_runs_clean = [float(v) for v in run_er_values if v is not None and np.isfinite(v)]
 
@@ -2027,6 +2036,11 @@ def _compute_dr_over_rmax_statistics_from_records(ion_records, particles_per_run
         if len(repeat_failures) > 3:
             failure_reason_summary += f"; +{len(repeat_failures) - 3} more"
 
+    if pair_rows:
+        pair_details = np.asarray(pair_rows, dtype=np.float32)
+    else:
+        pair_details = np.empty((0, 8), dtype=np.float32)
+
     return {
         'success': True,
         'detected_particles_total': detected_particles_total,
@@ -2037,9 +2051,9 @@ def _compute_dr_over_rmax_statistics_from_records(ion_records, particles_per_run
         'valid_run_count': len(er_runs_clean),
         'total_runs_used': repeat_blocks,
         'energy_resolution_runs': run_er_values,
-        'energy_resolution_mean': float(np.mean(ratio_arr)),
-        'energy_resolution_variance': float(np.var(ratio_arr)),
-        'energy_resolution_std': float(np.std(ratio_arr)),
+        'energy_resolution_mean': er_mean,
+        'energy_resolution_variance': er_var,
+        'energy_resolution_std': er_std,
         'max_r_runs': all_r_max_runs,
         'max_r_mean': max_r_mean,
         'max_r_variance': max_r_var,
@@ -2047,9 +2061,9 @@ def _compute_dr_over_rmax_statistics_from_records(ion_records, particles_per_run
         'r_max_all_points': rmax_all_points,
         'r_max_all_points_runs': all_r_max_runs,
         'all_point_count_runs': all_point_count_runs,
-        'dr_values': all_dr_values,
-        'r_values': all_r_mean_values,
-        'dr_over_r_values': all_ratio_values,
+        'dr_values': [],
+        'r_values': [],
+        'dr_over_r_values': [],
         'pair_details': pair_details,
         'failure_reason': failure_reason_summary
     }
@@ -2477,11 +2491,8 @@ def energy_resolution_analysis_direct(processed_data, all_combinations,
                         'detected_particles_runs': detected_runs,
                         'pair_count': pair_count_total,
                         'pair_count_runs': dr_over_r_stats.get('pair_count_runs', []),
-                        'dr_values': dr_over_r_stats.get('dr_values', []),
-                        'r_values': dr_over_r_stats.get('r_values', []),
-                        'dr_over_r_values': dr_over_r_stats.get('dr_over_r_values', []),
                         'dr_over_r_pairs': dr_over_r_stats.get('pair_details', []),
-                        'raw_ion_points_yz': raw_ion_points,
+                        'raw_ion_points_yz': [],
                         'raw_point_count': len(raw_ion_points),
                         'raw_point_format': 'ion_n,y,z',
                         'total_runs': int(num_statistical_repeats),

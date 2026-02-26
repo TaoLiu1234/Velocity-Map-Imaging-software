@@ -37,27 +37,36 @@ RUN_TAG = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 # === VISUALIZATION ===
 ENABLE_VISUALIZATION = True  # Launch interactive GUI after analysis
-SAVE_SCAN_CURVE_PLOTS = True  # Save static multi-curve plots for each (FG, Lens)
+SAVE_SCAN_CURVE_PLOTS = False  # Save static multi-curve plots for each (FG, Lens)
+PLOT_X_LIMITS = None  # e.g. (1.0, 16.0) in eV
+PLOT_Y_LIMITS = None  # e.g. (0.0, 25.0) in percent
+VISUALIZATION_METHOD = 'rmax'  # selector(rmax only)|saved|rmax|sqrt|all
 
 # === SAVE OPTIONS ===
 SAVE_FULL_PROCESSED_DATA = False  # Save only summary to avoid OOM
+SAVE_RANGE_SUMMARY_PKL = True  # Save per-range summary pickle
+SAVE_SCAN_BUNDLE_PKL = True  # Save scan bundle pickle
+SAVE_RANGE_CSV = False  # Save per-range CSV
+SAVE_SCAN_SUMMARY_CSV = False  # Save scan-level summary CSV
+SAVE_SCAN_MANIFEST_JSON = False  # Save scan-level JSON manifest
 CLEAR_STALE_CHECKPOINTS = False  # Keep checkpoints for resume capability
-SAVE_HEAVY_PAYLOAD_IN_SUMMARY = False  # Include raw_ion_points/dr_over_r_pairs in summary pickle
+SAVE_PAIR_PAYLOAD_IN_SUMMARY = True  # Include compact dr_over_r_pairs in summary pickle
+SAVE_RAW_POINT_PAYLOAD_IN_SUMMARY = False  # Include raw_ion_points_yz (large payload) in summary pickle
 CLEANUP_CHECKPOINTS_AFTER_SUCCESS = True
 CLEANUP_TEMP_FILES_AFTER_SUCCESS = True
 
 # === PARAMETER RANGES ===
 KE_MIN = 1
 KE_MAX = 15.5
-NUM_KE_POINTS = 5
+NUM_KE_POINTS = 2
 
 FIELD_MIN = 50
 FIELD_MAX = 300
-NUM_FIELD_POINTS = 3
+NUM_FIELD_POINTS = 2
 
 LENS_MIN = 1.3
 LENS_MAX = 3
-NUM_LENS_POINTS = 3
+NUM_LENS_POINTS = 2
 
 # === ENERGY RESOLUTION SETTINGS ===
 NUM_PARTICLES_PER_ENERGY = 91
@@ -69,14 +78,14 @@ MAX_COMBO_RETRIES = 3
 REQUIRE_FULL_PARTICLE_CAPTURE = True
 RETRY_BACKOFF_S = 0.5
 TIMING_VERBOSE = True
-CHECKPOINT_INTERVAL = 100
+CHECKPOINT_INTERVAL = 300
 GC_INTERVAL_COMBOS = 50
 
 # === INTERACTION VOLUME (Source Motion) ===
 Interaction_volume = True
 Interaction_volume_range = 1  # mm
 SCAN_INTERACTION_VOLUME_RANGE = True
-INTERACTION_VOLUME_RANGE_SCAN = [0.0, 0.5, 1.0, 1.5]
+INTERACTION_VOLUME_RANGE_SCAN = [0.0, 0.5] # mm
 
 NUM_RUNS_PER_NODE = 15 if Interaction_volume else 1
 
@@ -156,7 +165,11 @@ def create_empty_processed_data(field_gradients, lens_vmis, energies):
                 }
     return data
 
-def build_energy_resolution_summary(processed_data, include_heavy_payload=False):
+def build_energy_resolution_summary(
+    processed_data,
+    include_pair_payload=True,
+    include_raw_payload=False
+):
     """Extract v5.4-compatible summary structure from processed data."""
     summary = {}
     for fg, fg_data in processed_data.items():
@@ -194,9 +207,12 @@ def build_energy_resolution_summary(processed_data, include_heavy_payload=False)
                     'failure_reasons',
                     'count_check_passed', 'plot_marker', 'plot_skip', 'pipeline_stage'
                 ]
-                if include_heavy_payload:
+                if include_pair_payload:
                     optional_fields.extend([
-                        'dr_values', 'r_values', 'dr_over_r_values', 'dr_over_r_pairs',
+                        'dr_over_r_pairs',
+                    ])
+                if include_raw_payload:
+                    optional_fields.extend([
                         'raw_ion_points_yz',
                     ])
                 for key in optional_fields:
@@ -249,11 +265,6 @@ def count_raw_payload_points(summary_data):
                 if isinstance(raw_points, list) and len(raw_points) > 0:
                     nodes_with_raw += 1
                     total_points += len(raw_points)
-                    continue
-                raw_point_count = global_data.get('raw_point_count')
-                if isinstance(raw_point_count, (int, np.integer)) and int(raw_point_count) > 0:
-                    nodes_with_raw += 1
-                    total_points += int(raw_point_count)
     return nodes_with_raw, total_points
 
 def count_valid_run_samples(summary_data):
@@ -416,6 +427,24 @@ def _format_scan_token(value):
     token = token.replace('-', 'm').replace('.', 'p')
     return token
 
+def _format_interaction_volume_label(range_mm):
+    numeric = _safe_float(range_mm)
+    if numeric is None:
+        return f'Source={range_mm}*{range_mm}*{range_mm} mm^3'
+    token = f'{float(numeric):.6g}'
+    return f'Source={token}*{token}*{token} mm^3'
+
+def _normalize_visualization_method(method):
+    allowed = {'selector', 'saved', 'rmax', 'sqrt', 'all'}
+    method_key = str(method or 'rmax').strip().lower()
+    if method_key in allowed:
+        return method_key
+    print(
+        f"WARNING: Unsupported VISUALIZATION_METHOD='{method}'. "
+        "Falling back to 'rmax'."
+    )
+    return 'rmax'
+
 def resolve_interaction_volume_ranges():
     if not Interaction_volume:
         return [0.0]
@@ -436,30 +465,21 @@ def resolve_interaction_volume_ranges():
         raise ValueError("No valid interaction volume ranges resolved")
     return unique_ranges
 
-def launch_interaction_range_gui(scan_summaries):
-    import view_energy_resolution_results as viewer
-    range_values = _sorted_keys(scan_summaries.keys())
-    if len(range_values) <= 1:
-        return launch_field_gradient_gui(scan_summaries[range_values[0]])
-
-    colors = [
-        'tab:blue', 'tab:orange', 'tab:green', 'tab:red', 'tab:brown',
-        'tab:pink', 'tab:gray', 'tab:olive', 'tab:cyan'
-    ]
-    markers = ['o', 's', '^', 'd', 'v', 'P', 'X', '*', 'h']
-    method_entries = []
-    for idx, range_value in enumerate(range_values):
-        method_entries.append({
-            'key': f'ivr_{idx}',
-            'label': f'IV range = {range_value:g} mm',
-            'summary': scan_summaries[range_value],
-            'color': colors[idx % len(colors)],
-            'marker': markers[idx % len(markers)]
-        })
-    return viewer.launch_multi_method_gui(
-        method_entries,
-        title_prefix='SIMION Workflow v5.6 - Interaction Volume Range Scan',
-        y_as_percent=True
+def launch_interaction_range_gui(scan_summaries, method='selector'):
+    """Launch GUI via the standalone v5.6 viewer module."""
+    import view_results_v56 as viewer_v56
+    bundle_data = {'scan_summaries': scan_summaries}
+    return viewer_v56.launch_bundle_view(
+        bundle_data=bundle_data,
+        selected_method=method,
+        origin_y=SOURCE_POSITION[1],
+        origin_z=SOURCE_POSITION[2],
+        y_as_percent=True,
+        xlim=PLOT_X_LIMITS,
+        ylim=PLOT_Y_LIMITS,
+        range_mm=None,
+        no_gui=False,
+        list_only=False
     )
 
 def plot_interaction_volume_scan_curves(scan_summaries, output_dir, run_tag, y_as_percent=True):
@@ -522,7 +542,7 @@ def plot_interaction_volume_scan_curves(scan_summaries, output_dir, run_tag, y_a
                         color=colors[idx],
                         linewidth=2.0,
                         markersize=5,
-                        label=f'IV range={range_value:g} mm'
+                        label=_format_interaction_volume_label(range_value)
                     )
                 if x_invalid:
                     invalid_points.append((idx, x_invalid))
@@ -568,16 +588,18 @@ def plot_interaction_volume_scan_curves(scan_summaries, output_dir, run_tag, y_a
 
     return plot_paths
 
-def launch_field_gradient_gui(summary_data):
-    """Launch interactive GUI for exploring energy resolution data (uses external viewer)."""
-    import view_energy_resolution_results as viewer
-    return viewer.launch_energy_resolution_gui(
+def launch_field_gradient_gui(summary_data, method='selector'):
+    """Launch interactive GUI for one summary via standalone v5.6 viewer module."""
+    import view_results_v56 as viewer_v56
+    return viewer_v56.launch_summary_view(
         summary_data=summary_data,
-        method='rmax',  # Visualization method
+        selected_method=method,
         origin_y=SOURCE_POSITION[1],
         origin_z=SOURCE_POSITION[2],
         y_as_percent=True,
-        title_prefix='SIMION Workflow v5.6'
+        xlim=PLOT_X_LIMITS,
+        ylim=PLOT_Y_LIMITS,
+        no_gui=False
     )
 
 def clear_energy_resolution_checkpoints():
@@ -760,7 +782,8 @@ for range_index, range_mm in enumerate(interaction_ranges_mm, start=1):
 
     range_summary = build_energy_resolution_summary(
         range_processed_data,
-        include_heavy_payload=SAVE_HEAVY_PAYLOAD_IN_SUMMARY
+        include_pair_payload=SAVE_PAIR_PAYLOAD_IN_SUMMARY,
+        include_raw_payload=SAVE_RAW_POINT_PAYLOAD_IN_SUMMARY
     )
     valid_points, total_points, unique_er_count = count_valid_energy_points(range_summary)
     raw_nodes, raw_point_total = count_raw_payload_points(range_summary)
@@ -773,19 +796,27 @@ for range_index, range_mm in enumerate(interaction_ranges_mm, start=1):
     if valid_points == 0 and raw_nodes == 0:
         print("  WARNING: No valid energy-resolution values were produced for this range.")
 
-    range_summary_path = os.path.join(
-        OUTPUT_DIR,
-        f"energy_resolution_summary_ivr_{range_token}_{RUN_TAG}.pkl"
-    )
-    save_pickle_atomic(range_summary, range_summary_path)
-    print(f"  Saved range summary: {range_summary_path}")
+    range_summary_path = None
+    if SAVE_RANGE_SUMMARY_PKL:
+        range_summary_path = os.path.join(
+            OUTPUT_DIR,
+            f"energy_resolution_summary_ivr_{range_token}_{RUN_TAG}.pkl"
+        )
+        save_pickle_atomic(range_summary, range_summary_path)
+        print(f"  Saved range summary: {range_summary_path}")
+    else:
+        print("  Range summary pickle skipped (SAVE_RANGE_SUMMARY_PKL=False)")
 
-    range_csv_path = os.path.join(
-        OUTPUT_DIR,
-        f"energy_resolution_ivr_{range_token}_{RUN_TAG}.csv"
-    )
-    range_csv_rows = save_energy_resolution_csv(range_summary, range_csv_path)
-    print(f"  Saved range CSV: {range_csv_path} ({range_csv_rows} rows)")
+    range_csv_path = None
+    if SAVE_RANGE_CSV:
+        range_csv_path = os.path.join(
+            OUTPUT_DIR,
+            f"energy_resolution_ivr_{range_token}_{RUN_TAG}.csv"
+        )
+        range_csv_rows = save_energy_resolution_csv(range_summary, range_csv_path)
+        print(f"  Saved range CSV: {range_csv_path} ({range_csv_rows} rows)")
+    else:
+        print("  Range CSV skipped (SAVE_RANGE_CSV=False)")
 
     full_path = None
     if SAVE_FULL_PROCESSED_DATA:
@@ -828,18 +859,6 @@ scan_bundle = {
     'interaction_volume_ranges_mm': [float(v) for v in interaction_ranges_mm],
     'num_particles_per_energy': int(NUM_PARTICLES_PER_ENERGY),
     'num_runs_per_node': int(NUM_RUNS_PER_NODE),
-    'scan_records': scan_records,
-    'scan_summaries': scan_summaries,
-}
-scan_bundle_path = os.path.join(OUTPUT_DIR, f"interaction_volume_scan_bundle_{RUN_TAG}.pkl")
-save_pickle_atomic(scan_bundle, scan_bundle_path)
-print(f"  Scan bundle saved: {scan_bundle_path}")
-
-scan_manifest_path = os.path.join(OUTPUT_DIR, f"interaction_volume_scan_manifest_{RUN_TAG}.json")
-save_json_atomic({
-    'run_tag': RUN_TAG,
-    'interaction_volume_ranges_mm': [float(v) for v in interaction_ranges_mm],
-    'scan_records': scan_records,
     'settings': {
         'field_range': [FIELD_MIN, FIELD_MAX, NUM_FIELD_POINTS],
         'lens_range': [LENS_MIN, LENS_MAX, NUM_LENS_POINTS],
@@ -853,13 +872,49 @@ save_json_atomic({
             'y_range_mm': DETECTOR_Y_RANGE_MM,
             'z_range_mm': DETECTOR_Z_RANGE_MM
         }
-    }
-}, scan_manifest_path)
-print(f"  Scan manifest saved: {scan_manifest_path}")
+    },
+    'scan_records': scan_records,
+    'scan_summaries': scan_summaries,
+}
+scan_bundle_path = None
+if SAVE_SCAN_BUNDLE_PKL:
+    scan_bundle_path = os.path.join(OUTPUT_DIR, f"interaction_volume_scan_bundle_{RUN_TAG}.pkl")
+    save_pickle_atomic(scan_bundle, scan_bundle_path)
+    print(f"  Scan bundle saved: {scan_bundle_path}")
+else:
+    print("  Scan bundle pickle skipped (SAVE_SCAN_BUNDLE_PKL=False)")
 
-scan_csv_path = os.path.join(OUTPUT_DIR, f"interaction_volume_scan_summary_{RUN_TAG}.csv")
-scan_csv_rows = save_interaction_scan_csv(scan_summaries, scan_csv_path)
-print(f"  Scan summary CSV saved: {scan_csv_path} ({scan_csv_rows} rows)")
+if SAVE_SCAN_MANIFEST_JSON:
+    scan_manifest_path = os.path.join(OUTPUT_DIR, f"interaction_volume_scan_manifest_{RUN_TAG}.json")
+    save_json_atomic({
+        'run_tag': RUN_TAG,
+        'interaction_volume_ranges_mm': [float(v) for v in interaction_ranges_mm],
+        'scan_records': scan_records,
+        'settings': {
+            'field_range': [FIELD_MIN, FIELD_MAX, NUM_FIELD_POINTS],
+            'lens_range': [LENS_MIN, LENS_MAX, NUM_LENS_POINTS],
+            'ke_range': [KE_MIN, KE_MAX, NUM_KE_POINTS],
+            'num_particles_per_energy': NUM_PARTICLES_PER_ENERGY,
+            'num_runs_per_node': NUM_RUNS_PER_NODE,
+            'require_full_particle_capture': REQUIRE_FULL_PARTICLE_CAPTURE,
+            'detector': {
+                'x_mm': DETECTOR_X_MM,
+                'x_tol_mm': DETECTOR_X_TOL_MM,
+                'y_range_mm': DETECTOR_Y_RANGE_MM,
+                'z_range_mm': DETECTOR_Z_RANGE_MM
+            }
+        }
+    }, scan_manifest_path)
+    print(f"  Scan manifest saved: {scan_manifest_path}")
+else:
+    print("  Scan manifest JSON skipped (SAVE_SCAN_MANIFEST_JSON=False)")
+
+if SAVE_SCAN_SUMMARY_CSV:
+    scan_csv_path = os.path.join(OUTPUT_DIR, f"interaction_volume_scan_summary_{RUN_TAG}.csv")
+    scan_csv_rows = save_interaction_scan_csv(scan_summaries, scan_csv_path)
+    print(f"  Scan summary CSV saved: {scan_csv_path} ({scan_csv_rows} rows)")
+else:
+    print("  Scan summary CSV skipped (SAVE_SCAN_SUMMARY_CSV=False)")
 
 plot_paths = []
 if SAVE_SCAN_CURVE_PLOTS:
@@ -870,6 +925,8 @@ if SAVE_SCAN_CURVE_PLOTS:
         y_as_percent=True
     )
     print(f"  Scan curve plots saved: {len(plot_paths)} file(s)")
+else:
+    print("  Scan curve plots skipped (SAVE_SCAN_CURVE_PLOTS=False)")
 
 print("\nRange summary:")
 for record in scan_records:
@@ -885,7 +942,8 @@ if ENABLE_VISUALIZATION:
     print("\nSTEP 6: Launching visualization...")
     print("Interactive GUI with all interaction-volume-range curves...")
     try:
-        launched = launch_interaction_range_gui(scan_summaries)
+        visual_method = _normalize_visualization_method(VISUALIZATION_METHOD)
+        launched = launch_interaction_range_gui(scan_summaries, method=visual_method)
         if not launched:
             raise RuntimeError("No plottable data in GUI helper")
     except Exception as e:
