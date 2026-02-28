@@ -8,6 +8,7 @@ and easy to read for beginners.
 """
 
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 
@@ -32,31 +33,95 @@ def ensure_2d(array: np.ndarray, expected_cols: int, name: str) -> np.ndarray:
     return array
 
 
-def select_increment_pairs(trigger_indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Select rows where current trigger indices are previous +1/+1.
+def select_increment_pairs(
+    trigger_indices: np.ndarray,
+    progress_callback: Callable[[float], None] | None = None,
+    progress_step: int = 250_000,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Select +1/+1 rows using a rolling anchor-window search.
+
+    Rule:
+    - Keep one current anchor (first valid row is initial anchor, not returned).
+    - Scan forward. A candidate row is accepted if it is +1/+1 versus *any* valid
+      row seen since current anchor (including anchor itself).
+    - Once accepted, that candidate becomes the new anchor and the search window
+      is reset from this row.
 
     Input columns are expected as [electron_index, ion_index].
     NaN rows are ignored automatically.
     """
+    # Pre-filter valid rows in vectorized form to minimize Python-loop overhead.
     e_idx = trigger_indices[:, 0]
     i_idx = trigger_indices[:, 1]
+    valid = ~np.isnan(e_idx) & ~np.isnan(i_idx)
+    if not np.any(valid):
+        if progress_callback is not None:
+            progress_callback(1.0)
+        return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64)
 
-    prev_e = np.roll(e_idx, 1)
-    prev_i = np.roll(i_idx, 1)
+    e_valid = np.rint(e_idx[valid]).astype(np.int64, copy=False)
+    i_valid = np.rint(i_idx[valid]).astype(np.int64, copy=False)
+    n = int(e_valid.size)
+    if n <= 1:
+        if progress_callback is not None:
+            progress_callback(1.0)
+        return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64)
+    if progress_callback is not None:
+        progress_callback(0.0)
+    progress_step = max(1, int(progress_step))
+    progress_den = max(1, n - 1)
 
-    curr_valid = ~np.isnan(e_idx) & ~np.isnan(i_idx)
-    prev_valid = ~np.isnan(prev_e) & ~np.isnan(prev_i)
-    plus_one = np.isclose(e_idx, prev_e + 1.0, rtol=0.0, atol=1e-12) & np.isclose(
-        i_idx, prev_i + 1.0, rtol=0.0, atol=1e-12
-    )
+    selected_mask = np.zeros(n, dtype=bool)
+    segment_id = 0
 
-    mask = curr_valid & prev_valid & plus_one
-    if mask.size > 0:
-        mask[0] = False
+    # Fast path for non-negative 31-bit indices: pack (e,i) into one int64 key.
+    # This avoids Python tuple allocation in the main loop.
+    e_max = int(np.max(e_valid))
+    i_max = int(np.max(i_valid))
+    e_min = int(np.min(e_valid))
+    i_min = int(np.min(i_valid))
+    if e_min >= 0 and i_min >= 0 and e_max <= 0x7FFFFFFF and i_max <= 0x7FFFFFFF:
+        e_i64 = e_valid.astype(np.int64, copy=False)
+        i_i64 = i_valid.astype(np.int64, copy=False)
+        key_now = (e_i64 << 32) | i_i64
+        key_prev = ((e_i64 - 1) << 32) | (i_i64 - 1)
 
-    selected_e = np.rint(e_idx[mask]).astype(np.int64)
-    selected_i = np.rint(i_idx[mask]).astype(np.int64)
-    return selected_e, selected_i
+        seen_segment: dict[int, int] = {int(key_now[0]): segment_id}
+        for idx in range(1, n):
+            prev = int(key_prev[idx])
+            if seen_segment.get(prev, -1) == segment_id:
+                selected_mask[idx] = True
+                segment_id += 1
+            seen_segment[int(key_now[idx])] = segment_id
+            if progress_callback is not None and (idx % progress_step == 0 or idx == n - 1):
+                progress_callback(float(idx) / float(progress_den))
+    else:
+        # General path keeps exact integer-pair keys.
+        seen_segment_pair: dict[tuple[int, int], int] = {(int(e_valid[0]), int(i_valid[0])): segment_id}
+        for idx in range(1, n):
+            prev_key = (int(e_valid[idx] - 1), int(i_valid[idx] - 1))
+            if seen_segment_pair.get(prev_key, -1) == segment_id:
+                selected_mask[idx] = True
+                segment_id += 1
+            seen_segment_pair[(int(e_valid[idx]), int(i_valid[idx]))] = segment_id
+            if progress_callback is not None and (idx % progress_step == 0 or idx == n - 1):
+                progress_callback(float(idx) / float(progress_den))
+
+    return e_valid[selected_mask], i_valid[selected_mask]
+
+
+def select_all_one_pairs(trigger_indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Select all non-NaN trigger rows as electron/ion index pairs.
+
+    Input columns are expected as [electron_index, ion_index].
+    Rows containing NaN in either column are dropped.
+    """
+    e_idx = trigger_indices[:, 0]
+    i_idx = trigger_indices[:, 1]
+    valid = ~np.isnan(e_idx) & ~np.isnan(i_idx)
+    if not np.any(valid):
+        return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64)
+    return np.rint(e_idx[valid]).astype(np.int64), np.rint(i_idx[valid]).astype(np.int64)
 
 
 def density_counts_from_bins(x: np.ndarray, y: np.ndarray, bin_size: float | None = None) -> np.ndarray:

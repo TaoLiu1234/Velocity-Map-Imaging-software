@@ -217,6 +217,7 @@ Dependencies:
 
 import contextlib
 import io
+from typing import Callable
 
 import abel
 import numpy as np
@@ -553,6 +554,7 @@ def run_reconstructions_from_centered_data(
     centered_hist_data: dict | None,
     rbasex_settings: dict,
     backward_settings: dict,
+    progress_callback: Callable[[float, str], None] | None = None,
 ) -> tuple[dict | None, dict | None]:
     """Run rBasex and backward reconstructions from centered histogram dict.
 
@@ -571,6 +573,15 @@ def run_reconstructions_from_centered_data(
     if centered_hist_data is None:
         return None, None
 
+    def emit_progress(frac: float, message: str) -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(float(frac), message)
+        except Exception:
+            pass
+
+    emit_progress(0.05, "Preparing reconstruction input...")
     hist_xy = np.asarray(centered_hist_data["hist_denoised"], dtype=np.float64)
     xedges = centered_hist_data["xedges"]
     yedges = centered_hist_data["yedges"]
@@ -581,7 +592,9 @@ def run_reconstructions_from_centered_data(
     recon_input = np.asarray(hist_xy.T, dtype=np.float64)
     bin_size_eff = float(centered_hist_data.get("bin_size", 1.0))
 
+    emit_progress(0.2, "Running rBasex reconstruction...")
     rbasex_result = run_rbasex_reconstruction(recon_input, xedges, yedges, bin_size_eff, rbasex_settings)
+    emit_progress(0.55, "Running backward reconstruction...")
     backward_result = run_backward_reconstruction_no_forward_fit(
         recon_input,
         xedges,
@@ -589,4 +602,5 @@ def run_reconstructions_from_centered_data(
         bin_size_eff,
         backward_settings,
     )
+    emit_progress(1.0, "Reconstruction algorithms finished.")
     return rbasex_result, backward_result

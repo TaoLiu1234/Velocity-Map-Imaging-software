@@ -13,9 +13,9 @@ Recommended operation order in this GUI (the same order users should click):
    - This changes histogram rendering window (coarse view).
    - Main function: `apply_ion_hist_x_roi_from_inputs()`.
 3. Fine tune ion TOF selection:
-   - Drag on ion histogram to select the exact TOF peak region.
+   - Drag on ion histogram to select the exact TOF peak region, or set `Fine ROI min/max`.
    - This fine ROI controls downstream point selection.
-   - Main functions: `_on_ion_span_selected()` -> `_apply_ion_selection_range()`.
+   - Main functions: `_on_ion_span_selected()`, `apply_ion_fine_roi_from_inputs()`.
 4. Filter and align ion/electron scatter:
    - Optional: enable ion rectangle filter and ion rotation/alignment.
    - Set electron ring center/inner/outer radii.
@@ -39,6 +39,7 @@ Code split (3 main modules):
 import contextlib
 import os
 import sys
+from typing import Callable
 
 # Keep matplotlib on the same Qt binding as the GUI toolkit.
 os.environ["QT_API"] = "pyside6"
@@ -47,7 +48,7 @@ import matplotlib
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
-from matplotlib.colors import PowerNorm
+from matplotlib.colors import LogNorm, PowerNorm
 from matplotlib.figure import Figure
 from matplotlib.patches import Circle, Rectangle
 from matplotlib.widgets import SpanSelector
@@ -66,6 +67,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QProgressBar,
     QScrollArea,
     QSplitter,
     QSlider,
@@ -80,6 +82,7 @@ from VMI_workflow_core import (
     edge_circle_center,
     ensure_2d,
     geometric_median,
+    select_all_one_pairs,
     select_increment_pairs,
 )
 from VMI_workflow_reconstruction import (
@@ -185,9 +188,22 @@ class MainWindow(QMainWindow):
 
         self.matched_electron = np.empty((0, 3), dtype=np.float64)
         self.matched_ion = np.empty((0, 3), dtype=np.float64)
+        self.paired_lookup_e_idx = np.empty(0, dtype=np.int64)
+        self.paired_lookup_i_idx = np.empty(0, dtype=np.int64)
+        self.last_process_mode = "coincidence"
         self.ion_range: tuple[float, float] | None = None
         self.ion_hist_x_roi: tuple[float, float] | None = None
         self.current_hist_bins = 120
+        self._ion_hist_data_version = 0
+        self._ion_hist_cache_key = None
+        self._ion_hist_cache_counts = np.zeros(0, dtype=np.float64)
+        self._ion_hist_cache_edges = np.zeros(0, dtype=np.float64)
+        self._ion_hist_cache_window_n = 0
+        self._ion_hist_cache_total_n = 0
+        self._pair_cache_mode = ""
+        self._pair_cache_trigger_ref = None
+        self._pair_cache_e_idx = np.zeros(0, dtype=np.int64)
+        self._pair_cache_i_idx = np.zeros(0, dtype=np.int64)
 
         self.ring_inner_selected_electron = np.empty((0, 3), dtype=np.float64)
         self.ring_outer_noise_electron = np.empty((0, 3), dtype=np.float64)
@@ -199,6 +215,7 @@ class MainWindow(QMainWindow):
         self.circle_centroid: tuple[float, float] | None = None
         self.center_residual: tuple[float, float] | None = None
         self.centered_hist_data: dict | None = None
+        self.centered_bin_colorbar = None
         self.noise_removed_total = 0.0
         self.rbasex_recon_result: dict | None = None
         self.backward_recon_result: dict | None = None
@@ -295,7 +312,7 @@ class MainWindow(QMainWindow):
         self.main_splitter.setSizes([300, 880])
 
         quick_guide = QLabel(
-            "Workflow: 1) Load to Cache + Process and Plot  2) Coarse Ion Hist X ROI  3) Fine TOF Span ROI  "
+            "Workflow: 1) Load to Cache + Process and Plot  2) Coarse Ion Hist X ROI  3) Fine TOF ROI (span or min/max)  "
             "4) Ion/Electron filter+align  5) Apply Ring Selection and Center  6) Set reconstruction params  "
             "7) Start Reconstruction"
         )
@@ -327,6 +344,14 @@ class MainWindow(QMainWindow):
         self.clear_btn.clicked.connect(self.clear_cache)
         self.process_btn = QPushButton("Process and Plot")
         self.process_btn.clicked.connect(self.process_and_plot)
+        self.trigger_mode_label = QLabel("Trigger mode")
+        self.trigger_mode_combo = QComboBox()
+        self.trigger_mode_combo.addItem("Coincidence (+1/+1)", "coincidence")
+        self.trigger_mode_combo.addItem("All-one ion (drop NaN)", "all_one")
+        self.trigger_mode_combo.setCurrentIndex(0)
+        self.trigger_mode_combo.setToolTip(
+            "Coincidence: +1/+1 chaining rule. All-one ion: use all non-NaN trigger rows directly as indices."
+        )
         action_row.addWidget(self.load_btn)
         action_row.addWidget(self.clear_btn)
         action_row.addWidget(self.process_btn)
@@ -369,9 +394,29 @@ class MainWindow(QMainWindow):
         self.ion_hist_xmax_edit.setMaximumWidth(110)
         self.ion_hist_xmax_edit.returnPressed.connect(self.apply_ion_hist_x_roi_from_inputs)
         ion_hist_grid.addWidget(self.ion_hist_xmax_edit, 2, 3)
+        ion_hist_grid.addWidget(QLabel("Fine ROI min"), 3, 0)
+        self.ion_fine_xmin_edit = QLineEdit("")
+        self.ion_fine_xmin_edit.setPlaceholderText("all")
+        self.ion_fine_xmin_edit.setMaximumWidth(110)
+        self.ion_fine_xmin_edit.returnPressed.connect(self.apply_ion_fine_roi_from_inputs)
+        ion_hist_grid.addWidget(self.ion_fine_xmin_edit, 3, 1)
+        ion_hist_grid.addWidget(QLabel("Fine ROI max"), 3, 2)
+        self.ion_fine_xmax_edit = QLineEdit("")
+        self.ion_fine_xmax_edit.setPlaceholderText("all")
+        self.ion_fine_xmax_edit.setMaximumWidth(110)
+        self.ion_fine_xmax_edit.returnPressed.connect(self.apply_ion_fine_roi_from_inputs)
+        ion_hist_grid.addWidget(self.ion_fine_xmax_edit, 3, 3)
         self.apply_ion_hist_roi_btn = QPushButton("Update Hist ROI")
         self.apply_ion_hist_roi_btn.clicked.connect(self.apply_ion_hist_x_roi_from_inputs)
-        ion_hist_grid.addWidget(self.apply_ion_hist_roi_btn, 3, 0, 1, 2)
+        ion_hist_grid.addWidget(self.apply_ion_hist_roi_btn, 4, 0, 1, 2)
+        self.apply_ion_fine_roi_btn = QPushButton("Update Fine ROI")
+        self.apply_ion_fine_roi_btn.clicked.connect(self.apply_ion_fine_roi_from_inputs)
+        ion_hist_grid.addWidget(self.apply_ion_fine_roi_btn, 4, 2, 1, 2)
+        ion_hist_grid.addWidget(self.trigger_mode_label, 5, 0)
+        ion_hist_grid.addWidget(self.trigger_mode_combo, 5, 1, 1, 3)
+        self.export_pair_debug_btn = QPushButton("Export Pair Debug TXT")
+        self.export_pair_debug_btn.clicked.connect(self.export_pair_debug_txt)
+        ion_hist_grid.addWidget(self.export_pair_debug_btn, 6, 0, 1, 4)
         control_grid.addWidget(ion_hist_group, 0, 0, 1, 12)
 
         # Step 4 + Step 5 controls (electron ring filter and centering)
@@ -403,9 +448,12 @@ class MainWindow(QMainWindow):
         self.outer_r_edit = QLineEdit("14")
         self.outer_r_edit.setMaximumWidth(100)
         e_scatter_grid.addWidget(self.outer_r_edit, 2, 3)
+        self.outer_ring_filter_enable_checkbox = QCheckBox("Enable outer-ring noise filter")
+        self.outer_ring_filter_enable_checkbox.setChecked(True)
+        e_scatter_grid.addWidget(self.outer_ring_filter_enable_checkbox, 3, 0, 1, 3)
         self.apply_circle_btn = QPushButton("Apply Ring Selection and Center")
         self.apply_circle_btn.clicked.connect(self.apply_circle_selection)
-        e_scatter_grid.addWidget(self.apply_circle_btn, 2, 4)
+        e_scatter_grid.addWidget(self.apply_circle_btn, 2, 4, 2, 1)
         control_grid.addWidget(e_scatter_group, 1, 0, 1, 7)
 
         # Step 4 controls (ion rectangle filter and alignment)
@@ -455,6 +503,17 @@ class MainWindow(QMainWindow):
         self.center_bin_edit = QLineEdit("0.1")
         self.center_bin_edit.setMaximumWidth(100)
         projection_grid.addWidget(self.center_bin_edit, 0, 1)
+        self.centered_bin_colorbar_checkbox = QCheckBox("Show colorbar")
+        self.centered_bin_colorbar_checkbox.setChecked(True)
+        self.centered_bin_colorbar_checkbox.toggled.connect(self._on_centered_bin_colorbar_toggled)
+        projection_grid.addWidget(self.centered_bin_colorbar_checkbox, 1, 0, 1, 2)
+        projection_grid.addWidget(QLabel("Bin map scale"), 1, 2)
+        self.centered_bin_scale_combo = QComboBox()
+        self.centered_bin_scale_combo.addItem("Linear", "linear")
+        self.centered_bin_scale_combo.addItem("Log", "log")
+        self.centered_bin_scale_combo.setCurrentIndex(0)
+        self.centered_bin_scale_combo.currentIndexChanged.connect(self._on_centered_bin_scale_changed)
+        projection_grid.addWidget(self.centered_bin_scale_combo, 1, 3)
         self.reconstruct_btn = QPushButton("Start Reconstruction")
         self.reconstruct_btn.clicked.connect(self.run_reconstruction_now)
         projection_grid.addWidget(self.reconstruct_btn, 0, 2, 1, 2)
@@ -694,6 +753,13 @@ class MainWindow(QMainWindow):
 
         self.status_label = QLabel("Status: waiting for files")
         self.top_layout.addWidget(self.status_label)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("%p%")
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setVisible(False)
+        self.top_layout.addWidget(self.progress_bar)
 
         # ------------------------------
         # Plot canvas area
@@ -733,6 +799,7 @@ class MainWindow(QMainWindow):
         self._wire_horizontal_view_slider()
         for edit in (self.circle_cx_edit, self.circle_cy_edit, self.inner_r_edit, self.outer_r_edit):
             edit.textChanged.connect(self._schedule_circle_overlay_update)
+        self.outer_ring_filter_enable_checkbox.toggled.connect(self._on_outer_ring_filter_toggled)
         for edit in (self.ion_filter_cx_edit, self.ion_filter_cy_edit, self.ion_filter_w_edit, self.ion_filter_h_edit):
             edit.textChanged.connect(self._schedule_ion_overlay_update)
         self.ion_filter_enable_checkbox.toggled.connect(self._on_ion_filter_toggled)
@@ -792,7 +859,7 @@ class MainWindow(QMainWindow):
         """Recompute view when automatic ion major-axis alignment is toggled."""
         _ = checked
         self._clear_circle_result()
-        if self.matched_ion.shape[0] > 0:
+        if self._has_pairs():
             self._refresh_plots()
             if self.ion_align_checkbox.isChecked():
                 self._set_status("Ion major-axis horizontal alignment enabled.")
@@ -804,11 +871,59 @@ class MainWindow(QMainWindow):
     def _on_ion_filter_toggled(self, checked: bool) -> None:
         """Refresh plot state when ion rectangle filter is enabled/disabled."""
         self._clear_circle_result()
-        if self.matched_ion.shape[0] > 0:
+        if self._has_pairs():
             self._refresh_plots()
             self._set_status("Ion filter enabled." if checked else "Ion filter disabled.")
         else:
             self._update_ion_overlay_only()
+
+    def _on_outer_ring_filter_toggled(self, checked: bool) -> None:
+        """Enable/disable outer-ring noise filter and refresh dependent views."""
+        self._clear_circle_result()
+        if self._has_pairs():
+            self._refresh_plots()
+        else:
+            self._update_circle_overlay_only()
+        self._set_status("Outer-ring noise filter enabled." if checked else "Outer-ring noise filter disabled.")
+
+    def _on_centered_bin_colorbar_toggled(self, checked: bool) -> None:
+        """Toggle colorbar visibility for centered electron bin image."""
+        if self._has_pairs():
+            self._refresh_reconstruction_panels_only()
+        else:
+            centered_bin_size = self._parse_center_bin_size(show_dialog=False)
+            if centered_bin_size is None:
+                centered_bin_size = 0.1
+            self._plot_centered_bin_image(self.ax_centered_bin, self.centered_hist_data, centered_bin_size)
+            self.canvas.draw_idle()
+        self._set_status("Centered-bin colorbar shown." if checked else "Centered-bin colorbar hidden.")
+
+    def _current_centered_bin_scale(self) -> str:
+        """Return current display scale for centered electron bin image."""
+        mode = self.centered_bin_scale_combo.currentData() if hasattr(self, "centered_bin_scale_combo") else "linear"
+        if isinstance(mode, str):
+            return mode
+        return "linear"
+
+    def _on_centered_bin_scale_changed(self, _index: int) -> None:
+        """Re-render centered electron bin image when scale mode changes."""
+        if self._has_pairs():
+            self._refresh_reconstruction_panels_only()
+        else:
+            centered_bin_size = self._parse_center_bin_size(show_dialog=False)
+            if centered_bin_size is None:
+                centered_bin_size = 0.1
+            self._plot_centered_bin_image(self.ax_centered_bin, self.centered_hist_data, centered_bin_size)
+            self.canvas.draw_idle()
+        self._set_status(f"Centered-bin scale set to {self._current_centered_bin_scale()}.")
+
+    def _clear_centered_bin_colorbar(self) -> None:
+        """Remove centered-bin colorbar artist if it exists."""
+        if self.centered_bin_colorbar is None:
+            return
+        with contextlib.suppress(Exception):
+            self.centered_bin_colorbar.remove()
+        self.centered_bin_colorbar = None
 
     def apply_ion_rotation_offset(self) -> None:
         """Apply user-entered extra rotation (degrees) for ion scatter display."""
@@ -818,7 +933,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid rotation", "Ion rotation offset must be a valid number (degrees).")
             return
         self.ion_user_rotation_deg = offset
-        if self.matched_ion.shape[0] > 0:
+        if self._has_pairs():
             self._clear_circle_result()
             self._refresh_plots()
         else:
@@ -829,7 +944,7 @@ class MainWindow(QMainWindow):
         """Show or hide the ion main-direction reference line."""
         if not checked:
             self._clear_ion_main_direction_artists()
-        if self.matched_ion.shape[0] > 0:
+        if self._has_pairs():
             self._refresh_plots()
         else:
             self._update_ion_overlay_only()
@@ -1065,6 +1180,96 @@ class MainWindow(QMainWindow):
         """Update one-line status text shown below the control panel."""
         self.status_label.setText(f"Status: {text}")
 
+    def _progress_start(self, text: str, determinate: bool = True) -> None:
+        """Show and initialize bottom progress bar for long operations."""
+        if determinate:
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(0)
+            self.progress_bar.setFormat("%p%")
+        else:
+            self.progress_bar.setRange(0, 0)
+            self.progress_bar.setFormat("busy")
+        self.progress_bar.setVisible(True)
+        self._set_status(text)
+        QApplication.processEvents()
+
+    def _progress_update(self, value: int | None = None, text: str | None = None) -> None:
+        """Update progress bar percentage and optional status text."""
+        if value is not None and self.progress_bar.maximum() > 0:
+            target = int(np.clip(value, 0, self.progress_bar.maximum()))
+            if target != self.progress_bar.value():
+                self.progress_bar.setValue(target)
+        if text is not None:
+            if self.progress_bar.maximum() > 0:
+                self._set_status(f"{text} ({self.progress_bar.value()}%)")
+            else:
+                self._set_status(text)
+        QApplication.processEvents()
+
+    def _progress_finish(self) -> None:
+        """Hide and reset progress bar after long operation ends."""
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("%p%")
+        QApplication.processEvents()
+
+    def _paired_count(self) -> int:
+        """Return number of currently paired lookup rows."""
+        return int(self.paired_lookup_i_idx.shape[0])
+
+    def _has_pairs(self) -> bool:
+        """Return whether at least one paired lookup row exists."""
+        return self._paired_count() > 0
+
+    def _paired_ion_t(self) -> np.ndarray:
+        """Return ion TOF values from raw ion table using paired lookup indices."""
+        if self.cache is None or self.paired_lookup_i_idx.size == 0:
+            return np.zeros(0, dtype=np.float64)
+        return self.cache.ion_points[self.paired_lookup_i_idx, 2]
+
+    def _paired_points(self, mask: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+        """Return paired electron/ion rows from raw tables, optionally masked."""
+        if self.cache is None or self.paired_lookup_i_idx.size == 0:
+            return np.empty((0, 3), dtype=np.float64), np.empty((0, 3), dtype=np.float64)
+        e_idx = self.paired_lookup_e_idx
+        i_idx = self.paired_lookup_i_idx
+        if mask is not None:
+            if mask.shape[0] != i_idx.shape[0]:
+                return np.empty((0, 3), dtype=np.float64), np.empty((0, 3), dtype=np.float64)
+            e_idx = e_idx[mask]
+            i_idx = i_idx[mask]
+        if i_idx.size == 0:
+            return np.empty((0, 3), dtype=np.float64), np.empty((0, 3), dtype=np.float64)
+        return self.cache.electron_points[e_idx], self.cache.ion_points[i_idx]
+
+    def _current_trigger_mode(self) -> str:
+        """Return current trigger pairing mode key."""
+        mode = self.trigger_mode_combo.currentData() if hasattr(self, "trigger_mode_combo") else "coincidence"
+        if isinstance(mode, str):
+            return mode
+        return "coincidence"
+
+    def _trigger_mode_label(self, mode: str | None = None) -> str:
+        """Return user-facing label for trigger pairing mode key."""
+        key = self._current_trigger_mode() if mode is None else mode
+        return "all-one ion" if key == "all_one" else "coincidence"
+
+    def _invalidate_ion_hist_cache(self) -> None:
+        """Clear cached ion histogram arrays."""
+        self._ion_hist_cache_key = None
+        self._ion_hist_cache_counts = np.zeros(0, dtype=np.float64)
+        self._ion_hist_cache_edges = np.zeros(0, dtype=np.float64)
+        self._ion_hist_cache_window_n = 0
+        self._ion_hist_cache_total_n = 0
+
+    def _invalidate_pair_cache(self) -> None:
+        """Clear cached trigger pairing result."""
+        self._pair_cache_mode = ""
+        self._pair_cache_trigger_ref = None
+        self._pair_cache_e_idx = np.zeros(0, dtype=np.int64)
+        self._pair_cache_i_idx = np.zeros(0, dtype=np.int64)
+
     def _set_file_path(self, role: str, file_path: str) -> None:
         """Register selected file path for one role: trigger/electron/ion."""
         file_path = os.path.normpath(file_path)
@@ -1085,8 +1290,14 @@ class MainWindow(QMainWindow):
         """Reset derived data/selection state while keeping UI structure."""
         self.matched_electron = np.empty((0, 3), dtype=np.float64)
         self.matched_ion = np.empty((0, 3), dtype=np.float64)
+        self.paired_lookup_e_idx = np.empty(0, dtype=np.int64)
+        self.paired_lookup_i_idx = np.empty(0, dtype=np.int64)
+        self.last_process_mode = self._current_trigger_mode()
+        self._invalidate_pair_cache()
         self.ion_range = None
         self.ion_hist_x_roi = None
+        self._ion_hist_data_version += 1
+        self._invalidate_ion_hist_cache()
         self.pending_ion_span_range = None
         self.ion_span_apply_timer.stop()
         self.preview_circle_center = None
@@ -1103,6 +1314,7 @@ class MainWindow(QMainWindow):
             self.ion_rot_offset_edit.blockSignals(was)
         self._clear_circle_result()
         self._sync_hist_roi_inputs(force=True)
+        self._sync_fine_roi_inputs(force=True)
         self._update_ion_selection_label()
         self._draw_placeholder()
 
@@ -1132,46 +1344,57 @@ class MainWindow(QMainWindow):
         self._set_status("Cache and file paths cleared.")
 
     def load_cache(self) -> None:
-        """Step 1a: read three files into numeric arrays and cache them."""
+        """Step 1a: read three files into numeric arrays and cache them.
+
+        Trigger file reads the last two columns as [ion_index, electron_index]
+        and converts to internal [electron_index, ion_index].
+        """
         missing = [role for role, path in self.file_paths.items() if not path]
         if missing:
             names = ", ".join(ROLE_LABELS[m] for m in missing)
             QMessageBox.warning(self, "Missing file", f"Please select: {names}")
             return
 
-        self._set_status("Loading files into cache...")
-        QApplication.processEvents()
+        self._progress_start("Loading files into cache...", determinate=True)
+        self._progress_update(5, "Reading trigger index file...")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             trigger_indices = np.loadtxt(
                 self.file_paths["trigger"],
                 delimiter=",",
                 dtype=np.float64,
-                usecols=(2, 3),
+                usecols=(-2, -1),
             )
+            self._progress_update(30, "Reading electron file...")
             electron_points = np.loadtxt(
                 self.file_paths["electron"],
                 delimiter=",",
                 dtype=np.float64,
                 usecols=(0, 1, 2),
             )
+            self._progress_update(60, "Reading ion file...")
             ion_points = np.loadtxt(
                 self.file_paths["ion"],
                 delimiter=",",
                 dtype=np.float64,
                 usecols=(0, 1, 2),
             )
+            self._progress_update(80, "Validating loaded arrays...")
 
             trigger_indices = ensure_2d(trigger_indices, 2, "Trigger file")
+            # Input trigger order switched for test: [ion, electron] -> internal [electron, ion].
+            trigger_indices = trigger_indices[:, [1, 0]]
             electron_points = ensure_2d(electron_points, 3, "Electron file")
             ion_points = ensure_2d(ion_points, 3, "Ion file")
 
+            self._progress_update(92, "Building cache object...")
             self.cache = CacheData(
                 trigger_indices=trigger_indices,
                 electron_points=electron_points,
                 ion_points=ion_points,
             )
             self._clear_processed_data()
+            self._progress_update(100, "Cache build finished.")
         except Exception as exc:
             self.cache = None
             QMessageBox.critical(self, "Load failed", f"Failed to read files:\n{exc}")
@@ -1179,6 +1402,7 @@ class MainWindow(QMainWindow):
             return
         finally:
             QApplication.restoreOverrideCursor()
+            self._progress_finish()
 
         self._set_status(
             "Cache ready: trigger=%d rows, electron=%d rows, ion=%d rows"
@@ -1190,7 +1414,7 @@ class MainWindow(QMainWindow):
         )
 
     def process_and_plot(self) -> None:
-        """Step 1b: apply trigger +1/+1 rule and produce first set of plots."""
+        """Step 1b: pair trigger rows under current mode and produce first plots."""
         if self.cache is None:
             QMessageBox.warning(self, "No cache", "Please load files into cache first.")
             return
@@ -1203,31 +1427,86 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid bins", "Histogram bins must be a positive integer.")
             return
 
-        e_idx, i_idx = select_increment_pairs(self.cache.trigger_indices)
-        if e_idx.size == 0:
+        mode = self._current_trigger_mode()
+        mode_label = self._trigger_mode_label(mode)
+        self._progress_start(f"Processing trigger pairs ({mode_label})...", determinate=True)
+        self._progress_update(5, f"Preparing trigger pairing ({mode_label})...")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            trigger_raw = self.cache.trigger_indices
+            trigger_ref = trigger_raw
+            if self._pair_cache_mode == mode and self._pair_cache_trigger_ref is trigger_raw:
+                e_idx = self._pair_cache_e_idx
+                i_idx = self._pair_cache_i_idx
+                self._progress_update(55, "Using cached pairing result...")
+            else:
+                if mode == "all_one":
+                    self._progress_update(12, "Selecting all non-NaN trigger rows...")
+                    e_idx, i_idx = select_all_one_pairs(trigger_ref)
+                else:
+                    pair_progress_last = -1
+
+                    def on_pair_progress(frac: float) -> None:
+                        nonlocal pair_progress_last
+                        frac = min(max(float(frac), 0.0), 1.0)
+                        pct = 12 + int(43 * frac)
+                        if pct <= pair_progress_last:
+                            return
+                        pair_progress_last = pct
+                        self._progress_update(pct, f"Pairing trigger rows ({mode_label})...")
+
+                    e_idx, i_idx = select_increment_pairs(trigger_ref, progress_callback=on_pair_progress)
+                self._progress_update(55, "Trigger pairing finished.")
+                self._pair_cache_mode = mode
+                self._pair_cache_trigger_ref = trigger_raw
+                self._pair_cache_e_idx = e_idx
+                self._pair_cache_i_idx = i_idx
+
+            if mode == "all_one":
+                empty_msg = "No non-NaN rows found in trigger indices (all-one ion mode)."
+            else:
+                empty_msg = "No rows satisfy the +1/+1 trigger rule (coincidence mode)."
+
+            if e_idx.size == 0:
+                self.current_hist_bins = bins
+                self._clear_processed_data()
+                self._set_status(empty_msg)
+                return
+
+            self._progress_update(70, "Filtering out-of-range lookup indices...")
+            # Trigger indices are shifted by -1 relative to electron/ion tables.
+            # Convert trigger-selected indices to direct array lookup indices.
+            lookup_e_idx = e_idx 
+            lookup_i_idx = i_idx 
+
+            # Keep only rows where indices point to existing electron/ion rows.
+            in_bounds = (
+                (lookup_e_idx >= 0)
+                & (lookup_e_idx < self.cache.electron_points.shape[0])
+                & (lookup_i_idx >= 0)
+                & (lookup_i_idx < self.cache.ion_points.shape[0])
+            )
+            out_of_range_count = int((~in_bounds).sum())
+
+            self.paired_lookup_e_idx = lookup_e_idx[in_bounds].astype(np.int64, copy=False)
+            self.paired_lookup_i_idx = lookup_i_idx[in_bounds].astype(np.int64, copy=False)
+            # Avoid materializing huge full-table copies; downstream code uses lookup indices.
+            self.matched_electron = np.empty((0, 3), dtype=np.float64)
+            self.matched_ion = np.empty((0, 3), dtype=np.float64)
+            self.last_process_mode = mode
             self.current_hist_bins = bins
-            self._clear_processed_data()
-            self._set_status("No rows satisfy the +1/+1 trigger rule.")
-            return
-
-        # Keep only rows where indices point to existing electron/ion rows.
-        in_bounds = (
-            (e_idx >= 0)
-            & (e_idx < self.cache.electron_points.shape[0])
-            & (i_idx >= 0)
-            & (i_idx < self.cache.ion_points.shape[0])
-        )
-        out_of_range_count = int((~in_bounds).sum())
-
-        self.matched_electron = self.cache.electron_points[e_idx[in_bounds]]
-        self.matched_ion = self.cache.ion_points[i_idx[in_bounds]]
-        self.current_hist_bins = bins
-        self._clear_circle_result()
-        self._refresh_plots()
-
+            self._ion_hist_data_version += 1
+            self._invalidate_ion_hist_cache()
+            self._clear_circle_result()
+            self._progress_update(82, f"Rendering plots ({mode_label})...")
+            self._refresh_plots()
+            self._progress_update(100, "Rendering finished.")
+        finally:
+            QApplication.restoreOverrideCursor()
+            self._progress_finish()
         self._set_status(
-            "Matched pairs=%d, out-of-range discarded=%d"
-            % (self.matched_ion.shape[0], out_of_range_count)
+            "Mode=%s, trigger-selected=%d, first-row-skip=off, index_shift=-1, matched pairs=%d, out-of-range discarded=%d"
+            % (mode_label, e_idx.size, self._paired_count(), out_of_range_count)
         )
 
     # ------------------------------------------------------------------
@@ -1238,9 +1517,11 @@ class MainWindow(QMainWindow):
         self.pending_ion_span_range = None
         self.ion_span_apply_timer.stop()
         if self.ion_range is None:
+            self._sync_fine_roi_inputs(force=True)
             return
         self.ion_range = None
         self._clear_circle_result()
+        self._sync_fine_roi_inputs(force=True)
         self._update_ion_selection_label()
         self._refresh_plots()
         self._set_status("Ion t fine selection cleared.")
@@ -1273,9 +1554,26 @@ class MainWindow(QMainWindow):
             edit.setText(value)
             edit.blockSignals(was)
 
+    def _sync_fine_roi_inputs(self, force: bool = False) -> None:
+        """Synchronize fine ROI line edits with current fine selection state."""
+        if not hasattr(self, "ion_fine_xmin_edit") or not hasattr(self, "ion_fine_xmax_edit"):
+            return
+        if not force and (self.ion_fine_xmin_edit.hasFocus() or self.ion_fine_xmax_edit.hasFocus()):
+            return
+        if self.ion_range is None:
+            min_text, max_text = "", ""
+        else:
+            min_text, max_text = f"{self.ion_range[0]:.6g}", f"{self.ion_range[1]:.6g}"
+        edits = (self.ion_fine_xmin_edit, self.ion_fine_xmax_edit)
+        values = (min_text, max_text)
+        for edit, value in zip(edits, values):
+            was = edit.blockSignals(True)
+            edit.setText(value)
+            edit.blockSignals(was)
+
     def apply_ion_hist_x_roi_from_inputs(self) -> None:
         """Step 2: read coarse histogram X ROI from inputs and redraw histogram."""
-        if self.matched_ion.shape[0] == 0:
+        if not self._has_pairs():
             QMessageBox.warning(self, "No data", "Run Process and Plot first.")
             return
 
@@ -1285,12 +1583,13 @@ class MainWindow(QMainWindow):
             self.clear_ion_hist_x_roi()
             return
         try:
+            ion_t = self._paired_ion_t()
             if txt_min == "":
-                low = float(np.nanmin(self.matched_ion[:, 2]))
+                low = float(np.nanmin(ion_t))
             else:
                 low = float(txt_min)
             if txt_max == "":
-                high = float(np.nanmax(self.matched_ion[:, 2]))
+                high = float(np.nanmax(ion_t))
             else:
                 high = float(txt_max)
         except Exception:
@@ -1298,9 +1597,35 @@ class MainWindow(QMainWindow):
             return
         self._apply_ion_hist_x_roi(low, high, source="input")
 
+    def apply_ion_fine_roi_from_inputs(self) -> None:
+        """Step 3: read fine ROI from inputs and apply to pair selection mask."""
+        if not self._has_pairs():
+            QMessageBox.warning(self, "No data", "Run Process and Plot first.")
+            return
+
+        txt_min = self.ion_fine_xmin_edit.text().strip() if hasattr(self, "ion_fine_xmin_edit") else ""
+        txt_max = self.ion_fine_xmax_edit.text().strip() if hasattr(self, "ion_fine_xmax_edit") else ""
+        if txt_min == "" and txt_max == "":
+            self.clear_ion_selection()
+            return
+        try:
+            ion_t = self._paired_ion_t()
+            if txt_min == "":
+                low = float(np.nanmin(ion_t))
+            else:
+                low = float(txt_min)
+            if txt_max == "":
+                high = float(np.nanmax(ion_t))
+            else:
+                high = float(txt_max)
+        except Exception:
+            QMessageBox.warning(self, "Invalid ROI", "Fine ROI min/max must be valid numbers.")
+            return
+        self._apply_ion_selection_range(low, high, source="input")
+
     def _on_ion_span_selected(self, xmin: float, xmax: float) -> None:
         """Step 3: receive fine TOF ROI from SpanSelector (debounced)."""
-        if self.matched_ion.shape[0] == 0:
+        if not self._has_pairs():
             return
         if np.isclose(xmin, xmax, rtol=0.0, atol=1e-12):
             return
@@ -1323,7 +1648,7 @@ class MainWindow(QMainWindow):
 
     def _apply_ion_selection_range(self, low: float, high: float, source: str = "span") -> None:
         """Apply fine ROI to downstream filtering and redraw all affected panels."""
-        if self.matched_ion.shape[0] == 0:
+        if not self._has_pairs():
             return
         if np.isclose(low, high, rtol=0.0, atol=1e-12):
             return
@@ -1331,18 +1656,19 @@ class MainWindow(QMainWindow):
         low, high = sorted((float(low), float(high)))
         self.ion_range = (low, high)
         self._clear_circle_result()
+        self._sync_fine_roi_inputs(force=True)
         self._update_ion_selection_label()
         self._refresh_plots()
 
         selected_count = int(self._selected_mask().sum())
         self._set_status(
             "Ion t fine selection [%.6g, %.6g], selected=%d/%d (%s)"
-            % (low, high, selected_count, self.matched_ion.shape[0], source)
+            % (low, high, selected_count, self._paired_count(), source)
         )
 
     def _apply_ion_hist_x_roi(self, low: float, high: float, source: str = "input") -> None:
         """Apply coarse ROI to histogram axis range and histogram data window."""
-        if self.matched_ion.shape[0] == 0:
+        if not self._has_pairs():
             return
         if np.isclose(low, high, rtol=0.0, atol=1e-12):
             return
@@ -1352,6 +1678,80 @@ class MainWindow(QMainWindow):
         self._update_ion_selection_label()
         self._refresh_ion_histogram_only()
         self._set_status("Ion histogram X ROI set to [%.6g, %.6g] (%s)" % (low, high, source))
+
+    def export_pair_debug_txt(self) -> None:
+        """Export paired lookup indices + corresponding electron/ion rows for debug."""
+        if self.cache is None or not self._has_pairs():
+            QMessageBox.warning(self, "No pairs", "Run Process and Plot first.")
+            return
+
+        default_name = "paired_lookup_debug.txt"
+        out_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save paired lookup debug table",
+            default_name,
+            "Text files (*.txt);;CSV files (*.csv);;All files (*.*)",
+        )
+        if not out_path:
+            return
+
+        lookup_e = self.paired_lookup_e_idx
+        lookup_i = self.paired_lookup_i_idx
+        fine_mask = self._selected_mask().astype(np.int64, copy=False)
+        n_rows = int(lookup_i.shape[0])
+        chunk_size = 200_000
+        fmt = ["%d", "%d", "%d", "%d", "%.10g", "%.10g", "%.10g", "%.10g", "%.10g", "%.10g"]
+
+        ion_range_text = "all" if self.ion_range is None else f"[{self.ion_range[0]:.10g}, {self.ion_range[1]:.10g}]"
+        roi_text = (
+            "full"
+            if self.ion_hist_x_roi is None
+            else f"[{self.ion_hist_x_roi[0]:.10g}, {self.ion_hist_x_roi[1]:.10g}]"
+        )
+        header = (
+            f"# mode={self._trigger_mode_label(self.last_process_mode)}, first_row_skip=off, index_shift=-1, paired_rows={n_rows}, "
+            f"fine_roi={ion_range_text}, coarse_roi={roi_text}\n"
+            "pair_row,lookup_e_idx,lookup_i_idx,fine_selected,e_x,e_y,e_t,i_x,i_y,i_t"
+        )
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            with open(out_path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(header + "\n")
+                for start in range(0, n_rows, chunk_size):
+                    end = min(start + chunk_size, n_rows)
+                    pair_row = np.arange(start, end, dtype=np.int64)
+                    e_idx_chunk = lookup_e[start:end]
+                    i_idx_chunk = lookup_i[start:end]
+                    fine_chunk = fine_mask[start:end]
+                    e_chunk = self.cache.electron_points[e_idx_chunk]
+                    i_chunk = self.cache.ion_points[i_idx_chunk]
+                    table_chunk = np.column_stack(
+                        (
+                            pair_row,
+                            e_idx_chunk,
+                            i_idx_chunk,
+                            fine_chunk,
+                            e_chunk[:, 0],
+                            e_chunk[:, 1],
+                            e_chunk[:, 2],
+                            i_chunk[:, 0],
+                            i_chunk[:, 1],
+                            i_chunk[:, 2],
+                        )
+                    )
+                    np.savetxt(fh, table_chunk, delimiter=",", fmt=fmt)
+        except Exception as exc:
+            QMessageBox.critical(self, "Export failed", f"Failed to export paired debug table:\n{exc}")
+            self._set_status("Export pair debug table failed.")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        selected_n = int(np.count_nonzero(fine_mask))
+        self._set_status(
+            f"Pair debug table saved: {out_path} (rows={n_rows}, fine_selected={selected_n})."
+        )
 
     def _update_ion_selection_label(self) -> None:
         """Update label that summarizes fine/coarse ROI settings."""
@@ -1366,18 +1766,39 @@ class MainWindow(QMainWindow):
     def _refresh_ion_histogram_only(self, draw_canvas: bool = True) -> None:
         """Redraw only ion TOF histogram panel (fast path)."""
         self.ax_hist_ion.clear()
-        ion_t_full = self.matched_ion[:, 2] if self.matched_ion.size else np.array([])
-        ion_t = ion_t_full
-        if self.ion_hist_x_roi is not None and ion_t_full.size:
-            x_low, x_high = self.ion_hist_x_roi
-            hist_mask = (ion_t_full >= x_low) & (ion_t_full <= x_high)
-            ion_t = ion_t_full[hist_mask]
-        self.ax_hist_ion.hist(ion_t, bins=self.current_hist_bins, color="#d62728", alpha=0.88)
+        ion_t_full = self._paired_ion_t()
+        roi_key = None
         if self.ion_hist_x_roi is not None:
-            self.ax_hist_ion.set_title(f"Ion t Histogram (x-ROI n={ion_t.size}, total={ion_t_full.size})")
+            roi_key = (float(self.ion_hist_x_roi[0]), float(self.ion_hist_x_roi[1]))
+        cache_key = (self._ion_hist_data_version, int(self.current_hist_bins), roi_key)
+        if cache_key != self._ion_hist_cache_key:
+            if roi_key is None:
+                counts, edges = np.histogram(ion_t_full, bins=self.current_hist_bins)
+                window_n = int(ion_t_full.size)
+            else:
+                counts, edges = np.histogram(ion_t_full, bins=self.current_hist_bins, range=roi_key)
+                window_n = int(np.sum(counts, dtype=np.int64))
+            self._ion_hist_cache_key = cache_key
+            self._ion_hist_cache_counts = counts.astype(np.float64, copy=False)
+            self._ion_hist_cache_edges = edges.astype(np.float64, copy=False)
+            self._ion_hist_cache_window_n = window_n
+            self._ion_hist_cache_total_n = int(ion_t_full.size)
+        counts = self._ion_hist_cache_counts
+        edges = self._ion_hist_cache_edges
+        if counts.size > 0 and edges.size == counts.size + 1:
+            try:
+                self.ax_hist_ion.stairs(counts, edges, fill=True, color="#d62728", alpha=0.88, linewidth=1.0)
+            except Exception:
+                x = edges[:-1]
+                self.ax_hist_ion.step(x, counts, where="post", color="#d62728", linewidth=1.0)
+                self.ax_hist_ion.fill_between(x, counts, step="post", color="#d62728", alpha=0.88)
+        if self.ion_hist_x_roi is not None:
+            self.ax_hist_ion.set_title(
+                f"Ion t Histogram (x-ROI n={self._ion_hist_cache_window_n}, total={self._ion_hist_cache_total_n})"
+            )
             self.ax_hist_ion.set_xlim(self.ion_hist_x_roi[0], self.ion_hist_x_roi[1])
         else:
-            self.ax_hist_ion.set_title(f"Ion t Histogram (n={ion_t.size})")
+            self.ax_hist_ion.set_title(f"Ion t Histogram (n={self._ion_hist_cache_window_n})")
         self.ax_hist_ion.set_xlabel("t (ns)")
         self.ax_hist_ion.set_ylabel("counts")
         self.ax_hist_ion.grid(alpha=0.2)
@@ -1391,13 +1812,13 @@ class MainWindow(QMainWindow):
 
     def _selected_mask(self) -> np.ndarray:
         """Return boolean mask of rows selected by ion fine ROI."""
-        n = self.matched_ion.shape[0]
+        n = self._paired_count()
         if n == 0:
             return np.zeros(0, dtype=bool)
         if self.ion_range is None:
             return np.ones(n, dtype=bool)
         low, high = self.ion_range
-        ion_t = self.matched_ion[:, 2]
+        ion_t = self._paired_ion_t()
         return (ion_t >= low) & (ion_t <= high)
 
     # ------------------------------------------------------------------
@@ -1410,14 +1831,24 @@ class MainWindow(QMainWindow):
             cy = float(self.circle_cy_edit.text().strip())
             inner_r = float(self.inner_r_edit.text().strip())
             outer_r = float(self.outer_r_edit.text().strip())
-            if inner_r <= 0 or outer_r <= inner_r:
+            outer_filter_on = self.outer_ring_filter_enable_checkbox.isChecked()
+            if inner_r <= 0 or outer_r <= 0:
+                raise ValueError
+            if outer_filter_on and outer_r <= inner_r:
                 raise ValueError
         except ValueError:
             if show_dialog:
+                outer_filter_on = self.outer_ring_filter_enable_checkbox.isChecked()
+                msg = "Ring requires valid numbers and must satisfy 0 < inner < outer."
+                if not outer_filter_on:
+                    msg = (
+                        "Ring requires valid numbers and must satisfy 0 < inner and outer > 0 "
+                        "(outer<=inner is allowed when outer-ring filter is OFF)."
+                    )
                 QMessageBox.warning(
                     self,
                     "Invalid ring parameters",
-                    "Ring requires valid numbers and must satisfy 0 < inner < outer.",
+                    msg,
                 )
             return None
         return cx, cy, inner_r, outer_r
@@ -1628,7 +2059,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def apply_circle_selection(self) -> None:
         """Step 5: apply filters, center selected electrons, build denoised projection."""
-        if self.matched_electron.shape[0] == 0:
+        if not self._has_pairs():
             QMessageBox.warning(self, "No data", "Run Process and Plot first.")
             return
 
@@ -1640,121 +2071,144 @@ class MainWindow(QMainWindow):
         if center_bin_size is None:
             return
 
-        # Step 1: start from ion fine-ROI selected rows.
-        selected_mask = self._selected_mask()
-        selected_indices = np.flatnonzero(selected_mask)
-        electron_now = self.matched_electron[selected_mask]
-        ion_now = self.matched_ion[selected_mask]
-        if electron_now.shape[0] == 0:
-            QMessageBox.warning(self, "No points", "Current ion t selection contains no points.")
-            return
-
-        # Step 2: update ion display rotation and optional ion rectangle filter.
-        self._update_ion_rotation_from_points(ion_now[:, :2])
-        ion_filter_on = self.ion_filter_enable_checkbox.isChecked()
-        if ion_filter_on:
-            ion_filter = self._parse_ion_filter_params(show_dialog=True)
-            if ion_filter is None:
-                return
-            ion_cx, ion_cy, ion_w, ion_h = ion_filter
-            ion_xy_view = self._transform_ion_xy(ion_now[:, :2])
-            ion_inside = (
-                (ion_xy_view[:, 0] >= ion_cx - 0.5 * ion_w)
-                & (ion_xy_view[:, 0] <= ion_cx + 0.5 * ion_w)
-                & (ion_xy_view[:, 1] >= ion_cy - 0.5 * ion_h)
-                & (ion_xy_view[:, 1] <= ion_cy + 0.5 * ion_h)
-            )
-            electron_now = electron_now[ion_inside]
-            ion_now = ion_now[ion_inside]
-            selected_indices = selected_indices[ion_inside]
+        self._progress_start("Applying ring selection and centering...", determinate=True)
+        self._progress_update(6, "Applying ion t fine-ROI selection...")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            # Step 1: start from ion fine-ROI selected rows.
+            selected_mask = self._selected_mask()
+            selected_lookup_i_idx = self.paired_lookup_i_idx[selected_mask]
+            electron_now, ion_now = self._paired_points(selected_mask)
             if electron_now.shape[0] == 0:
+                QMessageBox.warning(self, "No points", "Current ion t selection contains no points.")
+                return
+
+            self._progress_update(20, "Applying ion rectangle filter (if enabled)...")
+            # Step 2: update ion display rotation and optional ion rectangle filter.
+            self._update_ion_rotation_from_points(ion_now[:, :2])
+            ion_filter_on = self.ion_filter_enable_checkbox.isChecked()
+            if ion_filter_on:
+                ion_filter = self._parse_ion_filter_params(show_dialog=True)
+                if ion_filter is None:
+                    return
+                ion_cx, ion_cy, ion_w, ion_h = ion_filter
+                ion_xy_view = self._transform_ion_xy(ion_now[:, :2])
+                ion_inside = (
+                    (ion_xy_view[:, 0] >= ion_cx - 0.5 * ion_w)
+                    & (ion_xy_view[:, 0] <= ion_cx + 0.5 * ion_w)
+                    & (ion_xy_view[:, 1] >= ion_cy - 0.5 * ion_h)
+                    & (ion_xy_view[:, 1] <= ion_cy + 0.5 * ion_h)
+                )
+                electron_now = electron_now[ion_inside]
+                ion_now = ion_now[ion_inside]
+                selected_lookup_i_idx = selected_lookup_i_idx[ion_inside]
+                if electron_now.shape[0] == 0:
+                    self._clear_circle_result()
+                    self._refresh_plots()
+                    self._set_status("Ion filter enabled, but no events inside ion filter rectangle.")
+                    return
+
+            self._progress_update(36, "Selecting inner/outer ring electrons...")
+            # Step 3: split electron points into inner signal ring and outer noise ring.
+            cx, cy, inner_r, outer_r = circle
+            outer_ring_filter_on = self.outer_ring_filter_enable_checkbox.isChecked()
+            dist2 = (electron_now[:, 0] - cx) ** 2 + (electron_now[:, 1] - cy) ** 2
+            inner_mask = dist2 <= inner_r**2
+            if outer_ring_filter_on:
+                outer_mask = (dist2 > inner_r**2) & (dist2 <= outer_r**2)
+            else:
+                outer_mask = np.zeros(dist2.shape, dtype=bool)
+            inner_selected = electron_now[inner_mask]
+            outer_noise = electron_now[outer_mask]
+
+            if inner_selected.shape[0] == 0:
                 self._clear_circle_result()
                 self._refresh_plots()
-                self._set_status("Ion filter enabled, but no events inside ion filter rectangle.")
+                self._set_status("No electron points inside current inner ring.")
                 return
 
-        # Step 3: split electron points into inner signal ring and outer noise ring.
-        cx, cy, inner_r, outer_r = circle
-        dist2 = (electron_now[:, 0] - cx) ** 2 + (electron_now[:, 1] - cy) ** 2
-        inner_mask = dist2 <= inner_r**2
-        outer_mask = (dist2 > inner_r**2) & (dist2 <= outer_r**2)
-        inner_selected = electron_now[inner_mask]
-        outer_noise = electron_now[outer_mask]
+            self._progress_update(54, "Estimating center...")
+            # Step 4: estimate center and optionally recenter once more.
+            mode = self._current_center_mode()
+            center_xy = self._estimate_center(inner_selected[:, :2], (cx, cy))
+            auto_recenter = self.auto_recenter_checkbox.isChecked()
+            if auto_recenter:
+                cx_ref, cy_ref = float(center_xy[0]), float(center_xy[1])
+                dist2_ref = (electron_now[:, 0] - cx_ref) ** 2 + (electron_now[:, 1] - cy_ref) ** 2
+                inner_ref = electron_now[dist2_ref <= inner_r**2]
+                if outer_ring_filter_on:
+                    outer_ref = electron_now[(dist2_ref > inner_r**2) & (dist2_ref <= outer_r**2)]
+                else:
+                    outer_ref = np.empty((0, electron_now.shape[1]), dtype=electron_now.dtype)
+                if inner_ref.shape[0] > 0:
+                    inner_selected = inner_ref
+                    outer_noise = outer_ref
+                    center_xy = self._estimate_center(inner_selected[:, :2], (cx_ref, cy_ref))
 
-        if inner_selected.shape[0] == 0:
-            self._clear_circle_result()
-            self._refresh_plots()
-            self._set_status("No electron points inside current inner ring.")
-            return
+            self._progress_update(68, "Centering selected points...")
+            # Step 5: center both signal and noise coordinates around estimated center.
+            centered_signal = inner_selected.copy()
+            centered_signal[:, 0] -= center_xy[0]
+            centered_signal[:, 1] -= center_xy[1]
+            centered_noise = outer_noise.copy()
+            if centered_noise.shape[0] > 0:
+                centered_noise[:, 0] -= center_xy[0]
+                centered_noise[:, 1] -= center_xy[1]
+            residual_xy = np.mean(centered_signal[:, :2], axis=0)
 
-        # Step 4: estimate center and optionally recenter once more.
-        mode = self._current_center_mode()
-        center_xy = self._estimate_center(inner_selected[:, :2], (cx, cy))
-        auto_recenter = self.auto_recenter_checkbox.isChecked()
-        if auto_recenter:
-            cx_ref, cy_ref = float(center_xy[0]), float(center_xy[1])
-            dist2_ref = (electron_now[:, 0] - cx_ref) ** 2 + (electron_now[:, 1] - cy_ref) ** 2
-            inner_ref = electron_now[dist2_ref <= inner_r**2]
-            outer_ref = electron_now[(dist2_ref > inner_r**2) & (dist2_ref <= outer_r**2)]
-            if inner_ref.shape[0] > 0:
-                inner_selected = inner_ref
-                outer_noise = outer_ref
-                center_xy = self._estimate_center(inner_selected[:, :2], (cx_ref, cy_ref))
+            self.ring_inner_selected_electron = inner_selected.copy()
+            self.ring_outer_noise_electron = outer_noise.copy()
+            self.ion_filter_selected_electron = electron_now.copy()
+            self.ion_filter_selected_ion = ion_now.copy()
+            self.intersection_indices = selected_lookup_i_idx.copy()
+            self.circle_centered_electron = centered_signal
+            self.noise_ring_centered_electron = centered_noise
+            self.circle_centroid = (float(center_xy[0]), float(center_xy[1]))
+            self.center_residual = (float(residual_xy[0]), float(residual_xy[1]))
+            if auto_recenter:
+                self._set_circle_inputs(self.circle_centroid[0], self.circle_centroid[1])
 
-        # Step 5: center both signal and noise coordinates around estimated center.
-        centered_signal = inner_selected.copy()
-        centered_signal[:, 0] -= center_xy[0]
-        centered_signal[:, 1] -= center_xy[1]
-        centered_noise = outer_noise.copy()
-        if centered_noise.shape[0] > 0:
-            centered_noise[:, 0] -= center_xy[0]
-            centered_noise[:, 1] -= center_xy[1]
-        residual_xy = np.mean(centered_signal[:, :2], axis=0)
-
-        self.ring_inner_selected_electron = inner_selected.copy()
-        self.ring_outer_noise_electron = outer_noise.copy()
-        self.ion_filter_selected_electron = electron_now.copy()
-        self.ion_filter_selected_ion = ion_now.copy()
-        self.intersection_indices = selected_indices.copy()
-        self.circle_centered_electron = centered_signal
-        self.noise_ring_centered_electron = centered_noise
-        self.circle_centroid = (float(center_xy[0]), float(center_xy[1]))
-        self.center_residual = (float(residual_xy[0]), float(residual_xy[1]))
-        if auto_recenter:
-            self._set_circle_inputs(self.circle_centroid[0], self.circle_centroid[1])
-        # Step 6: bin and denoise centered signal for reconstruction input.
-        self.centered_hist_data = build_denoised_centered_histogram(
-            self.circle_centered_electron,
-            self.noise_ring_centered_electron,
-            inner_r,
-            outer_r,
-            center_bin_size,
-        )
-        self.noise_removed_total = (
-            float(self.centered_hist_data.get("removed_total", 0.0)) if self.centered_hist_data is not None else 0.0
-        )
-        self.rbasex_recon_result = None
-        self.backward_recon_result = None
-        self._refresh_plots()
-        self._set_status(
-            "IonFilter=%s (n=%d), IonRot=%.3fdeg, Ring inner=%d, ring outer=%d, center=(%.6g, %.6g), mode=%s, residual=(%.3e, %.3e), "
-            "auto_recenter=%s, bin=%.6g, removed_noise=%.3f. Projection updated. Click Start Reconstruction."
-            % (
-                "on" if ion_filter_on else "off",
-                electron_now.shape[0],
-                self.ion_rotation_angle_deg,
-                inner_selected.shape[0],
-                outer_noise.shape[0],
-                center_xy[0],
-                center_xy[1],
-                mode,
-                residual_xy[0],
-                residual_xy[1],
-                "on" if auto_recenter else "off",
+            self._progress_update(80, "Building denoised centered bin image...")
+            # Step 6: bin and denoise centered signal for reconstruction input.
+            self.centered_hist_data = build_denoised_centered_histogram(
+                self.circle_centered_electron,
+                self.noise_ring_centered_electron,
+                inner_r,
+                outer_r,
                 center_bin_size,
-                self.noise_removed_total,
             )
-        )
+            self.noise_removed_total = (
+                float(self.centered_hist_data.get("removed_total", 0.0)) if self.centered_hist_data is not None else 0.0
+            )
+            self.rbasex_recon_result = None
+            self.backward_recon_result = None
+
+            self._progress_update(92, "Refreshing plots...")
+            self._refresh_plots()
+            self._progress_update(100, "Ring selection and centering finished.")
+            self._set_status(
+                "IonFilter=%s (n=%d), IonRot=%.3fdeg, OuterRingFilter=%s, Ring inner=%d, ring outer=%d, center=(%.6g, %.6g), mode=%s, residual=(%.3e, %.3e), "
+                "auto_recenter=%s, bin=%.6g, removed_noise=%.3f. Projection updated. Click Start Reconstruction."
+                % (
+                    "on" if ion_filter_on else "off",
+                    electron_now.shape[0],
+                    self.ion_rotation_angle_deg,
+                    "on" if outer_ring_filter_on else "off",
+                    inner_selected.shape[0],
+                    outer_noise.shape[0],
+                    center_xy[0],
+                    center_xy[1],
+                    mode,
+                    residual_xy[0],
+                    residual_xy[1],
+                    "on" if auto_recenter else "off",
+                    center_bin_size,
+                    self.noise_removed_total,
+                )
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+            self._progress_finish()
 
     def run_reconstruction_now(self) -> None:
         """Step 7: run rBasex and backward reconstruction from current centered image."""
@@ -1766,15 +2220,24 @@ class MainWindow(QMainWindow):
         if center_bin_size is None:
             return
 
-        self._set_status("Running rBasex and backward reconstructions...")
-        QApplication.processEvents()
+        self._progress_start("Running rBasex and backward reconstructions...", determinate=True)
+        self._progress_update(6, "Preparing reconstruction input...")
+
+        def on_recon_progress(frac: float, message: str) -> None:
+            frac = min(max(float(frac), 0.0), 1.0)
+            pct = 10 + int(72 * frac)
+            self._progress_update(pct, message)
+
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            self._run_reconstructions_from_centered_data(center_bin_size)
+            self._run_reconstructions_from_centered_data(center_bin_size, progress_callback=on_recon_progress)
+            self._progress_update(90, "Refreshing reconstruction panels...")
+            self._refresh_reconstruction_panels_only()
+            self._progress_update(100, "Reconstruction finished.")
         finally:
             QApplication.restoreOverrideCursor()
+            self._progress_finish()
 
-        self._refresh_reconstruction_panels_only()
         rb_n = len(self.rbasex_recon_result.get("peaks", [])) if self.rbasex_recon_result else 0
         bw_n = len(self.backward_recon_result.get("peaks", [])) if self.backward_recon_result else 0
         self._set_status(f"Reconstruction finished: rBasex peaks={rb_n}, backward peaks={bw_n}.")
@@ -1828,7 +2291,7 @@ class MainWindow(QMainWindow):
             circle = self._parse_circle_params(show_dialog=False)
             if circle is None:
                 return
-            cx, cy, _inner_r, outer_r = circle
+            cx, cy, inner_r, outer_r = circle
             dx = float(event.xdata) - cx
             dy = float(event.ydata) - cy
             dist = float(np.hypot(dx, dy))
@@ -1836,7 +2299,8 @@ class MainWindow(QMainWindow):
             x0, x1 = self.ax_scatter_e.get_xlim()
             y0, y1 = self.ax_scatter_e.get_ylim()
             tol = 0.03 * max(abs(x1 - x0), abs(y1 - y0), 1e-9)
-            if dist <= outer_r + tol:
+            drag_radius = outer_r if self.outer_ring_filter_enable_checkbox.isChecked() else inner_r
+            if dist <= drag_radius + tol:
                 self.dragging_circle = True
                 self.drag_offset_x = dx
                 self.drag_offset_y = dy
@@ -1990,6 +2454,7 @@ class MainWindow(QMainWindow):
         if circle is None:
             return
         cx, cy, inner_r, outer_r = circle
+        outer_filter_on = self.outer_ring_filter_enable_checkbox.isChecked()
         if self.preview_circle_center is not None:
             cx, cy = self.preview_circle_center
         if self.inner_ring_patch is None or self.inner_ring_patch.axes is not self.ax_scatter_e:
@@ -2010,6 +2475,8 @@ class MainWindow(QMainWindow):
             self.ax_scatter_e.add_patch(self.outer_ring_patch)
         self.outer_ring_patch.set_center((cx, cy))
         self.outer_ring_patch.set_radius(outer_r)
+        self.outer_ring_patch.set_edgecolor("#7fffd4" if outer_filter_on else "#9a9a9a")
+        self.outer_ring_patch.set_linestyle("--" if outer_filter_on else ":")
         if self.circle_center_marker is None or self.circle_center_marker.axes is not self.ax_scatter_e:
             (self.circle_center_marker,) = self.ax_scatter_e.plot(
                 [cx], [cy], marker="o", markersize=4.5, color="#00d4ff", linestyle="", animated=True
@@ -2222,6 +2689,8 @@ class MainWindow(QMainWindow):
 
     def _plot_centered_bin_image(self, ax, bin_data: dict | None, bin_size: float) -> None:
         """Draw centered electron projection image after ring-based denoising."""
+        if ax is self.ax_centered_bin:
+            self._clear_centered_bin_colorbar()
         ax.clear()
         overlap_count = int(bin_data.get("signal_count", 0)) if bin_data is not None else 0
         if bin_data is not None:
@@ -2232,8 +2701,10 @@ class MainWindow(QMainWindow):
                 pixel_text = "n/a"
         else:
             pixel_text = "n/a"
+        scale_mode = self._current_centered_bin_scale()
         ax.set_title(
-            f"Centered Electron Bin Map (ring-denoised, bin={bin_size:g}, overlap={overlap_count}, pixels={pixel_text})"
+            "Centered Electron Bin Map "
+            f"(ring-denoised, scale={scale_mode}, bin={bin_size:g}, overlap={overlap_count}, pixels={pixel_text})"
         )
         ax.set_xlabel("x centered")
         ax.set_ylabel("y centered")
@@ -2254,14 +2725,49 @@ class MainWindow(QMainWindow):
         h2d = bin_data["hist_denoised"]
         xedges = bin_data["xedges"]
         yedges = bin_data["yedges"]
-        ax.imshow(
-            h2d.T,
-            origin="lower",
-            extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
-            cmap="hot",
-            interpolation="nearest",
-            aspect="equal",
-        )
+        h2d_show = h2d.T
+        if scale_mode == "log":
+            positive = h2d[h2d > 0.0]
+            if positive.size > 0:
+                vmin = float(np.min(positive))
+                vmax = float(np.max(positive))
+                if not np.isfinite(vmin) or vmin <= 0:
+                    vmin = 1e-12
+                if (not np.isfinite(vmax)) or (vmax <= vmin):
+                    vmax = vmin * (1.0 + 1e-6)
+                h2d_show = np.ma.masked_less_equal(h2d_show, 0.0)
+                image = ax.imshow(
+                    h2d_show,
+                    origin="lower",
+                    extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
+                    cmap="jet",
+                    interpolation="none",
+                    aspect="equal",
+                    norm=LogNorm(vmin=vmin, vmax=vmax),
+                )
+            else:
+                image = ax.imshow(
+                    h2d_show,
+                    origin="lower",
+                    extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
+                    cmap="jet",
+                    interpolation="none",
+                    aspect="equal",
+                )
+        else:
+            image = ax.imshow(
+                h2d_show,
+                origin="lower",
+                extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
+                cmap="jet",
+                interpolation="none",
+                aspect="equal",
+            )
+        if ax is self.ax_centered_bin and self.centered_bin_colorbar_checkbox.isChecked():
+            self.centered_bin_colorbar = self.figure.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+            self.centered_bin_colorbar.set_label(
+                "Denoised counts (log scale)" if scale_mode == "log" else "Denoised counts"
+            )
         ax.axhline(0.0, color="#8f8f8f", linewidth=1.0, alpha=0.7)
         ax.axvline(0.0, color="#8f8f8f", linewidth=1.0, alpha=0.7)
         ax.text(
@@ -2282,7 +2788,11 @@ class MainWindow(QMainWindow):
             color="white",
         )
 
-    def _run_reconstructions_from_centered_data(self, bin_size: float) -> None:
+    def _run_reconstructions_from_centered_data(
+        self,
+        bin_size: float,
+        progress_callback: Callable[[float, str], None] | None = None,
+    ) -> None:
         """Run both reconstruction methods from currently centered/denoised image."""
         _ = bin_size
         rbasex_settings = self._get_rbasex_settings()
@@ -2291,6 +2801,7 @@ class MainWindow(QMainWindow):
             self.centered_hist_data,
             rbasex_settings,
             backward_settings,
+            progress_callback=progress_callback,
         )
 
     def _plot_reconstruction_panel(self, ax, title: str, result: dict | None) -> None:
@@ -2377,9 +2888,11 @@ class MainWindow(QMainWindow):
         self.ax_info.set_frame_on(True)
 
         lines = [
-            f"Matched pairs: {self.matched_ion.shape[0]}",
+            f"Trigger mode: {self.trigger_mode_combo.currentText()} (last run: {self._trigger_mode_label(self.last_process_mode)})",
+            f"Matched pairs: {self._paired_count()}",
             f"Ion t selected: {selected_count}",
             f"Ion filter: {'ON' if self.ion_filter_enable_checkbox.isChecked() else 'OFF'}",
+            f"Outer-ring noise filter: {'ON' if self.outer_ring_filter_enable_checkbox.isChecked() else 'OFF'}",
             f"Ion-rectangle intersection events: {self.ion_filter_selected_electron.shape[0]}",
             (
                 f"Ion major-axis align: ON (auto={self.ion_auto_angle_deg:.3f} deg, total={self.ion_rotation_angle_deg:.3f} deg)"
@@ -2473,8 +2986,7 @@ class MainWindow(QMainWindow):
 
         mask = self._selected_mask()
         selected_count = int(mask.sum())
-        electron_show = self.matched_electron[mask] if mask.size else np.empty((0, 3))
-        ion_show_raw = self.matched_ion[mask] if mask.size else np.empty((0, 3))
+        electron_show, ion_show_raw = self._paired_points(mask)
         self._update_ion_rotation_from_points(ion_show_raw[:, :2] if ion_show_raw.size else np.empty((0, 2)))
         ion_show = ion_show_raw.copy()
         if ion_show.size:
@@ -2596,6 +3108,7 @@ class MainWindow(QMainWindow):
         self.ax_hist_ion.set_ylabel("counts")
         self.ax_hist_ion.grid(alpha=0.2)
         self._sync_hist_roi_inputs()
+        self._sync_fine_roi_inputs()
         self.ax_info.set_title("Selection Summary")
         self.ax_info.set_xticks([])
         self.ax_info.set_yticks([])
