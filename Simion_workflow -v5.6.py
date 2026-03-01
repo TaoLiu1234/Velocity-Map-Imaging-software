@@ -12,11 +12,108 @@ import csv
 import gc
 import pickle
 import json
+import importlib.util
 import numpy as np
 import time
 from datetime import datetime
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Prefer interactive matplotlib backends for GUI usage. Fall back to Agg only if needed.
+def _is_debug_session():
+    try:
+        if sys.gettrace() is not None:
+            return True
+    except Exception:
+        pass
+    return any(name in sys.modules for name in ("debugpy", "pydevd", "pydevd_frame_eval"))
+
+
+def _has_qt_binding():
+    for module_name in ("PyQt6", "PySide6", "PyQt5", "PySide2"):
+        if importlib.util.find_spec(module_name) is not None:
+            return True
+    return False
+
+
+def _has_tk_binding():
+    return importlib.util.find_spec("tkinter") is not None
+
+
+def _backend_dependencies_available(backend_name):
+    key = str(backend_name or "").strip().lower()
+    if key in {"qtagg", "qt5agg", "qtcairo"}:
+        return _has_qt_binding()
+    if key in {"tkagg", "tkcairo"}:
+        return _has_tk_binding()
+    return True
+
+
+def _preferred_interactive_backends():
+    # Under debug sessions on Windows, TkAgg can crash at process teardown
+    # with "main thread is not in main loop"/Tcl_AsyncDelete errors.
+    has_qt = _has_qt_binding()
+    has_tk = _has_tk_binding()
+    backends = []
+    if has_qt:
+        backends.extend(["qtagg", "qt5agg"])
+    if has_tk:
+        if not (_is_debug_session() and os.name == "nt" and has_qt):
+            backends.append("tkagg")
+    return tuple(backends)
+
+
+def _try_switch_backend(target_backend):
+    backend_name = str(target_backend or "").strip().lower()
+    if not backend_name:
+        return False
+    if not _backend_dependencies_available(backend_name):
+        return False
+    try:
+        import matplotlib
+        matplotlib.use(backend_name, force=True)
+    except Exception:
+        return False
+    try:
+        import matplotlib.pyplot as _plt
+        _plt.switch_backend(backend_name)
+    except Exception:
+        pass
+    os.environ["MPLBACKEND"] = backend_name
+    return True
+
+
+def _configure_matplotlib_backend():
+    try:
+        import matplotlib
+    except Exception:
+        return "unknown"
+
+    forced_backend = str(os.environ.get("SIMION_MPL_BACKEND", "")).strip().lower()
+    if forced_backend:
+        if _backend_dependencies_available(forced_backend):
+            if _try_switch_backend(forced_backend):
+                return forced_backend
+        else:
+            print(
+                f"WARNING: SIMION_MPL_BACKEND='{forced_backend}' ignored; "
+                f"required GUI binding is not available."
+            )
+
+    preferred_backends = _preferred_interactive_backends()
+    for backend_name in preferred_backends:
+        if _try_switch_backend(backend_name):
+            return backend_name
+
+    try:
+        matplotlib.use("Agg", force=True)
+        os.environ["MPLBACKEND"] = "Agg"
+        return "Agg"
+    except Exception:
+        return "unknown"
+
+MATPLOTLIB_BACKEND_SELECTED = _configure_matplotlib_backend()
+
 # Import streamlined Utilis v5.6 module (energy resolution only)
 import importlib.util
 spec = importlib.util.spec_from_file_location("Utilis", os.path.join(os.path.dirname(__file__), "Utilis_v5.6.py"))
@@ -44,7 +141,7 @@ VISUALIZATION_METHOD = 'rmax'  # selector(rmax only)|saved|rmax|sqrt|all
 
 # === SAVE OPTIONS ===
 SAVE_FULL_PROCESSED_DATA = False  # Save only summary to avoid OOM
-SAVE_RANGE_SUMMARY_PKL = True  # Save per-range summary pickle
+SAVE_RANGE_SUMMARY_PKL = False  # Disabled by default: keep only final scan bundle pickle
 SAVE_SCAN_BUNDLE_PKL = True  # Save scan bundle pickle
 SAVE_RANGE_CSV = False  # Save per-range CSV
 SAVE_SCAN_SUMMARY_CSV = False  # Save scan-level summary CSV
@@ -54,6 +151,11 @@ SAVE_PAIR_PAYLOAD_IN_SUMMARY = True  # Include compact dr_over_r_pairs in summar
 SAVE_RAW_POINT_PAYLOAD_IN_SUMMARY = False  # Include raw_ion_points_yz (large payload) in summary pickle
 CLEANUP_CHECKPOINTS_AFTER_SUCCESS = True
 CLEANUP_TEMP_FILES_AFTER_SUCCESS = True
+FORCE_SINGLE_BUNDLE_OUTPUT = True  # If True, workflow only keeps one final output pickle.
+
+if FORCE_SINGLE_BUNDLE_OUTPUT:
+    SAVE_RANGE_SUMMARY_PKL = False
+    SAVE_FULL_PROCESSED_DATA = False
 
 # === PARAMETER RANGES ===
 KE_MIN = 1
@@ -469,10 +571,42 @@ def _normalize_visualization_method(method):
 def _is_non_interactive_matplotlib_backend():
     try:
         import matplotlib
-        backend = str(matplotlib.get_backend() or '').lower()
+        backend = str(matplotlib.get_backend() or '').strip().lower()
     except Exception:
         return False
-    return backend.endswith('agg') or backend in {'pdf', 'ps', 'svg', 'template', 'cairo'}
+    if not backend:
+        return False
+
+    # Explicit static backends only; do not treat qtagg/tkagg as non-interactive.
+    non_interactive = {'agg', 'cairo', 'pdf', 'pgf', 'ps', 'svg', 'template'}
+    if backend in non_interactive:
+        return True
+
+    # Jupyter inline backends are non-interactive for desktop GUI windows.
+    if backend.startswith('module://matplotlib_inline') or 'backend_inline' in backend:
+        return True
+
+    return False
+
+def _get_matplotlib_backend_name():
+    try:
+        import matplotlib
+        return str(matplotlib.get_backend() or 'unknown')
+    except Exception:
+        return 'unknown'
+
+def _try_switch_matplotlib_backend(target_backend):
+    return _try_switch_backend(target_backend)
+
+def _ensure_interactive_matplotlib_backend():
+    """Try to switch to an interactive backend when current backend is non-interactive."""
+    if not _is_non_interactive_matplotlib_backend():
+        return True
+    for backend_name in _preferred_interactive_backends():
+        if _try_switch_matplotlib_backend(backend_name):
+            if not _is_non_interactive_matplotlib_backend():
+                return True
+    return False
 
 def resolve_interaction_volume_ranges():
     if not Interaction_volume:
@@ -702,6 +836,7 @@ print("SIMION Energy Resolution Analysis - v5.6")
 print("=" * 70)
 print(f"Run tag: {RUN_TAG}")
 print(f"Output directory: {OUTPUT_DIR}")
+print(f"Matplotlib backend: {MATPLOTLIB_BACKEND_SELECTED}")
 print()
 
 # Clear stale checkpoints if requested
@@ -974,10 +1109,15 @@ for record in scan_records:
 # === STEP 6: Visualization ===
 if ENABLE_VISUALIZATION:
     print("\nSTEP 6: Launching visualization...")
+    backend_before = _get_matplotlib_backend_name()
     if _is_non_interactive_matplotlib_backend():
-        print("  Detected non-interactive matplotlib backend; skip GUI launch.")
-        print("  Use 'python view_results_v56.py' to open saved results later.")
-    else:
+        print(f"  Current matplotlib backend is non-interactive: {backend_before}")
+        if _ensure_interactive_matplotlib_backend():
+            print(f"  Switched backend to interactive: {_get_matplotlib_backend_name()}")
+        else:
+            print("  Could not switch to an interactive backend; skip GUI launch.")
+            print("  Use 'python view_results_v56.py' to open saved results later.")
+    if not _is_non_interactive_matplotlib_backend():
         print("Interactive GUI with all interaction-volume-range curves...")
         try:
             visual_method = _normalize_visualization_method(VISUALIZATION_METHOD)
