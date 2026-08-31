@@ -1,0 +1,10 @@
+# VMI_workflow -- hard dependencies (floors = actually-tested versions)
+# Python >= 3.11 required.
+numpy>=2.2
+scipy>=1.16
+matplotlib>=3.10
+PySide6>=6.7
+pyabel>=0.9
+
+# Optional (auto-detected, graceful fallback without it):
+# pyarrow>=15  # ~10x faster CSV loading for large .dat triplets

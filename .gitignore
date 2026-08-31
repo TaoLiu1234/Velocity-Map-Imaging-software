@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+workflow_outputs/
+.vendor_site/
+Refence data/
+tests/sample_data/
+*.dat
+*.npz
