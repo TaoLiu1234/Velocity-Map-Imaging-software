@@ -1,0 +1,36 @@
+{
+  "golden_version": 1,
+  "workflow": {
+    "paired_count": 25658,
+    "fine_roi": [
+      7900.0,
+      8600.0
+    ],
+    "selected_mask_count": 21871,
+    "center_estimate": [
+      126.634982,
+      124.088852
+    ],
+    "center_error_px": 1.963316,
+    "ring_inner_count": 21388,
+    "ring_outer_count": 386,
+    "denoised_hist_sum": 21301.769706,
+    "denoised_removed_total": 86.230294,
+    "rbasex_peak_count": 2,
+    "rbasex_peaks": [
+      {
+        "r": 63.0,
+        "beta": -0.96613,
+        "i": 2422.474576,
+        "area": 17072.178361
+      },
+      {
+        "r": 111.0,
+        "beta": 0.129564,
+        "i": 1000.251524,
+        "area": 5959.418897
+      }
+    ],
+    "restored_paired_count": 21871
+  }
+}

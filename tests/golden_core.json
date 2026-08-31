@@ -1,0 +1,78 @@
+{
+  "golden_version": 1,
+  "loading": {
+    "trigger_shape": [
+      30000,
+      2
+    ],
+    "electron_shape": [
+      28927,
+      3
+    ],
+    "ion_shape": [
+      29173,
+      3
+    ],
+    "trigger_first_row": [
+      0.0,
+      0.0
+    ],
+    "electron_first_row": [
+      63.640658,
+      214.726135,
+      3512.679831
+    ],
+    "ion_first_row": [
+      120.89769,
+      164.481023,
+      11917.706272
+    ],
+    "trigger_nan_rows": 2159
+  },
+  "pairing": {
+    "coincidence_1e1i": {
+      "selected_rows": 25658,
+      "in_bounds_pairs": 25658
+    },
+    "all_one": {
+      "selected_rows": 27841,
+      "in_bounds_pairs": 27841
+    },
+    "one_e_two_i": {
+      "selected_rows": 310,
+      "in_bounds_pairs": 310
+    },
+    "one_e_three_i": {
+      "selected_rows": 123,
+      "in_bounds_pairs": 123
+    }
+  },
+  "denoise": {
+    "hist_signal_sum": 6000.0,
+    "hist_denoised_sum": 5756.610539,
+    "removed_total": 243.389461,
+    "expected_inner_noise_total": 894.08867,
+    "shape": [
+      185,
+      185
+    ],
+    "signal_count": 6000,
+    "noise_count": 1500,
+    "hist_denoised_max": 9.905918
+  },
+  "centers": {
+    "geometric_median": [
+      12.485296,
+      -9.861244
+    ],
+    "circle_fit_kasa": [
+      12.37636,
+      -7.326325,
+      40.019107
+    ],
+    "edge_circle_center": [
+      12.308083,
+      -7.225609
+    ]
+  }
+}
