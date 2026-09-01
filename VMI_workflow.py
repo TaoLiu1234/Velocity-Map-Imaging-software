@@ -105,7 +105,10 @@ from VMI_workflow_core import (
     select_one_e_two_i_pairs,
 )
 from VMI_workflow_reconstruction import (
+    ABEL_METHODS,
+    abel_method_label,
     format_peak_text,
+    normalize_abel_method,
     run_reconstructions_from_centered_data,
 )
 
@@ -654,10 +657,11 @@ class _ReconWorker(QObject):
     thread reads back on a Qt timer.
     """
 
-    def __init__(self, centered_hist_data: dict | None, rbasex_settings: dict) -> None:
+    def __init__(self, centered_hist_data: dict | None, rbasex_settings: dict, method: str = "rbasex") -> None:
         super().__init__()
         self._centered_hist_data = centered_hist_data
         self._rbasex_settings = rbasex_settings
+        self._method = normalize_abel_method(method)
         self._progress: tuple[float, str] = (0.0, "preparing")
         self._result: dict | None = None
         self._error: str = ""
@@ -700,6 +704,7 @@ class _ReconWorker(QObject):
                 self._centered_hist_data,
                 self._rbasex_settings,
                 progress_callback=_cb,
+                method=self._method,
             )
         except Exception as exc:  # pragma: no cover - defensive
             self._error = str(exc)
@@ -1599,6 +1604,11 @@ class MainWindow(QMainWindow):
 
         # Step 6 controls: split reconstruction parameters into two boxed panels.
         rbasex_param_group = QGroupBox("rBasex Model Parameters")
+        rbasex_param_group.setToolTip(
+            "Order/Odd/Reg/rmax are used by the rBasex method only.\n"
+            "Peak smooth sigma/height/prominence/Max peaks/Min-dist frac and\n"
+            "Display percentile apply to every inversion method."
+        )
         rbasex_param_grid = QGridLayout(rbasex_param_group)
         rbasex_param_grid.setHorizontalSpacing(10)
 
@@ -2009,10 +2019,22 @@ class MainWindow(QMainWindow):
         projection_voltage_layout.addWidget(QLabel("V_Detector"), 2, 0)
         projection_voltage_layout.addWidget(self.v_detector_edit, 2, 1)
 
-        reconstruction_group, reconstruction_layout = make_vbox_section("rBasex — Run")
+        reconstruction_group, reconstruction_layout = make_vbox_section("Abel Reconstruction — Run")
+        reconstruction_layout.addWidget(QLabel("Inversion method"))
+        self.recon_method_combo = QComboBox()
+        for method_key, method_label in ABEL_METHODS:
+            self.recon_method_combo.addItem(method_label, method_key)
+        self.recon_method_combo.setToolTip(
+            "pyAbel inverse-Abel method used for the reconstruction.\n"
+            "rBasex is the default and the only method that recovers the\n"
+            "anisotropy beta(r); other methods report beta=n/a.\n"
+            "Order/Odd/Reg/rmax are rBasex-specific; the Peak-* and Display\n"
+            "percentile settings apply to every method."
+        )
+        reconstruction_layout.addWidget(self.recon_method_combo)
         reconstruction_layout.addWidget(self.reconstruct_btn)
         reconstruction_layout.addWidget(
-            QLabel("Prepare the centered image in Electron Binned Image, then tune rBasex settings here.")
+            QLabel("Prepare the centered image in Electron Binned Image, then run the inversion here.")
         )
 
         for layout in (
@@ -6261,7 +6283,9 @@ class MainWindow(QMainWindow):
                 centered_bin_size = DEFAULT_CENTER_BIN_SIZE
             self._plot_centered_bin_image(self.ax_centered_bin, self.centered_hist_data, centered_bin_size)
             self._plot_theta_radial_profile_panel(self.ax_centered_theta_profile, self.centered_hist_data, centered_bin_size)
-            self._plot_reconstruction_panel(self.ax_reserved_top, "rBasex Recon", self.rbasex_recon_result)
+            self._plot_reconstruction_panel(
+    self.ax_reserved_top, self._reconstruction_panel_title(self.rbasex_recon_result), self.rbasex_recon_result
+)
             self._plot_rbasex_radial_profile(self.ax_rbasex_profile, self.rbasex_recon_result)
             if self.centered_bin_colorbar is not None:
                 axes_to_draw.append(getattr(self.centered_bin_colorbar, "ax", None))
@@ -7269,7 +7293,9 @@ class MainWindow(QMainWindow):
 
     def _refresh_rbasex_profile_panels_only(self, *, draw_canvas: bool = True) -> None:
         """Refresh rBasex reconstruction-image panel and its radial-profile panel only."""
-        self._plot_reconstruction_panel(self.ax_reserved_top, "rBasex Recon", self.rbasex_recon_result)
+        self._plot_reconstruction_panel(
+    self.ax_reserved_top, self._reconstruction_panel_title(self.rbasex_recon_result), self.rbasex_recon_result
+)
         self._plot_rbasex_radial_profile(self.ax_rbasex_profile, self.rbasex_recon_result)
         self._add_subplot_save_markers()
         if draw_canvas:
@@ -12431,7 +12457,9 @@ class MainWindow(QMainWindow):
                         vmin=0.0,
                         vmax=vmax,
                     )
-                    peaks_text = format_peak_text(result.get("peaks", []))
+                    peaks_text = format_peak_text(
+                        result.get("peaks", []), beta_available=bool(result.get("beta_available", True))
+                    )
                     ax.text(
                         0.02,
                         0.98,
@@ -12668,6 +12696,7 @@ class MainWindow(QMainWindow):
                 },
                 "reconstruction": {
                     "rbasex": self._result_metadata_without_image(self.rbasex_recon_result),
+                    "method": normalize_abel_method(self.recon_method_combo.currentData()),
                 },
                 "artifacts": {
                     "data_npz": data_npz_name,
@@ -12828,7 +12857,14 @@ class MainWindow(QMainWindow):
                 if arr is not None:
                     preview_arrays[str(key)] = arr
 
-        rb_meta = metadata.get("reconstruction", {}).get("rbasex")
+        recon_meta = metadata.get("reconstruction", {})
+        rb_meta = recon_meta.get("rbasex")
+        # Legacy sessions never stored a method; normalize maps unknown/missing
+        # values to rBasex.
+        if hasattr(self, "recon_method_combo"):
+            idx = self.recon_method_combo.findData(normalize_abel_method(recon_meta.get("method")))
+            if idx >= 0:
+                self.recon_method_combo.setCurrentIndex(idx)
         saved_files = metadata.get("files", {})
         counts_meta = metadata.get("counts", {})
 
@@ -18816,6 +18852,15 @@ class MainWindow(QMainWindow):
                 value -= 2
         return max(1, value)
 
+    def _reconstruction_panel_title(self, result: dict | None) -> str:
+        """Dashboard title for the reconstruction image panel (method-aware)."""
+        method = ""
+        if isinstance(result, dict):
+            method = normalize_abel_method(result.get("method"))
+        if method and method != "rbasex":
+            return f"{abel_method_label(method)} Recon"
+        return "rBasex Recon"
+
     def _get_rbasex_settings(self) -> dict:
         """Collect all rBasex-related settings from UI controls."""
         rmax_text = self.rbasex_rmax_edit.text().strip()
@@ -19442,9 +19487,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Settings", f"Could not read reconstruction settings:\n{exc}")
             return
         centered_hist_snapshot = self._copy_centered_hist_data(self.centered_hist_data)
+        recon_method = normalize_abel_method(self.recon_method_combo.currentData())
 
         self._recon_busy = True
-        worker = _ReconWorker(centered_hist_snapshot, rbasex_settings)
+        worker = _ReconWorker(centered_hist_snapshot, rbasex_settings, method=recon_method)
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -19452,7 +19498,10 @@ class MainWindow(QMainWindow):
         self._recon_worker_thread = thread
         self._recon_worker = worker
 
-        self._progress_start("Running rBasex reconstruction...", determinate=True)
+        self._progress_start(
+            f"Running {abel_method_label(self.recon_method_combo.currentData())} reconstruction...",
+            determinate=True,
+        )
         self._progress_update(6, "Preparing reconstruction input...")
 
         # Poll progress on a timer; apply results only when finished. This keeps
@@ -19516,7 +19565,8 @@ class MainWindow(QMainWindow):
         self._reset_toolbar_navigation_history()
         self._progress_update(100, "Reconstruction finished.")
         rb_n = len(self.rbasex_recon_result.get("peaks", [])) if self.rbasex_recon_result else 0
-        self._set_status(f"Reconstruction finished: rBasex peaks={rb_n}.")
+        method_label = abel_method_label(self.recon_method_combo.currentData())
+        self._set_status(f"Reconstruction finished: {method_label} peaks={rb_n}.")
 
     # ------------------------------------------------------------------
     # Mouse/overlay interaction for ring and ion rectangle
@@ -22798,7 +22848,7 @@ class MainWindow(QMainWindow):
             ax,
             0.02,
             0.98,
-            format_peak_text(result.get("peaks", [])),
+            format_peak_text(result.get("peaks", []), beta_available=bool(result.get("beta_available", True))),
             ha="left",
             va="top",
             fontsize=8,
@@ -23019,7 +23069,13 @@ class MainWindow(QMainWindow):
         self._clear_rbasex_profile_secondary_xaxis()
         self._clear_rbasex_profile_secondary_yaxis()
         ax.clear()
-        ax.set_title("rBasex Recovered Profile")
+        method_key = ""
+        if isinstance(result, dict):
+            method_key = normalize_abel_method(result.get("method"))
+        if method_key and method_key != "rbasex":
+            ax.set_title(f"{abel_method_label(method_key)} Recovered Profile")
+        else:
+            ax.set_title("rBasex Recovered Profile")
         self.rbasex_profile_last_r_centers = np.zeros(0, dtype=np.float64)
         self.rbasex_profile_last_x_display = np.zeros(0, dtype=np.float64)
         self.rbasex_profile_last_y_raw = np.zeros(0, dtype=np.float64)
@@ -23293,7 +23349,9 @@ class MainWindow(QMainWindow):
             centered_bin_size = DEFAULT_CENTER_BIN_SIZE
         if redraw_centered_bin:
             self._plot_centered_bin_image(self.ax_centered_bin, self.centered_hist_data, centered_bin_size)
-        self._plot_reconstruction_panel(self.ax_reserved_top, "rBasex Recon", self.rbasex_recon_result)
+        self._plot_reconstruction_panel(
+    self.ax_reserved_top, self._reconstruction_panel_title(self.rbasex_recon_result), self.rbasex_recon_result
+)
         self._plot_rbasex_radial_profile(self.ax_rbasex_profile, self.rbasex_recon_result)
         self._add_subplot_save_markers()
         # Reconstruction updates can change subplot footprints and colorbar
@@ -23443,7 +23501,9 @@ class MainWindow(QMainWindow):
                 centered_bin_size = DEFAULT_CENTER_BIN_SIZE
             self._plot_centered_bin_image(self.ax_centered_bin, self.centered_hist_data, centered_bin_size)
             self._plot_theta_radial_profile_panel(self.ax_centered_theta_profile, self.centered_hist_data, centered_bin_size)
-            self._plot_reconstruction_panel(self.ax_reserved_top, "rBasex Recon", self.rbasex_recon_result)
+            self._plot_reconstruction_panel(
+    self.ax_reserved_top, self._reconstruction_panel_title(self.rbasex_recon_result), self.rbasex_recon_result
+)
             self._plot_rbasex_radial_profile(self.ax_rbasex_profile, self.rbasex_recon_result)
             self._apply_pending_restored_view_state(draw_canvas=False)
             self._add_subplot_save_markers()
@@ -23530,7 +23590,9 @@ class MainWindow(QMainWindow):
         self._plot_centered_bin_image(self.ax_centered_bin, self.centered_hist_data, centered_bin_size)
         self._plot_theta_radial_profile_panel(self.ax_centered_theta_profile, self.centered_hist_data, centered_bin_size)
 
-        self._plot_reconstruction_panel(self.ax_reserved_top, "rBasex Recon", self.rbasex_recon_result)
+        self._plot_reconstruction_panel(
+    self.ax_reserved_top, self._reconstruction_panel_title(self.rbasex_recon_result), self.rbasex_recon_result
+)
         self._plot_rbasex_radial_profile(self.ax_rbasex_profile, self.rbasex_recon_result)
         self._add_subplot_save_markers()
 

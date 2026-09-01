@@ -774,3 +774,30 @@ Arial) so text metrics do not depend on installed fonts. The QSS was kept
 and extended (radio buttons, menus, dialogs, item views, hover states).
 Note: `app.style().objectName()` reads empty once a stylesheet is active
 (QStyleSheetStyle wrapper); assert via the style class instead.
+
+### 16l. Pluggable pyAbel inversion methods (2026-09-01)
+
+> User request: pyAbel offers more than rBasex — expose a method dropdown in
+> the Reconstruction tab.
+
+The Reconstruction tab gained an **Inversion method** combo backed by
+`ABEL_METHODS` in `VMI_workflow_reconstruction.py` (9 entries verified
+against pyabel 0.9.1's unified `abel.Transform` API: rBasex default, BASEX,
+Daun, Direct, Hansen-Law, Lin-Basex, Onion-Bordas, Three-point, Two-point;
+`onion_drying`/`pbasex` are not registered by this pyabel build and are
+omitted). `normalize_abel_method` maps any unknown/legacy value to rBasex.
+
+Dispatch: rBasex keeps its dedicated path unchanged (rIbeta -> peaks with
+beta, bit-identical results); every other method runs
+`run_abel_method_reconstruction` — `abel.Transform(direction="inverse")`
+followed by angular integration of the inverted image over integer pixel
+radii for I(r), beta reported as zeros with `beta_available=False`, and the
+same peak extractor/peak settings as rBasex. `format_peak_text` renders
+`beta=n/a` for such results instead of a misleading 0. Panel titles are
+method-aware ("Hansen-Law Recon" / "<Method> Recovered Profile"), as are the
+progress and status messages. Sessions persist `reconstruction.method` and
+restore it tolerantly (legacy sessions without the key default to rBasex).
+Order/Odd/Reg/rmax are documented as rBasex-only; Peak-* and Display
+percentile apply to all methods. `check_alt_method_reconstruction` drives
+Hansen-Law through the full async GUI path (image shape, peaks, beta n/a,
+method-aware titles). All suites green; goldens byte-unchanged.

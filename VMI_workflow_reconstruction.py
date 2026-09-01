@@ -184,16 +184,23 @@ def extract_peak_r_beta(
     return out
 
 
-def format_peak_text(peaks: list[dict]) -> str:
-    """Format recovered peaks for display in plot panels."""
+def format_peak_text(peaks: list[dict], beta_available: bool = True) -> str:
+    """Format recovered peaks for display in plot panels.
+
+    Methods that do not recover the anisotropy (everything except rBasex)
+    report ``beta=n/a`` instead of a misleading 0.
+    """
     if not peaks:
         return "Recovered peaks:\n(no peak)"
     lines = ["Recovered peaks:"]
     for i, p in enumerate(peaks, start=1):
         area = p.get("area", p.get("i", 0.0))
-        lines.append(
-            f"{i}. r={float(p['r']):.3g}, beta={float(p['beta']):.3g}, intensity={float(area):.4g}"
-        )
+        if beta_available:
+            lines.append(
+                f"{i}. r={float(p['r']):.3g}, beta={float(p['beta']):.3g}, intensity={float(area):.4g}"
+            )
+        else:
+            lines.append(f"{i}. r={float(p['r']):.3g}, beta=n/a, intensity={float(area):.4g}")
     return "\n".join(lines)
 
 
@@ -311,19 +318,138 @@ def run_rbasex_reconstruction(
         }
 
 
+# Abel inversion methods exposed in the GUI (verified against pyabel 0.9.1).
+# rBasex is the default and the only method that natively recovers the
+# anisotropy parameter beta(r); every other entry returns the inverted image
+# only, so peaks are reported with beta = n/a for them.
+ABEL_METHODS: list[tuple[str, str]] = [
+    ("rbasex", "rBasex (recommended, gives beta)"),
+    ("basex", "BASEX"),
+    ("daun", "Daun (regularized)"),
+    ("direct", "Direct integration"),
+    ("hansenlaw", "Hansen-Law"),
+    ("linbasex", "Lin-Basex"),
+    ("onion_bordas", "Onion-Bordas"),
+    ("three_point", "Three-point (Dasch)"),
+    ("two_point", "Two-point"),
+]
+
+_METHOD_KEYS = frozenset(key for key, _ in ABEL_METHODS)
+
+
+def normalize_abel_method(method) -> str:
+    """Return a registered method key, mapping anything unknown to rbasex."""
+    key = str(method or "").strip().lower()
+    return key if key in _METHOD_KEYS else "rbasex"
+
+
+def abel_method_label(method) -> str:
+    """Return the human-readable label for a registered method key."""
+    key = normalize_abel_method(method)
+    for method_key, label in ABEL_METHODS:
+        if method_key == key:
+            return label
+    return key
+
+
+def run_abel_method_reconstruction(
+    hist_image: np.ndarray,
+    xedges: np.ndarray,
+    yedges: np.ndarray,
+    bin_size: float,
+    method: str,
+    settings: dict,
+) -> dict:
+    """Run a generic pyabel inverse transform (any non-rBasex method).
+
+    Uses the unified ``abel.Transform`` API. The returned result dict mirrors
+    ``run_rbasex_reconstruction`` except that the anisotropy is not recoverable:
+    ``beta`` is a zero array, ``beta_available`` is False, and I(r) is obtained
+    by angular integration of the inverted image over all angles (mean per
+    integer pixel radius). Peak finding reuses the same extractor and peak
+    settings as the rBasex path.
+    """
+    try:
+        recon_img = abel.Transform(
+            hist_image,
+            direction="inverse",
+            method=normalize_abel_method(method),
+        ).transform
+        recon_img = np.asarray(recon_img, dtype=np.float64)
+
+        # Angular-integrated radial profile I(r) on integer pixel radii,
+        # centered at the array origin (the core binning grid guarantees the
+        # center of the central pixel, same assumption as the rBasex path).
+        ny, nx = recon_img.shape
+        yy, xx = np.mgrid[0:ny, 0:nx]
+        rr = np.hypot(yy - (ny - 1) / 2.0, xx - (nx - 1) / 2.0)
+        r_idx = np.rint(rr).astype(np.int64)
+        r_max = int(min(int(r_idx.max()), min(ny, nx) // 2))
+        flat_r = r_idx.ravel()
+        flat_i = recon_img.ravel()
+        counts = np.bincount(flat_r, minlength=r_max + 1)[: r_max + 1].astype(np.float64)
+        sums = np.bincount(flat_r, weights=flat_i, minlength=r_max + 1)[: r_max + 1]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            i_r = np.where(counts > 0, sums / np.maximum(counts, 1.0), 0.0)
+        i_r = np.nan_to_num(i_r, nan=0.0, posinf=0.0, neginf=0.0)
+        r_data = np.arange(r_max + 1, dtype=np.float64) * bin_size
+        beta_r = np.zeros_like(i_r)
+
+        peaks = extract_peak_r_beta(
+            r_data,
+            i_r,
+            beta_r,
+            settings["peak_smooth_sigma"],
+            settings["peak_height"],
+            settings["peak_prominence"],
+            settings["peak_min_dist_frac"],
+            settings["max_peaks"],
+        )
+        return {
+            "image": recon_img,
+            "extent": (float(xedges[0]), float(xedges[-1]), float(yedges[0]), float(yedges[-1])),
+            "r": r_data,
+            "i": i_r,
+            "beta": beta_r,
+            "peaks": peaks,
+            "display_percentile": settings["display_percentile"],
+            "method": normalize_abel_method(method),
+            "beta_available": False,
+            "error": "",
+        }
+    except Exception as exc:
+        return {
+            "image": None,
+            "extent": None,
+            "r": np.array([]),
+            "i": np.array([]),
+            "beta": np.array([]),
+            "peaks": [],
+            "display_percentile": settings.get("display_percentile", 99.7),
+            "method": normalize_abel_method(method),
+            "beta_available": False,
+            "error": str(exc),
+        }
+
+
 def run_reconstructions_from_centered_data(
     centered_hist_data: dict | None,
     rbasex_settings: dict,
     progress_callback: Callable[[float, str], None] | None = None,
+    method: str = "rbasex",
 ) -> dict | None:
-    """Run the rBasex reconstruction from a centered histogram dict.
+    """Run the reconstruction from a centered histogram dict.
 
     Parameters:
     - `centered_hist_data`:
       Dict produced by core binning/denoising step, must include:
       `hist_denoised`, `xedges`, `yedges`, and `bin_size`.
     - `rbasex_settings`:
-      Settings dict for the rBasex reconstruction method.
+      Settings dict. rBasex uses every key; other methods use only the
+      peak-finding and display keys.
+    - `method`:
+      Registered Abel method key (see `ABEL_METHODS`); anything unregistered
+      falls back to rBasex.
 
     Important orientation note:
     - `numpy.histogram2d` stores data as (x_bin, y_bin).
@@ -352,7 +478,15 @@ def run_reconstructions_from_centered_data(
     recon_input = np.asarray(hist_xy.T, dtype=np.float64)
     bin_size_eff = float(centered_hist_data.get("bin_size", 1.0))
 
-    emit_progress(0.9, "Running rBasex reconstruction...")
-    rbasex_result = run_rbasex_reconstruction(recon_input, xedges, yedges, bin_size_eff, rbasex_settings)
+    method_key = normalize_abel_method(method)
+    label = abel_method_label(method_key)
+    if method_key == "rbasex":
+        emit_progress(0.9, "Running rBasex reconstruction...")
+        result = run_rbasex_reconstruction(recon_input, xedges, yedges, bin_size_eff, rbasex_settings)
+    else:
+        emit_progress(0.9, f"Running {label} reconstruction...")
+        result = run_abel_method_reconstruction(
+            recon_input, xedges, yedges, bin_size_eff, method_key, rbasex_settings
+        )
     emit_progress(1.0, "Reconstruction algorithms finished.")
-    return rbasex_result
+    return result

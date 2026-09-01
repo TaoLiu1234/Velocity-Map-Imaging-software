@@ -1601,6 +1601,59 @@ def check_tab_toggle_and_theme(app, MainWindow, windows: list) -> None:
     print("Tab toggle & theme OK: tray toggles from any widget, focus untouched, Fusion active")
 
 
+def check_alt_method_reconstruction(app, MainWindow, windows: list) -> None:
+    """16m: the pyAbel method dropdown runs non-rBasex inversions end to end.
+
+    Drives the full GUI path with Hansen-Law selected: async reconstruction,
+    result payload, peaks (beta reported as n/a), and the method-aware panel
+    title. The rBasex golden workflow is covered separately and stays the
+    default (combo index 0), so goldens are untouched.
+    """
+    import numpy as np
+
+    step = "alt_method_reconstruction"
+    win = _make_binned_window(step, app, MainWindow, windows)
+
+    idx = win.recon_method_combo.findData("hansenlaw")
+    if idx < 0:
+        raise _fail(step, "hansenlaw not offered in the reconstruction method dropdown")
+    win.recon_method_combo.setCurrentIndex(idx)
+    app.processEvents()
+    win.run_reconstruction_now()
+    wait_until(
+        app,
+        lambda: getattr(win, "rbasex_recon_result", None) is not None and not getattr(win, "_recon_busy", False),
+        120.0,
+        step,
+        "Hansen-Law reconstruction",
+    )
+    app.processEvents()
+    result = win.rbasex_recon_result
+    if result is None or result.get("error"):
+        raise _fail(step, f"Hansen-Law reconstruction failed: {result and result.get('error')}")
+    hist = win.centered_hist_data["hist_denoised"]
+    if result["image"] is None or result["image"].shape != np.asarray(hist).T.shape:
+        raise _fail(step, f"reconstructed image shape {getattr(result['image'], 'shape', None)} mismatch")
+    if not result.get("peaks"):
+        raise _fail(step, "Hansen-Law reconstruction found no peaks")
+    if result.get("beta_available", True):
+        raise _fail(step, "non-rBasex method must mark beta as unavailable")
+    title = str(win.ax_reserved_top.get_title())
+    if "Hansen-Law" not in title:
+        raise _fail(step, f"reconstruction panel title {title!r} does not name the method")
+    profile_title = str(win.ax_rbasex_profile.get_title())
+    if "Hansen-Law" not in profile_title:
+        raise _fail(step, f"radial-profile title {profile_title!r} does not name the method")
+
+    # Back to the default method: combo round-trip + normalize fallback.
+    win.recon_method_combo.setCurrentIndex(win.recon_method_combo.findData("rbasex"))
+    from VMI_workflow_reconstruction import normalize_abel_method
+
+    if normalize_abel_method(None) != "rbasex" or normalize_abel_method("bogus") != "rbasex":
+        raise _fail(step, "method normalization must fall back to rbasex")
+    print("Alt-method reconstruction OK: Hansen-Law image+peaks, method-aware titles, beta n/a")
+
+
 def run_regression_checks(app, MainWindow, windows: list) -> None:
     """Run the post-fix regression extensions (not part of the golden dict)."""
     check_startup_placeholders(app, MainWindow, windows)
@@ -1614,6 +1667,7 @@ def run_regression_checks(app, MainWindow, windows: list) -> None:
     check_compare_colorbar_no_overlap(app, MainWindow, windows)
     check_window_mode_fit(app, MainWindow, windows)
     check_tab_toggle_and_theme(app, MainWindow, windows)
+    check_alt_method_reconstruction(app, MainWindow, windows)
 
 
 def main(argv: list[str] | None = None) -> int:

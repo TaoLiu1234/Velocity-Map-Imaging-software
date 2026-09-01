@@ -317,8 +317,16 @@ The **Ion Scatter** tab limits which ion events define the coincidences.
   **Peak height** (0.12), **Peak prominence** (0.08), **Max peaks** (5),
   **Min-dist frac** (0.06); **Display percentile** (99.7) sets the image
   display clipping.
-- **Run it.** Press **Start Reconstruction** on the **Reconstruction** tab
-  (rBasex — Run box). The inversion runs asynchronously with a
+- **Choosing a method.** The **Inversion method** dropdown (Abel
+  Reconstruction — Run box) selects the pyAbel inverse-Abel algorithm:
+  **rBasex** (default; the only method that recovers the anisotropy
+  beta(r)), **BASEX**, **Daun**, **Direct integration**, **Hansen-Law**,
+  **Lin-Basex**, **Onion-Bordas**, **Three-point (Dasch)** and **Two-point**.
+  Order/Odd/Reg/rmax apply to rBasex only; the Peak-* and Display percentile
+  settings apply to every method. Non-rBasex methods compute I(r) by angular
+  integration of the inverted image and report **beta=n/a**.
+- **Run it.** Press **Start Reconstruction** on the **Reconstruction** tab.
+  The inversion runs asynchronously with a
   progress bar; the UI stays responsive. The **rBasex Recon** panel shows
   the inverted image and lists the recovered peaks, one line each:
 
