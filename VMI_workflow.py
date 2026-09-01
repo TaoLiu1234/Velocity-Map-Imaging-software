@@ -10701,8 +10701,22 @@ class MainWindow(QMainWindow):
             return False
 
     def _pump_progress_events_if_safe(self) -> None:
-        """Avoid nested Qt event pumping in crash-prone Windows save/export paths."""
+        """Avoid nested Qt event pumping in crash-prone Windows paths.
+
+        Re-entrant event dispatch (processEvents inside a running slot) is the
+        known crash source this pump guards against: save/export paths suspend
+        it via ``_suspend_progress_event_pump``, and on Qt 6.7 (the user's
+        build) calling it from the reconstruction slots hard-crashed
+        Qt6Widgets.dll at a fixed offset — twice, with and without a popup
+        open. The reconstruction pipeline is fully async (worker thread +
+        120 ms poll timer), so the normal event loop repaints everything
+        without any pumping; skip the pump entirely while it runs.
+        """
         if sys.platform.startswith("win") and bool(getattr(self, "_suspend_progress_event_pump", False)):
+            return
+        # 16o: never pump while the async reconstruction runs (slot re-entrancy
+        # crashes Qt 6.7 natively; the event loop repaints on its own).
+        if bool(getattr(self, "_recon_busy", False)):
             return
         # 16n: also skip while a combo/menu popup is open — its native modal
         # loop already dispatches events, and re-entering processEvents() from

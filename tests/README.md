@@ -199,3 +199,33 @@ baseline.
   `<cwd>/workflow_outputs/<timestamp>_<tag>/session_data.npz` +
   `session_metadata.json`); restore without a file dialog via
   `win2._load_session_output_from_metadata_path(meta_path)`.
+
+## Testing in multiple environments
+
+UI crash classes are Qt-version-sensitive: the app is used and supported on
+two local interpreters with very different Qt versions, and a bug can
+hard-crash (segfault, `0xc0000005` in `Qt6Widgets.dll`; no Python
+traceback) on one and never reproduce on the other. The safest pair to test
+before every release:
+
+| Env | Interpreter | Version | Used for |
+|---|---|---|---|
+| User env | `c:\Users\Tao\.conda\envs\my-env\python.exe` | Python 3.11.11 + PySide6 6.7.2 / Qt 6.7.3 | Oldest supported; runs with a real on-screen window |
+| Dev env | `python` (`C:\App\MiniConda`) | Python 3.12.9 + PySide6 6.11.1 / Qt 6.11.1 | Offscreen suite, goldens |
+
+Run both suites in BOTH environments before merging UI-affecting changes:
+
+```bash
+# user env (Qt 6.7)
+"/c/Users/Tao/.conda/envs/my-env/python.exe" tests/test_core.py
+QT_QPA_PLATFORM=offscreen "/c/Users/Tao/.conda/envs/my-env/python.exe" tests/test_smoke.py
+# dev env (Qt 6.11)
+python tests/test_core.py
+QT_QPA_PLATFORM=offscreen python tests/test_smoke.py
+```
+
+Note: `QT_QPA_PLATFORM=offscreen` masks re-entrancy/painting crashes that
+only manifest on a real window; the smoke suite under offscreen is still the
+correct place to lock behavior, but the oldest supported env (Qt 6.7) with a
+real window is where UI crash classes must be validated (see
+ARCHITECTURE.md sections 16i, 16n and 16o).

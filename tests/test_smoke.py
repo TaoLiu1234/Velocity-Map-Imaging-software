@@ -1663,7 +1663,10 @@ def check_recon_busy_popup_safety(app, MainWindow, windows: list) -> None:
     stuck because no feedback was emitted between the worker's 5% and 90%
     checkpoints. Locks in: combo locked while busy, pump skips while a popup
     is active, collection deferred while a popup is open, and an elapsed-time
-    counter in the status line.
+    counter in the status line. Also locks the 16o busy-pump guard: with NO
+    popup open the pump must still skip processEvents() while _recon_busy is
+    True (sentinel singleShot stays pending) and dispatch again once the run
+    finishes.
     """
     import numpy as np
     from PySide6.QtCore import QTimer
@@ -1715,6 +1718,17 @@ def check_recon_busy_popup_safety(app, MainWindow, windows: list) -> None:
         status_text = str(win.status_label.text())
         if "s)" not in status_text and " s" not in status_text:
             raise _fail(step, f"running status lacks the elapsed-time counter: {status_text!r}")
+
+        # 16o: with NO popup open the pump must still skip processEvents()
+        # while the reconstruction is busy — re-entrant dispatch from the
+        # button-click/poll slots is the crash class observed in the user env.
+        if not getattr(win, "_recon_busy", False):
+            raise _fail(step, "_recon_busy must be True while the slow transform is running")
+        busy_fired = []
+        QTimer.singleShot(0, lambda: busy_fired.append(1))
+        win._pump_progress_events_if_safe()
+        if busy_fired:
+            raise _fail(step, "pump processed events while _recon_busy was True (re-entrancy crash class, no popup)")
 
         # Popup active: the pump must skip processEvents entirely (a sentinel
         # singleShot stays pending) and collection must be deferred.
@@ -1768,7 +1782,17 @@ def check_recon_busy_popup_safety(app, MainWindow, windows: list) -> None:
             raise _fail(step, f"collection ran {collects['n']} times, want exactly 1")
         if not win.recon_method_combo.isEnabled():
             raise _fail(step, "method combo must unlock after the reconstruction finishes")
-        print("Recon busy popup safety OK: combo locked, pump guarded, collection deferred, liveness shown")
+
+        # 16o: once the run finished (_recon_busy False, no popup), the pump
+        # must dispatch events again — the busy guard is scoped to the run.
+        if getattr(win, "_recon_busy", False):
+            raise _fail(step, "_recon_busy must be False once the deferred collection ran")
+        done_fired = []
+        QTimer.singleShot(0, lambda: done_fired.append(1))
+        win._pump_progress_events_if_safe()
+        if not done_fired:
+            raise _fail(step, "pump stayed suppressed after _recon_busy turned False")
+        print("Recon busy popup safety OK: combo locked, pump guarded (busy + popup), collection deferred, liveness shown")
     finally:
         vwr.abel.Transform = real_transform
         win._collect_recon_results = real_collect

@@ -842,3 +842,70 @@ Transform on the worker thread and locks in: combo disabled while busy, the
 pump leaves a sentinel event pending while a popup is active, collection
 defers while the popup is open, exactly one collection after it closes, and
 the elapsed-time status. All suites green; goldens byte-unchanged.
+
+Correction (see 16o): the popup re-entrancy above was provably NOT the whole
+story — the user's second crash occurred with no popup open at all, and the
+popup guard alone did not stop the crash. The pump is now also suppressed
+for the whole duration of a reconstruction (16o).
+
+### 16o. Reconstruction press-crash on Qt 6.7 (2026-09-01)
+
+> User report: hard crash (no traceback, whole python.exe dies) on pressing
+> Start Reconstruction — recorded twice, one with the inversion-method combo
+> popup open, one with no popup at all.
+
+Evidence (Windows Application event log, faulting process
+`c:\Users\Tao\.conda\envs\my-env\python.exe`): faulting module
+`Qt6Widgets.dll` version 6.7.3.0, exception code `0xc0000005`, fault offset
+`0x000000000038e0f0` — IDENTICAL offset in both crashes (2026-09-01 7:40 PM
+and 8:28 PM local; a same-day crash in `python312.dll` at a different
+offset in the dev env is a separate, unrelated event).
+
+Root cause (environment-parity class): the crash is specific to the USER
+ENV (Python 3.11.11 + PySide6 6.7.2 / Qt 6.7.3). The dev env (Python 3.12.9
++ PySide6 6.11.1 / Qt 6.11.1) never reproduces; numerics (all 9 pyAbel
+methods benchmarked as subprocesses in the user env) and full offscreen GUI
+runs pass in BOTH envs. That is exactly why earlier offscreen tests passed
+while the user crashed: a class of Qt 6.7 slot-re-entrancy/painting bugs
+only manifests on a real window and in the older Qt build. The second crash
+(no popup) shows the 16n popup re-entrancy explanation alone could not cover
+it — `_progress_start`/`_progress_update` call
+`_pump_progress_events_if_safe()` -> `QApplication.processEvents()`, and
+re-entrant event dispatch from inside the button-click/poll slots is the
+crash class; a popup only makes it (sometimes) more reachable.
+
+Fix (busy-pump guard): `_pump_progress_events_if_safe` returns early while
+`self._recon_busy` is True. The reconstruction pipeline is fully async
+(worker thread + 120 ms poll timer), so the normal event loop repaints
+everything without any pumping during a run.
+
+Reproduction matrix (on-screen `_repro_real.py`, user env, PySide6 6.7.2,
+synthetic sample data, tray = settings tray opened before the click; run
+sequentially, ~30 s per cell):
+
+| Cell | Unfixed | Fixed |
+|---|---|---|
+| tray x hansenlaw | pass | pass |
+| tray x basex | pass | pass |
+| fullscreen + tray x rbasex | pass | pass |
+
+Causality NOT proven on the synthetic data: the unfixed build completed
+every cell (exit 0, "DONE", no new 0xc0000005 application event), so on
+this data the busy-pump guard remains hardening. The synthetic busy windows
+were short (rBasex still busy at the 1 s tick, done by 2 s; the other cells
+finished before the 1 s tick) while the real crashes involved longer
+basis-generation busy periods, real data and DPI scaling. The fix stands
+(the documented crash class is real and observed twice in the user env) but
+the user must re-verify their real workflow on the fixed build.
+
+Regression coverage: `check_recon_busy_popup_safety` now additionally
+asserts the busy guard WITHOUT any popup — while `_recon_busy` is True a
+sentinel `QTimer.singleShot(0, ...)` stays pending across one
+`_pump_progress_events_if_safe()` call, and after the run finishes (busy
+False, no popup) the pump dispatches a new sentinel again (guard scoped to
+the run). All suites green in both envs; goldens byte-unchanged.
+
+Dual-env testing requirement: UI crash classes are Qt-version-sensitive —
+before releases run `tests/test_smoke.py` in the oldest supported env (the
+user's Qt 6.7.3) AND in the dev env (Qt 6.11.1); see tests/README.md,
+"Testing in multiple environments".
