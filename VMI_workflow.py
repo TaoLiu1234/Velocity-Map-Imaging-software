@@ -958,6 +958,15 @@ class MainWindow(QMainWindow):
         self.bg_scatter_i = None
         self.bg_theta_centered = None
         self.bg_theta_rbasex = None
+        self.bg_ion_rotation = None
+        self.bg_rbasex_range = None
+        self._ion_rotation_blit_region = None
+        # Animated-artist blit sessions for overlay drags (16f): while a drag
+        # session is active its overlay artists are excluded from every normal
+        # draw, so captured backgrounds can never contain baked-in overlays.
+        self._overlay_blit_sessions: dict[str, bool] = {}
+        self._overlay_blit_downgraded: set[str] = set()
+        self._overlay_blit_downgrade_logged = False
         self.ion_rotation_matrix = np.eye(2, dtype=np.float64)
         self.ion_rotation_angle_deg = 0.0
         self.ion_auto_angle_deg = 0.0
@@ -3580,7 +3589,13 @@ class MainWindow(QMainWindow):
         )
 
     def _ensure_ion_tof_fit_preview_background(self) -> bool:
-        """Capture a clean ion TOF panel background for fast live preview."""
+        """Capture a clean ion TOF panel background for fast live preview.
+
+        The preview artists are animated, so a single-axes render excludes them
+        and the snapshot can never bake in a previously drawn preview box/anchor
+        (16f: this tightens the legacy copy-from-current-canvas capture, which
+        double-composited the stationary anchor).
+        """
         ax = getattr(self, "ax_ion_tof_xy", None)
         if ax is None:
             return False
@@ -3590,6 +3605,21 @@ class MainWindow(QMainWindow):
         if self.bg_ion_tof_xy_preview is not None and self._ion_tof_fit_preview_bg_key == bg_key:
             return True
         try:
+            renderer = self.canvas.get_renderer()
+            if renderer is not None:
+                hidden = []
+                for txt in self._axes_above_texts(ax, 7.5):
+                    hidden.append((txt, txt.get_visible()))
+                    txt.set_visible(False)
+                try:
+                    ax.draw(renderer)  # animated preview artists are skipped: clean
+                    self.bg_ion_tof_xy_preview = self.canvas.copy_from_bbox(ax.bbox)
+                finally:
+                    for txt, visible in hidden:
+                        with contextlib.suppress(Exception):
+                            txt.set_visible(visible)
+                self._ion_tof_fit_preview_bg_key = bg_key
+                return self.bg_ion_tof_xy_preview is not None
             self.bg_ion_tof_xy_preview = self.canvas.copy_from_bbox(ax.bbox)
             self._ion_tof_fit_preview_bg_key = bg_key
             return True
@@ -3608,6 +3638,9 @@ class MainWindow(QMainWindow):
                 ax.draw_artist(self.ion_tof_fit_preview_patch)
             if self.ion_tof_fit_preview_anchor_artist is not None and self.ion_tof_fit_preview_anchor_artist.axes is ax:
                 ax.draw_artist(self.ion_tof_fit_preview_anchor_artist)
+            # Keep above-layer artists (buttons, annotations) on top.
+            for txt in self._axes_above_texts(ax, 7.5):
+                ax.draw_artist(txt)
             self._mark_plot_scroll_preview_cache_dirty(refresh_soon=True)
             self._present_canvas_now(request_idle_draw=False)
             return True
@@ -7254,7 +7287,9 @@ class MainWindow(QMainWindow):
         r_min, r_max = self.pending_polar_roi_band
         self.pending_polar_roi_band = None
         self._set_polar_roi_inputs(r_min, r_max)
-        self._update_circle_overlay_only()
+        # Axes limits/aspect cannot change during the band drag, so the fast
+        # blit path is valid mid-drag; the release path re-renders normally.
+        self._update_circle_overlay_only(enforce_axis=False, fast_drag=True)
 
     def _on_ion_scatter_scale_changed(self, _index: int) -> None:
         """Re-render ion scatter when color scale mode changes."""
@@ -8908,12 +8943,22 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _use_safe_ion_overlay_redraw() -> bool:
-        """Return whether ion overlay should avoid the fast blit path for stability."""
+        """Return whether the ion overlay refresh should use the stable full redraw.
+
+        This now gates only the non-drag (typing / post-refresh) path; the
+        per-frame drag path uses the animated-artist blit sessions below on
+        every platform (16f).
+        """
         return bool(sys.platform.startswith("win"))
 
     @staticmethod
     def _use_safe_circle_overlay_redraw() -> bool:
-        """Return whether electron overlay should avoid post-refresh blitting for stability."""
+        """Return whether the electron overlay refresh should use the stable full redraw.
+
+        This now gates only the non-drag (typing / post-refresh) path; the
+        per-frame drag path uses the animated-artist blit sessions below on
+        every platform (16f).
+        """
         return bool(sys.platform.startswith("win"))
 
     def _prepare_ion_overlay_for_safe_redraw(self) -> bool:
@@ -8924,28 +8969,395 @@ class MainWindow(QMainWindow):
                 self._draw_ion_overlay()
         return safe_mode
 
-    def _capture_ion_overlay_background(self) -> bool:
-        """Capture a clean ion-scatter background for fast Windows-safe drag preview."""
-        if self.ax_scatter_i is None:
-            return False
-        artists = []
-        for artist in (self.ion_filter_patch, self.ion_filter_center_marker):
+    # ------------------------------------------------------------------
+    # Animated-artist blit sessions for drag previews (16f)
+    # ------------------------------------------------------------------
+    # Mirrors the working ion-TOF fit-preview discipline: while a drag is
+    # active its overlay artists carry set_animated(True), so they are skipped
+    # by every normal draw. Backgrounds captured during the session can
+    # therefore never contain baked-in overlay pixels (the historical ghost
+    # ring); each frame only restore_region(bg) + draw_artist(overlays) +
+    # blit(ax.bbox). Any failure downgrades that session to the proven
+    # whole-axes _draw_axes_immediate path after logging once.
+    _OVERLAY_BLIT_ATTRS_BY_KEY = {
+        "electron": (
+            "inner_ring_patch",
+            "outer_ring_patch",
+            "circle_center_marker",
+            "polar_roi_span_patch",
+            "polar_roi_line_lo",
+            "polar_roi_line_hi",
+        ),
+        "ion": (
+            "ion_filter_patch",
+            "ion_filter_center_marker",
+        ),
+    }
+    _ION_ROTATION_PREVIEW_TITLE_SUFFIX_MAX = " [preview rot=-888.8 deg]"
+
+    def _overlay_blit_axes_attrs(self, axis_key: str):
+        """Return (axes, overlay attribute names) for one blit session key."""
+        if axis_key == "rotation":
+            return self.ax_scatter_i, ("ion_main_axis_line",)
+        if axis_key == "electron":
+            return self.ax_scatter_e, self._OVERLAY_BLIT_ATTRS_BY_KEY["electron"]
+        if axis_key == "ion":
+            return self.ax_scatter_i, self._OVERLAY_BLIT_ATTRS_BY_KEY["ion"]
+        return None, ()
+
+    def _overlay_blit_session_active(self, axis_key: str) -> bool:
+        """Return whether a drag blit session is active for this overlay family."""
+        return bool(getattr(self, "_overlay_blit_sessions", {}).get(axis_key))
+
+    def _overlay_blit_downgrade(self, axis_key: str) -> None:
+        """Permanently fall back to the safe redraw path for this drag session."""
+        downgraded = getattr(self, "_overlay_blit_downgraded", None)
+        if downgraded is None or axis_key in downgraded:
+            return
+        downgraded.add(axis_key)
+        if not getattr(self, "_overlay_blit_downgrade_logged", False):
+            self._overlay_blit_downgrade_logged = True
+            print(
+                f"overlay drag blit unavailable ({axis_key}); "
+                "using safe whole-axes redraw for this session",
+                flush=True,
+            )
+
+    def _begin_scatter_overlay_blit_session(self, axis_key: str) -> None:
+        """Start one overlay drag session: animate its artists, drop stale bgs."""
+        sessions = getattr(self, "_overlay_blit_sessions", None)
+        if not isinstance(sessions, dict):
+            sessions = {}
+            self._overlay_blit_sessions = sessions
+        if not isinstance(getattr(self, "_overlay_blit_downgraded", None), set):
+            self._overlay_blit_downgraded = set()
+        sessions[axis_key] = True
+        self._overlay_blit_downgraded.discard(axis_key)
+        _ax, attrs = self._overlay_blit_axes_attrs(axis_key)
+        for name in attrs:
+            artist = getattr(self, name, None)
             if artist is not None:
-                try:
-                    artists.append((artist, bool(artist.get_visible())))
-                    artist.set_visible(False)
-                except Exception:
-                    pass
-        self._draw_canvas_without_overlay_draw_event_sync()
-        ok = self._capture_scatter_blit_backgrounds(electron=False, ion=True)
-        for artist, visible in artists:
-            with contextlib.suppress(Exception):
-                artist.set_visible(bool(visible))
-        if not ok:
+                with contextlib.suppress(Exception):
+                    artist.set_animated(True)
+        # Cached backgrounds predate the animated state and may contain
+        # baked-in overlay pixels; recapture cleanly on the first frame.
+        if axis_key == "electron":
+            self.bg_scatter_e = None
+        elif axis_key == "ion":
             self.bg_scatter_i = None
+
+    def _begin_ion_rotation_blit_session(self) -> None:
+        """Start the ion direction-line rotation drag session (title blit incl.)."""
+        if not isinstance(getattr(self, "_overlay_blit_downgraded", None), set):
+            self._overlay_blit_downgraded = set()
+        self._overlay_blit_downgraded.discard("rotation")
+        if self.ion_main_axis_line is not None:
+            with contextlib.suppress(Exception):
+                self.ion_main_axis_line.set_animated(True)
+        self.bg_ion_rotation = None
+        self._ion_rotation_blit_region = None
+
+    def _end_scatter_overlay_blit_sessions(self) -> None:
+        """Close any active drag sessions: de-animate artists, release backgrounds."""
+        sessions = getattr(self, "_overlay_blit_sessions", None)
+        active = bool(sessions)
+        if isinstance(sessions, dict):
+            for axis_key in list(sessions):
+                _ax, attrs = self._overlay_blit_axes_attrs(axis_key)
+                for name in attrs:
+                    artist = getattr(self, name, None)
+                    if artist is not None:
+                        with contextlib.suppress(Exception):
+                            artist.set_animated(False)
+            sessions.clear()
+        if self.ion_main_axis_line is not None:
+            with contextlib.suppress(Exception):
+                if self.ion_main_axis_line.get_animated():
+                    self.ion_main_axis_line.set_animated(False)
+                    active = True
+        if self.bg_ion_rotation is not None or self._ion_rotation_blit_region is not None:
+            active = True
+        self.bg_ion_rotation = None
+        self._ion_rotation_blit_region = None
+        self.bg_rbasex_range = None
+        if isinstance(getattr(self, "_overlay_blit_downgraded", None), set):
+            self._overlay_blit_downgraded.clear()
+        if active:
+            # Backgrounds are overlay-free by construction, but the de-animated
+            # artists must be baked into the next stable render, and any refresh
+            # that follows re-captures anyway.
+            self._invalidate_blit_background()
+
+    def _capture_scatter_overlay_blit_background(self, axis_key: str):
+        """Render one scatter axes without its (animated) overlays and snapshot it.
+
+        The single-axes render is the same primitive the whole-axes safe path
+        uses per frame, but it is paid once per drag instead of per frame.
+        Artists layered above the overlays (panel buttons, annotations) are
+        hidden for the snapshot and re-drawn by the present, so the captured
+        region contains exactly the below-overlay content. Returns the captured
+        background region or None.
+        """
+        ax = self.ax_scatter_e if axis_key == "electron" else self.ax_scatter_i
+        if ax is None:
+            return None
+        hidden = []
+        try:
+            renderer = self.canvas.get_renderer()
+            if renderer is None:
+                return None
+            max_z = 0.0
+            for name in self._OVERLAY_BLIT_ATTRS_BY_KEY.get(axis_key, ()):
+                artist = getattr(self, name, None)
+                if artist is not None:
+                    artist.set_animated(True)
+                    with contextlib.suppress(Exception):
+                        max_z = max(max_z, float(artist.get_zorder()))
+            for txt in self._axes_above_texts(ax, max_z):
+                hidden.append((txt, txt.get_visible()))
+                txt.set_visible(False)
+            ax.draw(renderer)  # animated overlay artists are skipped: clean pixels
+            return self.canvas.copy_from_bbox(ax.bbox)
+        except Exception:
+            return None
+        finally:
+            for txt, visible in hidden:
+                with contextlib.suppress(Exception):
+                    txt.set_visible(visible)
+
+    def _present_scatter_overlay_blit(self, axis_key: str) -> bool:
+        """Blit-present one scatter overlay family from its clean cached background."""
+        if axis_key in getattr(self, "_overlay_blit_downgraded", set()):
             return False
-        self._mark_plot_scroll_preview_cache_dirty(refresh_soon=True)
-        return True
+        sessions = getattr(self, "_overlay_blit_sessions", {})
+        if not sessions.get(axis_key):
+            return False
+        ax, attrs = self._overlay_blit_axes_attrs(axis_key)
+        if ax is None:
+            return False
+        if bool(getattr(self, "_plot_scroll_preview_active", False)):
+            self._end_plot_scroll_burst()
+        bg = self.bg_scatter_e if axis_key == "electron" else self.bg_scatter_i
+        try:
+            if bg is None:
+                bg = self._capture_scatter_overlay_blit_background(axis_key)
+                if bg is None:
+                    self._overlay_blit_downgrade(axis_key)
+                    return False
+                if axis_key == "electron":
+                    self.bg_scatter_e = bg
+                else:
+                    self.bg_scatter_i = bg
+            self.canvas.restore_region(bg)
+            max_z = 0.0
+            ordered = sorted(
+                (getattr(self, name) for name in attrs if getattr(self, name) is not None),
+                key=lambda artist: artist.get_zorder(),
+            )
+            for artist in ordered:
+                if artist.axes is ax:
+                    ax.draw_artist(artist)
+                    with contextlib.suppress(Exception):
+                        max_z = max(max_z, float(artist.get_zorder()))
+            # Keep above-layer artists (buttons, annotations) on top, matching
+            # the normal draw order.
+            for txt in self._axes_above_texts(ax, max_z):
+                ax.draw_artist(txt)
+            self.canvas.blit(ax.bbox)
+            self._mark_plot_scroll_preview_cache_dirty(refresh_soon=False)
+            return True
+        except Exception:
+            if axis_key == "electron":
+                self.bg_scatter_e = None
+            else:
+                self.bg_scatter_i = None
+            self._overlay_blit_downgrade(axis_key)
+            return False
+
+    def _capture_ion_rotation_blit_background(self) -> bool:
+        """Snapshot the ion axes region covering base title and any preview suffix."""
+        ax = self.ax_scatter_i
+        if ax is None:
+            return False
+        try:
+            renderer = self.canvas.get_renderer()
+            if renderer is None:
+                return False
+            base_title = ax.get_title()
+            extents = []
+            try:
+                ax.set_title(base_title)
+                extents.append(ax.title.get_window_extent(renderer))
+                ax.set_title(base_title + self._ION_ROTATION_PREVIEW_TITLE_SUFFIX_MAX)
+                extents.append(ax.title.get_window_extent(renderer))
+            finally:
+                ax.set_title(base_title)
+            x0 = float(ax.bbox.x0)
+            y0 = float(ax.bbox.y0)
+            x1 = float(ax.bbox.x1)
+            y1 = float(ax.bbox.y1)
+            for ext in extents:
+                x0 = min(x0, float(ext.x0))
+                y0 = min(y0, float(ext.y0))
+                x1 = max(x1, float(ext.x1))
+                y1 = max(y1, float(ext.y1))
+            x0 -= 2.0
+            y0 -= 2.0
+            x1 += 2.0
+            y1 += 2.0
+            fig_bbox = getattr(self.figure, "bbox", None)
+            if fig_bbox is not None:
+                x0 = max(x0, float(fig_bbox.x0))
+                y0 = max(y0, float(fig_bbox.y0))
+                x1 = min(x1, float(fig_bbox.x1))
+                y1 = min(y1, float(fig_bbox.y1))
+            if x1 <= x0 or y1 <= y0:
+                return False
+            region = matplotlib.transforms.Bbox.from_extents(x0, y0, x1, y1)
+            hidden = []
+            for txt in self._axes_above_texts(ax, 6.0):
+                hidden.append((txt, txt.get_visible()))
+                txt.set_visible(False)
+            # The filter rectangle/marker sit above the direction line in the
+            # normal draw. Hide them for the snapshot (their antialiased edges
+            # must not be baked in twice) and re-draw them in the present.
+            for name in ("ion_filter_patch", "ion_filter_center_marker"):
+                artist = getattr(self, name, None)
+                if artist is not None and artist.axes is ax:
+                    hidden.append((artist, artist.get_visible()))
+                    artist.set_visible(False)
+            try:
+                ax.draw(renderer)  # animated direction line is skipped: clean base
+                self.bg_ion_rotation = self.canvas.copy_from_bbox(region)
+            finally:
+                for txt, visible in hidden:
+                    with contextlib.suppress(Exception):
+                        txt.set_visible(visible)
+            self._ion_rotation_blit_region = region
+            return self.bg_ion_rotation is not None
+        except Exception:
+            self.bg_ion_rotation = None
+            self._ion_rotation_blit_region = None
+            return False
+
+    def _present_ion_rotation_blit(self) -> bool:
+        """Blit-present the rotated direction line plus preview title suffix."""
+        if "rotation" in getattr(self, "_overlay_blit_downgraded", set()):
+            return False
+        if not self.dragging_ion_rotation:
+            return False
+        ax = self.ax_scatter_i
+        if ax is None:
+            return False
+        try:
+            if self.bg_ion_rotation is None or self._ion_rotation_blit_region is None:
+                if not self._capture_ion_rotation_blit_background():
+                    self._overlay_blit_downgrade("rotation")
+                    return False
+            self.canvas.restore_region(self.bg_ion_rotation)
+            if self.ion_main_axis_line is not None and self.ion_main_axis_line.axes is ax:
+                ax.draw_artist(self.ion_main_axis_line)
+            # The ion filter rectangle/marker sit above the direction line in the
+            # normal draw; re-draw them so the overlap order stays exact.
+            for name in ("ion_filter_patch", "ion_filter_center_marker"):
+                artist = getattr(self, name, None)
+                if artist is not None and artist.axes is ax:
+                    ax.draw_artist(artist)
+            # Keep above-layer artists (buttons, annotations) on top.
+            for txt in self._axes_above_texts(ax, 6.0):
+                ax.draw_artist(txt)
+            ax.draw_artist(ax.title)
+            self.canvas.blit(self._ion_rotation_blit_region)
+            self._mark_plot_scroll_cache_dirty_for_drag()
+            return True
+        except Exception:
+            self.bg_ion_rotation = None
+            self._ion_rotation_blit_region = None
+            self._overlay_blit_downgrade("rotation")
+            return False
+
+    def _present_rbasex_range_blit(self, ax) -> bool:
+        """Blit-present the rBasex radial-profile range span + stats text."""
+        if "rbasex_range" in getattr(self, "_overlay_blit_downgraded", set()):
+            return False
+        if not getattr(self, "dragging_rbasex_profile_range", False):
+            return False
+        if ax is None:
+            return False
+        overlay_gids = {"rbasex_profile_range_span", "rbasex_profile_range_text"}
+        overlays = [
+            artist
+            for artist in list(ax.patches) + list(ax.texts)
+            if getattr(artist, "get_gid", lambda: None)() in overlay_gids
+        ]
+        if not overlays:
+            return False
+        try:
+            for artist in overlays:
+                artist.set_animated(True)
+            if self.bg_rbasex_range is None:
+                renderer = self.canvas.get_renderer()
+                if renderer is None:
+                    self._overlay_blit_downgrade("rbasex_range")
+                    return False
+                max_z = max(float(artist.get_zorder()) for artist in overlays)
+                hidden = []
+                for txt in self._axes_above_texts(ax, max_z):
+                    hidden.append((txt, txt.get_visible()))
+                    txt.set_visible(False)
+                try:
+                    ax.draw(renderer)  # animated span/text are skipped: clean base
+                    self.bg_rbasex_range = self.canvas.copy_from_bbox(ax.bbox)
+                finally:
+                    for txt, visible in hidden:
+                        with contextlib.suppress(Exception):
+                            txt.set_visible(visible)
+                if self.bg_rbasex_range is None:
+                    self._overlay_blit_downgrade("rbasex_range")
+                    return False
+            self.canvas.restore_region(self.bg_rbasex_range)
+            # Z-order sorted like the normal draw: the span (z 3.8) composites
+            # over the stats text (z 3) exactly as Axes.draw would.
+            max_z = 0.0
+            for artist in sorted(overlays, key=lambda a: a.get_zorder()):
+                if artist.axes is ax:
+                    ax.draw_artist(artist)
+                    with contextlib.suppress(Exception):
+                        max_z = max(max_z, float(artist.get_zorder()))
+            for txt in self._axes_above_texts(ax, max_z):
+                ax.draw_artist(txt)
+            self.canvas.blit(ax.bbox)
+            self._mark_plot_scroll_cache_dirty_for_drag()
+            return True
+        except Exception:
+            self.bg_rbasex_range = None
+            self._overlay_blit_downgrade("rbasex_range")
+            return False
+
+    def _mark_plot_scroll_cache_dirty_for_drag(self) -> None:
+        """Mark the scroll preview stale during drags without scheduling recapture."""
+        self._plot_scroll_preview_pixmap = QPixmap()
+
+    @staticmethod
+    def _axes_above_texts(ax, min_zorder: float) -> list:
+        """Return visible, non-animated ax.texts layered at/above ``min_zorder``.
+
+        These are the per-panel ``[raw]/[copy]`` buttons (zorder 50) and any
+        in-axes annotations. During a blit present they must be re-drawn after
+        the overlay artists so the layering matches the normal draw; during the
+        background capture they must be hidden so the snapshot never contains
+        them (otherwise the present would double-composite their translucent
+        boxes). ``>=`` matches the stable z-order sort: an equal-zorder text is
+        added after the overlay artists and therefore renders on top.
+        """
+        result = []
+        for txt in getattr(ax, "texts", []):
+            try:
+                if txt.get_visible() and not txt.get_animated() and txt.get_zorder() >= min_zorder:
+                    result.append(txt)
+            except Exception:
+                continue
+        return result
 
     # ------------------------------------------------------------------
     # Overlay artist lifecycle and blitting
@@ -8956,6 +9368,9 @@ class MainWindow(QMainWindow):
         self.bg_scatter_i = None
         self.bg_theta_centered = None
         self.bg_theta_rbasex = None
+        self.bg_ion_rotation = None
+        self.bg_rbasex_range = None
+        self._ion_rotation_blit_region = None
 
     def _dedupe_overlay_artists(self) -> None:
         """Remove stale duplicate overlay artists from scatter axes."""
@@ -9114,15 +9529,21 @@ class MainWindow(QMainWindow):
             self._blit_theta_guides("rbasex")
 
     def _capture_theta_line_blit_background(self) -> None:
-        """Capture backgrounds for centered/rBasex theta-guide blitting.
+        """Capture line-free backgrounds for centered/rBasex theta-guide blitting.
 
-        Fast path: theta guide lines are created with ``animated=True``, so they
-        are excluded from the normal full-canvas draw. In that common case, we can
-        copy the current canvas regions directly without forcing an extra redraw.
-
-        Fallback: if a guide line is ever non-animated, temporarily hide guides and
-        draw once to guarantee line-free backgrounds before copying.
+        The two image panels are re-rendered without their (animated) guide
+        lines and the axes regions are snapshotted from that clean render.
+        Copying the shared renderer buffer instead would bake in whatever the
+        previous ``_blit_theta_guides`` present had drawn on top (a ghost guide
+        line at a stale angle in every subsequent blit), and the legacy
+        hide-then-``canvas.draw()`` fallback recursed through the draw-event
+        hook. A single-axes render is the same clean primitive the scatter
+        overlay sessions use.
         """
+        ax_centered = getattr(self, "ax_centered_bin", None)
+        ax_rbasex = getattr(self, "ax_reserved_top", None)
+        if ax_centered is None or ax_rbasex is None:
+            return
         guide_artists = (
             self.theta_profile_line_main,
             self.theta_profile_line_lo,
@@ -9131,49 +9552,40 @@ class MainWindow(QMainWindow):
             self.rbasex_profile_line_lo,
             self.rbasex_profile_line_hi,
         )
-        need_fallback = False
-        for artist in guide_artists:
-            if artist is None:
-                continue
-            with contextlib.suppress(Exception):
-                if not bool(artist.get_animated()):
-                    need_fallback = True
-                    break
-
-        if not need_fallback:
-            try:
-                self.bg_theta_centered = self.canvas.copy_from_bbox(self.ax_centered_bin.bbox)
-                self.bg_theta_rbasex = self.canvas.copy_from_bbox(self.ax_reserved_top.bbox)
-            except Exception:
-                self.bg_theta_centered = None
-                self.bg_theta_rbasex = None
-            return
-
         to_hide = []
         for artist in guide_artists:
             if artist is None:
                 continue
             with contextlib.suppress(Exception):
-                to_hide.append((artist, artist.get_visible()))
-                artist.set_visible(False)
-
-        if to_hide:
-            with contextlib.suppress(Exception):
-                self.canvas.draw()
+                if not bool(artist.get_animated()):
+                    to_hide.append((artist, artist.get_visible()))
+                    artist.set_visible(False)
         try:
-            self.bg_theta_centered = self.canvas.copy_from_bbox(self.ax_centered_bin.bbox)
-            self.bg_theta_rbasex = self.canvas.copy_from_bbox(self.ax_reserved_top.bbox)
+            renderer = self.canvas.get_renderer()
+            if renderer is None:
+                return
+            hidden_texts = []
+            for panel_ax in (ax_centered, ax_rbasex):
+                hidden_texts.extend((txt, txt.get_visible()) for txt in self._axes_above_texts(panel_ax, 2.5))
+            for txt, visible in hidden_texts:
+                with contextlib.suppress(Exception):
+                    txt.set_visible(False)
+            try:
+                ax_centered.draw(renderer)
+                ax_rbasex.draw(renderer)
+                self.bg_theta_centered = self.canvas.copy_from_bbox(ax_centered.bbox)
+                self.bg_theta_rbasex = self.canvas.copy_from_bbox(ax_rbasex.bbox)
+            finally:
+                for txt, visible in hidden_texts:
+                    with contextlib.suppress(Exception):
+                        txt.set_visible(visible)
         except Exception:
             self.bg_theta_centered = None
             self.bg_theta_rbasex = None
-
-        for artist, visible in to_hide:
-            with contextlib.suppress(Exception):
-                artist.set_visible(visible)
-
-        if to_hide:
-            self._blit_theta_guides("centered")
-            self._blit_theta_guides("rbasex")
+        finally:
+            for artist, visible in to_hide:
+                with contextlib.suppress(Exception):
+                    artist.set_visible(visible)
 
     def _blit_theta_guides(self, source: str) -> bool:
         """Blit theta guide lines on one image axis using cached background."""
@@ -9203,6 +9615,10 @@ class MainWindow(QMainWindow):
             ax.draw_artist(main)
             ax.draw_artist(lo)
             ax.draw_artist(hi)
+            # Keep above-layer artists (buttons, annotations) on top, matching
+            # the normal draw order.
+            for txt in self._axes_above_texts(ax, 2.5):
+                ax.draw_artist(txt)
             self.canvas.blit(ax.bbox)
             return True
         except Exception:
@@ -19317,6 +19733,7 @@ class MainWindow(QMainWindow):
             if rot is None:
                 return
             self._clear_ion_rotation_drag_preview_state(restore_preview=False)
+            self._begin_ion_rotation_blit_session()
             self.dragging_ion_rotation = True
             self.ion_rotation_drag_start_manual_deg = float(self.ion_user_rotation_deg)
             self.ion_rotation_drag_base_main_angle_deg = (
@@ -19545,6 +19962,9 @@ class MainWindow(QMainWindow):
             self.ion_drag_preview_timer.stop()
         if self.ion_rotation_preview_timer.isActive():
             self.ion_rotation_preview_timer.stop()
+        # Close all drag blit sessions before the commit paths run: every
+        # release-time redraw must render the (de-animated) overlays normally.
+        self._end_scatter_overlay_blit_sessions()
         if self.pending_theta_drag_xy is not None:
             self._flush_theta_drag_preview()
         if self.pending_polar_roi_band is not None:
@@ -19719,32 +20139,25 @@ class MainWindow(QMainWindow):
         self._update_ion_overlay_only(enforce_axis=False, fast_drag=True)
 
     def _ensure_scatter_overlay_backgrounds(self) -> None:
-        """Warm scatter backgrounds once so overlay drags can stay in the blit path.
+        """Start the animated-artist blit session for an overlay drag press (16f).
 
-        Previously this force-recaptured the electron/ion background on every
-        drag frame (a full-canvas draw, ~180 ms on large datasets). During an
-        active drag the underlying scatter plots do not change, so the cached
-        background stays valid: only recapture when it is missing. The data
-        refresh paths call ``_capture_scatter_blit_backgrounds`` themselves,
-        so the cache is always fresh the moment data changes.
+        Called from the press handlers once a drag gesture is armed. The session
+        marks the dragged axes' overlay artists animated (excluded from normal
+        draws), so the background captured on the first preview frame is clean.
+        The single-axes render is paid once per drag instead of per frame.
         """
-        if self._use_safe_ion_overlay_redraw():
-            # Only build the ion background once per drag; reuse it afterwards.
-            dragging_ion = bool(
-                self.dragging_ion_filter
-                or self.pending_drag_ion_center is not None
-                or self.preview_ion_center is not None
-            )
-            if dragging_ion and self.bg_scatter_i is None:
-                self._capture_ion_overlay_background()
-            return
-        if self.bg_scatter_e is None or self.bg_scatter_i is None:
-            self._rebuild_blit_background()
+        if self.dragging_circle or self.dragging_polar_roi:
+            self._begin_scatter_overlay_blit_session("electron")
+        if self.dragging_ion_filter:
+            self._begin_scatter_overlay_blit_session("ion")
 
     def _clear_ion_rotation_drag_preview_state(self, restore_preview: bool) -> None:
         """Clear temporary ion-rotation drag preview state, optionally restoring original artists."""
         if hasattr(self, "ion_rotation_preview_timer") and self.ion_rotation_preview_timer.isActive():
             self.ion_rotation_preview_timer.stop()
+        # The direction line must be de-animated before any restore draw, or the
+        # normal draw would skip it and leave the panel without its line (16f).
+        self._end_scatter_overlay_blit_sessions()
         if restore_preview:
             if self.ion_rotation_drag_base_line is not None and self.ion_main_axis_line is not None:
                 x0, y0 = self.ion_rotation_drag_base_line
@@ -19785,7 +20198,10 @@ class MainWindow(QMainWindow):
         if self.ion_rotation_drag_base_title:
             with contextlib.suppress(Exception):
                 self.ax_scatter_i.set_title(f"{self.ion_rotation_drag_base_title} [preview rot={preview_manual_deg:.1f} deg]")
-        # Local single-axis redraw: 60 fps while dragging the rotation line.
+        # Animated-artist blit of the direction line + preview title (16f);
+        # whole-axes local redraw remains as the catch-all fallback.
+        if self._present_ion_rotation_blit():
+            return
         self._draw_axes_immediate([self.ax_scatter_i], include_tight=False)
 
     def _flush_theta_drag_preview(self) -> None:
@@ -19817,6 +20233,8 @@ class MainWindow(QMainWindow):
         if ax is None:
             return
         self._draw_rbasex_profile_range_overlay(ax)
+        if self._present_rbasex_range_blit(ax):
+            return
         with contextlib.suppress(Exception):
             self._draw_axes_immediate([ax], include_tight=False)
 
@@ -19876,7 +20294,7 @@ class MainWindow(QMainWindow):
         """Create/update polar ROI band overlay on the electron polar matrix."""
         if not self._electron_scatter_polar_mode_enabled() or self.ax_scatter_e is None:
             return
-        use_animated = not self._use_safe_circle_overlay_redraw()
+        use_animated = (not self._use_safe_circle_overlay_redraw()) or self._overlay_blit_session_active("electron")
         if self.pending_polar_roi_band is not None:
             r_min, r_max = self.pending_polar_roi_band
         else:
@@ -19984,7 +20402,7 @@ class MainWindow(QMainWindow):
         self._dedupe_overlay_artists()
         if self._electron_scatter_polar_mode_enabled():
             return
-        use_animated = not self._use_safe_circle_overlay_redraw()
+        use_animated = (not self._use_safe_circle_overlay_redraw()) or self._overlay_blit_session_active("electron")
         circle = self._parse_circle_params(show_dialog=False)
         if circle is None:
             return
@@ -20054,7 +20472,7 @@ class MainWindow(QMainWindow):
         enabled = self.ion_filter_enable_checkbox.isChecked()
         edgecolor = "#33c759" if enabled else "#9a9a9a"
         linestyle = "-" if enabled else ":"
-        use_animated = not self._use_safe_ion_overlay_redraw()
+        use_animated = (not self._use_safe_ion_overlay_redraw()) or self._overlay_blit_session_active("ion")
 
         if self.ion_filter_patch is None or self.ion_filter_patch.axes is not self.ax_scatter_i:
             self.ion_filter_patch = Rectangle(
@@ -20149,17 +20567,19 @@ class MainWindow(QMainWindow):
                     self.circle_center_marker.remove()
                 self.circle_center_marker = None
             self._draw_polar_roi_overlay()
+            if fast_drag and self._present_scatter_overlay_blit("electron"):
+                return
+            if fast_drag:
+                # Whole-axis local redraw: guarantees no stale overlay pixels
+                # (ghost circles) that restore_region+draw_artist can leave.
+                self._draw_axes_immediate([self.ax_scatter_e], include_tight=False)
+                return
+            self._end_scatter_overlay_blit_sessions()
             if safe_mode:
-                if fast_drag:
-                    # Whole-axis local redraw: guarantees no stale overlay pixels
-                    # (ghost circles) that restore_region+draw_artist can leave.
-                    self._draw_axes_immediate([self.ax_scatter_e], include_tight=False)
-                    return
-                else:
-                    self._draw_canvas_without_overlay_draw_event_sync()
-                    with contextlib.suppress(Exception):
-                        self._capture_blit_background_from_current_canvas()
-                    self._present_canvas_now(request_idle_draw=False)
+                self._draw_canvas_without_overlay_draw_event_sync()
+                with contextlib.suppress(Exception):
+                    self._capture_blit_background_from_current_canvas()
+                self._present_canvas_now(request_idle_draw=False)
                 return
             if self.bg_scatter_e is None or self.bg_scatter_i is None:
                 self._rebuild_blit_background()
@@ -20179,16 +20599,18 @@ class MainWindow(QMainWindow):
             with contextlib.suppress(Exception):
                 self.ax_scatter_e.apply_aspect()
         self._draw_circle_overlay()
+        if fast_drag and self._present_scatter_overlay_blit("electron"):
+            return
+        if fast_drag:
+            # Whole-axis local redraw (see note above): no ghost rings.
+            self._draw_axes_immediate([self.ax_scatter_e], include_tight=False)
+            return
+        self._end_scatter_overlay_blit_sessions()
         if safe_mode:
-            if fast_drag:
-                # Whole-axis local redraw (see note above): no ghost rings.
-                self._draw_axes_immediate([self.ax_scatter_e], include_tight=False)
-                return
-            else:
-                self._draw_canvas_without_overlay_draw_event_sync()
-                with contextlib.suppress(Exception):
-                    self._capture_blit_background_from_current_canvas()
-                self._present_canvas_now(request_idle_draw=False)
+            # Stable path (typing / post-refresh): redraw this axes only via the
+            # local primitive (full-canvas fallback inside); backgrounds are
+            # dropped so the next drag session recaptures them cleanly.
+            self._draw_axes_immediate([self.ax_scatter_e], include_tight=True)
             return
         if self.bg_scatter_e is None or self.bg_scatter_i is None:
             self._rebuild_blit_background()
@@ -20206,16 +20628,16 @@ class MainWindow(QMainWindow):
             with contextlib.suppress(Exception):
                 self.ax_scatter_i.apply_aspect()
         self._draw_ion_overlay()
+        if fast_drag and self._present_scatter_overlay_blit("ion"):
+            return
+        if fast_drag:
+            # Whole-axis local redraw: no residual filter box / center marker.
+            self._draw_axes_immediate([self.ax_scatter_i], include_tight=False)
+            return
+        self._end_scatter_overlay_blit_sessions()
         if self._use_safe_ion_overlay_redraw():
-            if fast_drag:
-                # Whole-axis local redraw: no residual filter box / center marker.
-                self._draw_axes_immediate([self.ax_scatter_i], include_tight=False)
-                return
-            else:
-                self._draw_canvas_without_overlay_draw_event_sync()
-                with contextlib.suppress(Exception):
-                    self._capture_blit_background_from_current_canvas()
-                self._present_canvas_now(request_idle_draw=False)
+            # Stable path (typing / post-refresh): see the electron twin above.
+            self._draw_axes_immediate([self.ax_scatter_i], include_tight=True)
             return
         if self.bg_scatter_e is None or self.bg_scatter_i is None:
             self._rebuild_blit_background()

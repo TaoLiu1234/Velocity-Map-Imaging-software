@@ -19,6 +19,7 @@ occurred (see "Regenerating goldens").
 | `sample_data/` | Generated triplet (`synth_ar100_vmi*_DAn.dat`) + `generation_stats.json` manifest |
 | `bench_core.py` | Plain A/B timing script for the center estimators (keeps the pre-hoist `quadrant_symmetry_center` as `_reference_*` copy) |
 | `bench_rbasex_basis.py` | Times `run_rbasex_reconstruction` in fresh processes to verify the persistent rBasex basis cache (`~/.cache/vmi_workflow/abel_basis`); run twice, second run must be faster with identical peaks |
+| `bench_drag.py` | Drag-interaction benchmark + ghost detector (2026-09-01): drives every draggable overlay through the real mouse-event handlers at the 16 ms timer cadence, reports per-frame ms, and compares the mid-drag canvas buffer against a forced clean reference render (axes interior must be pixel-exact; catches the historical ghost-ring bug). Run: `python tests/bench_drag.py [--frames 200] [--label AFTER]` (offscreen, ~2 min) |
 | `_capture_center_locks.py` | One-shot recipe that captured the hardcoded center-estimator lock values from the pre-refactor code |
 
 All three main app `.py` files are untouched by this suite.

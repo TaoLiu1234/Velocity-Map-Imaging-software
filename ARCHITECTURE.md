@@ -440,3 +440,84 @@ removed_total = Σsignal − Σdenoised
 - **测试基线**: `tests/test_core.py`(数值 goldens)+ `tests/test_smoke.py`(离屏端到端,含 §16a 回归扩展与 TOF 对齐/缓存失效检查);样例数据由 `tests/make_sample_data.py` 确定性再生;详见 `tests/README.md`。
 - **打包文件**: `README.md`(英文,含截图)、`LICENSE`(MIT)、`requirements.txt`(numpy>=2.2 / scipy>=1.16 / matplotlib>=3.10 / PySide6>=6.7 / pyabel>=0.9,可选 pyarrow>=15)、`docs/screenshot_main.png`(离屏驱动完整 7 步工作流后 `canvas.grab()` 抓取的真实主题画面)、`.gitignore`(排除 `*.dat`/`*.npz`/`workflow_outputs/`/`Refence data/`/`tests/sample_data/` 等)。
 - **真实数据终验**: ~700MB 参考三件套异步加载 → 1e+1i 配对 → 边缘拟合定心 → 环选分箱 → rBasex 完成 → 会话保存/恢复,全部通过(数字见发布记录,不入库)。
+
+### 16f. 拖拽交互 60Hz blit 路径(2026-09-01)
+
+> 用户报告 electron 圆环过滤圈与 ion 过滤框拖动"太卡"。基准脚本 `tests/bench_drag.py`
+> 证实:整轴重绘路径下 electron 圆环拖动 **91.8ms/帧(11fps)**、ion 滤框 **70.9ms/帧(14fps)**、
+> 极坐标 ROI **235ms/帧(4fps)**——每次预览帧都在重栅格化 2.5 万点散点。
+> 本节将所有拖拽 overlay 迁移到 ion-TOF fit 预览同款的
+> **动画艺术家 blit 协议**(`restore_region` + `draw_artist` + `blit`),
+> 交互语义、命中判定、松手最终状态**完全不变**;科学数值路径零改动(goldens 逐位锁定)。
+
+#### 16f.1 机制(复制 TOF-fit 预览的成功纪律,并修复其两个潜在缺陷)
+
+1. **会话化动画艺术家**(`_begin/_end_scatter_overlay_blit_sessions`,
+   `_begin_ion_rotation_blit_session`):拖拽按下时把被拖轴的 overlay 家族
+   `set_animated(True)`(electron: 内/外环+圆心标记或极坐标 ROI 三件套;
+   ion: 滤框+中心点;rotation: 方向线)。动画艺术家被一切常规绘制跳过,
+   因此**会话期间捕获的背景不可能烤入旧 overlay 像素**——这正是 §14.4 旧残影的根源。
+   松手(`_on_canvas_release`)最先结束全部会话(反动画、弃背景、清降级表),
+   所有松手提交路径照旧走常规刷新(`_draw_axes_immediate` / 全量刷新)。
+2. **干净背景单次捕获**(`_capture_scatter_overlay_blit_background`):
+   每次拖拽只做一次"单轴 `ax.draw(renderer)`(动画艺术家被跳过)+ `copy_from_bbox(ax.bbox)`",
+   把 70–250ms 的重栅格化从每帧成本变成每次拖拽一次性成本。
+   任何中途失效(`_invalidate_blit_background`)都会在下帧自动重捕获。
+3. **逐帧呈现**(`_present_scatter_overlay_blit` / `_present_ion_rotation_blit` /
+   `_present_rbasex_range_blit`):`restore_region(bg)` → 按 zorder `draw_artist` 各 overlay
+   → 重绘覆盖层之上的 `ax.texts`(`_axes_above_texts`,保持 `[raw]/[copy]` 按钮与
+   半透明标注的正确压序,且捕获时将其隐藏避免双重合成)→ `blit(ax.bbox)`。
+   rotation 呈现额外按序重绘滤框/中心点并 `draw_artist(ax.title)`
+   (预览角度后缀),捕获区域 = 轴域 ∪ 标题基线/最长后缀外接框。
+4. **逐帧 try/except 兜底**:任一 blit 异常 → 该交互会话永久降级回
+   `_draw_axes_immediate` 整轴重绘(§14.4 的安全路径,保持存活),仅向 stdout 记录一次。
+   非 fast(键入/刷新)路径仍走稳定路径;`_use_safe_*_redraw()` 现在只守门
+   非 fast 稳定路径,不再封锁拖拽 blit(全平台默认启用 blit 拖拽)。
+5. **键入去抖路径提速**(§14.4 后最快的稳定路径):`_update_circle_overlay_only` /
+   `_update_ion_overlay_only` 的非 fast 分支从"整幅 canvas.draw"改为
+   单轴 `_draw_axes_immediate(..., include_tight=True)`(其内部自带全幅兜底),
+   背景缓存直接弃用,下次拖拽会话重新捕获。
+6. **修复两个既有潜在缺陷**:
+   - `_ensure_ion_tof_fit_preview_background` 原来从共享缓冲直接拷贝,
+     会把上一帧静止锚点烤进背景(检测器捕获到 44px 双重合成);
+     现改为单轴重绘捕获。
+   - `_capture_theta_line_blit_background` 原"快路径"从共享缓冲拷贝——
+     缓冲里恒有上一次 present 画上的引导线(拖 θ 时出现旧角度残线),
+     而"慢路径"的 hide+`canvas.draw()` 会经 draw_event 钩子递归。
+     现改为两块图像面板各自单轴重绘捕获(无递归、保证无引导线)。
+
+#### 16f.2 幽灵检测器(`tests/bench_drag.py`,防回归警卫)
+
+基准复现 test_smoke 全流程(载入→配对→fine ROI→环选→rBasex,滤框先于环选启用、
+rBasex 最后运行,否则启用滤框会清空重建结果),随后对每个可拖 overlay 用真实
+`MouseEvent` 走 `_on_canvas_press/_move/_release`,按 16ms 节流节奏逐帧计时的
+`_flush_*`。每会话在远端终点执行**幽灵检测**:把画布 RGBA 缓冲(拖拽结果)与
+一次强制干净 `canvas.draw()` 参考渲染(临时反动画 overlay 使其入画)逐像素比较——
+轴域内部(收缩 5px)必须**逐位相等**(EXACT/EXACT-INTERIOR);边距文字的
+重合成差(旧路径固有的"文字逐帧加深"伪影)仅记录不计入。旧代码下该检测器
+确实捕获到 θ 引导线旧角残影(4×GHOST)与 TOF fit 锚点双重合成(2×GHOST),
+新代码全部 EXACT-INTERIOR——检测器对历史两类残影均有杀伤力。
+
+#### 16f.3 前后对比(200 帧×2 会话,offscreen,样例数据全流程)
+
+| 交互 | 前 mean/p95/max ms(帧率) | 后 mean/p95/max ms(帧率) |
+|---|---|---|
+| electron 圆环/圆心拖动 | 91.8 / 107.9 / 127.3(11fps) | **4.4 / 4.6 / 84.6(230fps)** |
+| ion 滤框/中心拖动 | 70.9 / 116.3 / 148.5(14fps) | **3.8 / 4.3 / 99.1(262fps)** |
+| θ 参考线拖动(centered) | 1.5 / 2.2 / 2.8(685fps)† | 5.0 / 6.7 / 9.1(202fps)† |
+| θ 参考线拖动(rbasex) | 1.7 / 2.3 / 2.7(608fps)† | 7.4 / 9.0 / 10.8(135fps)† |
+| rBasex 范围手柄拖动 | 40.7 / 48.4 / 53.4(25fps) | **6.9 / 8.9 / 10.2(145fps)** |
+| ion TOF fit 框拖动 | 3.3 / 4.6 / 6.7(301fps) | 5.2 / 6.7 / 30.0(191fps) |
+| ion TOF BG 范围悬停 | 0.7 / 1.0 / 1.3(1444fps) | 0.6 / 1.1 / 1.3(1622fps) |
+| ion 旋转预览拖动 | 91.6 / 111.0 / 147.7(11fps) | **5.2 / 5.9 / 85.6(192fps)** |
+| 极坐标 ROI 拖动 | 235.1 / 268.3 / 329.7(4fps) | **5.0 / 6.5 / 29.0(202fps)** |
+| ion 直方图 fine-ROI 提交(松手一次) | 943.2 | 516.0 |
+| 键入去抖 70ms:圆参数重绘 | 667.2(中位) | **80.6(中位)** |
+| 键入去抖 70ms:滤框参数重绘 | 675.0(中位) | **74.6(中位)** |
+
+† θ 引导线每帧额外重绘其上的半透明标注/按钮以保持精确压序,单帧成本 1.5→5–7.5ms,
+仍为 135–200fps;这是把既有"背景烤入旧引导线"残影修成逐位精确的代价。
+所有拖拽 p95 ≤ 9ms(≥110fps),达成 60Hz 目标;"ion 直方图峰值标记"为 Ctrl+点击设定、
+无拖拽;fine-ROI span 拖拽视觉由 matplotlib SpanSelector(useblit)内部处理,
+表中行为应用侧去抖提交成本。注:offscreen 测量不含 Qt 上屏开销
+(`blit` 的局部上屏在真机为小块纹理上传,远小于整幅重绘)。
