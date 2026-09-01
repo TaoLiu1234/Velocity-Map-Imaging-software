@@ -641,15 +641,15 @@ def check_startup_placeholders(app, MainWindow, windows: list) -> None:
     win.show()
     app.processEvents()
 
-    # Every subplot panel must carry a non-empty placeholder title, except the
-    # radial-profile panel, which (matching the old startup) uses a placeholder
-    # text instead of a title.
+    # Every subplot panel must carry a non-empty placeholder title. The
+    # rBasex radial-profile panel used to be the lone untitled panel; it now
+    # carries the "rBasex Recovered Profile" title like its siblings.
     for key, ax in win.subplot_axes.items():
         title = str(ax.get_title())
-        if key == "rbasex_radial_profile":
-            continue
         if not title.strip():
             raise _fail(step, f"subplot {key!r} has no placeholder title after construction")
+    if str(win.ax_rbasex_profile.get_title()) != "rBasex Recovered Profile":
+        raise _fail(step, f"rBasex radial-profile title is {win.ax_rbasex_profile.get_title()!r}")
 
     # In-axes placeholder hint texts must be present (placeholder artists).
     reserved_top_texts = {str(t.get_text()) for t in win.ax_reserved_top.texts}
@@ -1306,6 +1306,226 @@ def check_compare_toggle_blit_invalidation(app, MainWindow, windows: list) -> No
     print("Compare toggle blit invalidation OK: refused without recon, invalidated on both toggles")
 
 
+def _collect_ui_bbox_conflicts(win, caxes) -> list:
+    """Return human-readable bbox conflicts between colorbar axes and UI text/axes.
+
+    Collects (on the current renderer) every text bbox (tick labels, axis
+    labels, titles, in-axes annotations, figure texts) and every non-colorbar
+    axes bbox, then reports any >1px^2 overlap with a colorbar cax, between
+    the two caxes, or between one cax's own labels and the other cax / its
+    labels. Tick labels are re-fetched after the draw so extents are current.
+    """
+    import numpy as np
+
+    renderer = win.canvas.get_renderer()
+    cax_set = set(caxes)
+    text_boxes = []
+    axes_boxes = []
+
+    def add_text(name, artist):
+        try:
+            b = artist.get_window_extent(renderer=renderer)
+        except Exception:
+            return
+        if b is not None and b.width > 0 and b.height > 0:
+            text_boxes.append((name, b))
+
+    for ax in win.figure.axes:
+        if ax in cax_set:
+            continue
+        axes_boxes.append((f"axes:{id(ax):x}", ax.bbox))
+        for t in ax.texts:
+            add_text("ann", t)
+        for t in list(ax.get_xticklabels()) + list(ax.get_yticklabels()):
+            add_text("tick", t)
+        for lab in (ax.xaxis.label, ax.yaxis.label, ax.title):
+            add_text("label", lab)
+    for t in win.figure.texts:
+        add_text("figtext", t)
+
+    def overlap_area(b1, b2) -> float:
+        x0 = max(b1.x0, b2.x0)
+        x1 = min(b1.x1, b2.x1)
+        y0 = max(b1.y0, b2.y0)
+        y1 = min(b1.y1, b2.y1)
+        return max(0.0, x1 - x0) * max(0.0, y1 - y0)
+
+    conflicts = []
+    for i, cax in enumerate(caxes):
+        if cax is None:
+            continue
+        tag = f"cbar{i}"
+        for name, b in text_boxes:
+            if overlap_area(cax.bbox, b) > 1.0:
+                conflicts.append(f"{tag} cax overlaps {name} {b}")
+        for name, b in axes_boxes:
+            if overlap_area(cax.bbox, b) > 1.0:
+                conflicts.append(f"{tag} cax overlaps {name}")
+        own_boxes = []
+        for t in list(cax.get_xticklabels()) + list(cax.get_yticklabels()):
+            b = t.get_window_extent(renderer=renderer)
+            if b is not None and b.width > 0 and b.height > 0:
+                own_boxes.append(b)
+        for lab in (cax.xaxis.label, cax.yaxis.label):
+            b = lab.get_window_extent(renderer=renderer)
+            if b is not None and b.width > 0 and b.height > 0:
+                own_boxes.append(b)
+        for j, other in enumerate(caxes):
+            if j == i or other is None:
+                continue
+            for b in own_boxes:
+                if overlap_area(b, other.bbox) > 1.0:
+                    conflicts.append(f"{tag} label overlaps cbar{j} cax")
+    # cax-vs-cax
+    if len(caxes) == 2 and all(c is not None for c in caxes):
+        if overlap_area(caxes[0].bbox, caxes[1].bbox) > 1.0:
+            conflicts.append("colorbar caxes overlap each other")
+    return conflicts
+
+
+def check_compare_colorbar_no_overlap(app, MainWindow, windows: list) -> None:
+    """Compare-mode colorbars must never overlap text or neighbouring panels.
+
+    The left inter-panel gap is far too narrow for a readable colorbar with an
+    outward-facing label, so compare mode stacks BOTH colorbars in the right
+    gap (projection innermost, rBasex outermost). This check renders compare
+    mode offscreen and asserts zero >1px^2 bbox conflicts against every text
+    and every neighbouring axes.
+    """
+    step = "compare_colorbar_no_overlap"
+    win = _make_binned_window(step, app, MainWindow, windows)
+    win.run_reconstruction_now()
+    wait_until(
+        app,
+        lambda: getattr(win, "rbasex_recon_result", None) is not None and not getattr(win, "_recon_busy", False),
+        120.0,
+        step,
+        "rBasex reconstruction",
+    )
+    app.processEvents()
+    if not win._toggle_centered_right_half_compare() or not win.centered_right_half_compare_enabled:
+        raise _fail(step, "compare mode did not turn on")
+    win._refresh_reconstruction_panels_only()
+    app.processEvents()
+    win.canvas.draw()
+    app.processEvents()
+
+    cbar_main = getattr(win, "centered_bin_colorbar", None)
+    cbar_cmp = getattr(win, "centered_bin_compare_colorbar", None)
+    caxes = [
+        getattr(cbar_main, "ax", None) if cbar_main is not None else None,
+        getattr(cbar_cmp, "ax", None) if cbar_cmp is not None else None,
+    ]
+    if caxes[0] is None:
+        raise _fail(step, "projection colorbar missing in compare mode")
+    if caxes[1] is None:
+        raise _fail(step, "rBasex compare colorbar missing in compare mode")
+    conflicts = _collect_ui_bbox_conflicts(win, caxes)
+    if conflicts:
+        raise _fail(step, "colorbar bbox conflicts: " + "; ".join(conflicts[:6]))
+    # Compare OFF must also stay clean with the single right-side bar.
+    if not win._toggle_centered_right_half_compare():
+        raise _fail(step, "compare mode did not turn off")
+    win._refresh_reconstruction_panels_only()
+    app.processEvents()
+    win.canvas.draw()
+    app.processEvents()
+    single_cax = getattr(getattr(win, "centered_bin_colorbar", None), "ax", None)
+    if single_cax is None:
+        raise _fail(step, "projection colorbar missing after compare off")
+    conflicts = _collect_ui_bbox_conflicts(win, [single_cax])
+    if conflicts:
+        raise _fail(step, "single colorbar bbox conflicts: " + "; ".join(conflicts[:6]))
+    print("Compare colorbar overlap OK: both compare bars + single bar conflict-free")
+
+
+def check_window_mode_fit(app, MainWindow, windows: list) -> None:
+    """16k: the dashboard must stay fully visible at every window size.
+
+    The window minimum used to be pinned at ~2404 px by the file bar (the
+    trigger-mode combo's widest item text plus text-width labels), so on
+    full screen the central widget overflowed the screen and the right edge
+    (with the scrollbars) was clipped. The canvas was also never re-targeted
+    after construction, so small windows relied on scrollbars even when the
+    dashboard could have fit. This check locks the fix: shrinkable file bar,
+    debounced canvas re-fit on window resizes (not tray toggles), and visible
+    working scrollbars when the window is below the canvas floors.
+    """
+    step = "window_mode_fit"
+    win = _make_prepared_window(app, MainWindow, windows, fine_roi=False)
+
+    # 1. The window must be shrinkable well below the old 2404 px floor. The
+    #    remaining ~1534 px is the seven push-button text minimums plus the
+    #    compacted combo, which is the honest floor for a single-row file bar
+    #    (fits a 1536-logical-pixel screen, i.e. a 1920 display at 125%).
+    min_w = max(win.minimumSizeHint().width(), win.minimumSize().width())
+    if min_w > 1600:
+        raise _fail(step, f"window minimum width {min_w} is still above 1600 (file bar not compressible)")
+
+    # 2. Small window: canvas re-fit clamps to the viewport (floors apply),
+    #    and scrollbars remain visible with a real range while the viewport
+    #    is below the canvas minimum.
+    win.resize(1000, 640)
+    app.processEvents()
+    win._configure_plot_canvas_size(fit_to_viewport=True)
+    app.processEvents()
+    vp = win.plot_scroll.viewport()
+    cv = win.canvas
+    sb_v = win.plot_scroll.verticalScrollBar()
+    sb_h = win.plot_scroll.horizontalScrollBar()
+    if not (sb_v.isVisible() and sb_h.isVisible()):
+        raise _fail(step, "scrollbars must stay visible in scrollable states")
+    fits = cv.width() <= vp.width() + 2 and cv.height() <= vp.height() + 2
+    scrollbar_needed = sb_v.maximum() > 0 or sb_h.maximum() > 0
+    if not (fits or scrollbar_needed):
+        raise _fail(
+            step,
+            f"canvas {cv.width()}x{cv.height()} exceeds viewport {vp.width()}x{vp.height()} "
+            "but no scrollbar has a range",
+        )
+
+    # 3. The debounced resize hook actually re-fits (timer fires via real-time wait).
+    win.resize(1400, 900)
+    before = (win.canvas.width(), win.canvas.height())
+    wait_until(
+        app,
+        lambda: (win.canvas.width(), win.canvas.height()) != before
+        or win._canvas_refit_timer.isActive() is False,
+        3.0,
+        step,
+        "debounced canvas re-fit",
+    )
+    win._configure_plot_canvas_size(fit_to_viewport=True)
+    app.processEvents()
+    vp2 = win.plot_scroll.viewport()
+    if win.canvas.width() > vp2.width() + 2 and win.plot_scroll.horizontalScrollBar().maximum() == 0:
+        raise _fail(step, "canvas wider than viewport but the horizontal scrollbar has no range")
+
+    # 4. Settings-tray toggle must NOT re-target the canvas (14.4 stability).
+    win.resize(2380, 1000)
+    app.processEvents()
+    win._configure_plot_canvas_size(fit_to_viewport=True)
+    app.processEvents()
+    size_before = (win.canvas.width(), win.canvas.height())
+    if hasattr(win, "settings_toggle_btn"):
+        win.settings_toggle_btn.setChecked(True)
+        app.processEvents()
+        for _ in range(40):
+            app.processEvents()
+            time.sleep(0.01)
+        win.settings_toggle_btn.setChecked(False)
+        app.processEvents()
+        for _ in range(40):
+            app.processEvents()
+            time.sleep(0.01)
+    if (win.canvas.width(), win.canvas.height()) != size_before:
+        raise _fail(
+            step,
+            f"canvas re-targeted by a tray toggle: {size_before} -> {(win.canvas.width(), win.canvas.height())}",
+        )
+    print("Window mode fit OK: shrinkable window, viewport-fit canvas, stable under tray toggles")
+
+
 def run_regression_checks(app, MainWindow, windows: list) -> None:
     """Run the post-fix regression extensions (not part of the golden dict)."""
     check_startup_placeholders(app, MainWindow, windows)
@@ -1316,6 +1536,8 @@ def run_regression_checks(app, MainWindow, windows: list) -> None:
     check_ion_tof_xy_cache_invalidation(app, MainWindow, windows)
     check_theta_drag_blit_safety(app, MainWindow, windows)
     check_compare_toggle_blit_invalidation(app, MainWindow, windows)
+    check_compare_colorbar_no_overlap(app, MainWindow, windows)
+    check_window_mode_fit(app, MainWindow, windows)
 
 
 def main(argv: list[str] | None = None) -> int:

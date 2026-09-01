@@ -1137,12 +1137,20 @@ class MainWindow(QMainWindow):
         self.load_output_btn = QPushButton("Load Session Output")
         self.load_output_btn.clicked.connect(self.load_session_output)
         self.trigger_mode_label = QLabel("Data loading mode")
+        self.trigger_mode_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.trigger_mode_label.setMinimumWidth(0)
         self.trigger_mode_combo = QComboBox()
         self.trigger_mode_combo.addItem("1e + 1i coincidence (+1/+1)", "coincidence")
         self.trigger_mode_combo.addItem("1e + 2i coincidence (+1/+2, keep both ions)", "one_e_two_i")
         self.trigger_mode_combo.addItem("1e + 3i coincidence (+1/+3, keep three ions)", "one_e_three_i")
         self.trigger_mode_combo.addItem("All valid trigger rows (drop NaN)", "all_one")
         self.trigger_mode_combo.setCurrentIndex(self.trigger_mode_combo.findData("all_one"))
+        # The widest item text (726 px min hint) would otherwise force the whole
+        # file bar — and with it the main window minimum — wider than many
+        # screens, which clipped the dashboard off-screen in full screen.
+        self.trigger_mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.trigger_mode_combo.setMinimumContentsLength(14)
+        self.trigger_mode_combo.setMinimumWidth(0)
         self.trigger_mode_combo.setToolTip(
             "Choose how trigger rows are converted into electron/ion pairs:\n"
             "1) 1e + 1i coincidence: keep a row only when it is exactly +1/+1 vs the immediately previous row.\n"
@@ -1161,120 +1169,78 @@ class MainWindow(QMainWindow):
         # ------------------------------
         # Control panel sections
         # ------------------------------
-        control_group = QGroupBox("Controls")
-        control_grid = QGridLayout(control_group)
-        control_grid.setHorizontalSpacing(12)
-        control_grid.setVerticalSpacing(7)
 
         # Step 2 + Step 3 controls (coarse/fine TOF selection)
-        ion_hist_group = QGroupBox("Ion Histogram")
-        ion_hist_grid = QGridLayout(ion_hist_group)
-        ion_hist_grid.setHorizontalSpacing(10)
-        ion_hist_grid.addWidget(QLabel("Histogram bins"), 0, 0)
         self.bins_edit = QLineEdit("120")
         self.bins_edit.setMaximumWidth(100)
-        ion_hist_grid.addWidget(self.bins_edit, 0, 1)
         self.clear_ion_sel_btn = QPushButton("Clear Fine ROI")
         self.clear_ion_sel_btn.clicked.connect(self.clear_ion_selection)
-        ion_hist_grid.addWidget(self.clear_ion_sel_btn, 0, 2)
         self.clear_ion_hist_roi_btn = QPushButton("Reset Hist X ROI")
         self.clear_ion_hist_roi_btn.clicked.connect(self.clear_ion_hist_x_roi)
-        ion_hist_grid.addWidget(self.clear_ion_hist_roi_btn, 0, 3)
         self.selection_label = QLabel("Ion axis selection (fine): all | Histogram X ROI (coarse): full")
-        ion_hist_grid.addWidget(self.selection_label, 1, 0, 1, 4)
-        ion_hist_grid.addWidget(QLabel("Hist X ROI min"), 2, 0)
         self.ion_hist_xmin_edit = QLineEdit("")
         self.ion_hist_xmin_edit.setPlaceholderText("0")
         self.ion_hist_xmin_edit.setMaximumWidth(110)
         self.ion_hist_xmin_edit.returnPressed.connect(self.apply_ion_hist_x_roi_from_inputs)
-        ion_hist_grid.addWidget(self.ion_hist_xmin_edit, 2, 1)
-        ion_hist_grid.addWidget(QLabel("Hist X ROI max"), 2, 2)
         self.ion_hist_xmax_edit = QLineEdit("")
         self.ion_hist_xmax_edit.setPlaceholderText("auto")
         self.ion_hist_xmax_edit.setMaximumWidth(110)
         self.ion_hist_xmax_edit.returnPressed.connect(self.apply_ion_hist_x_roi_from_inputs)
-        ion_hist_grid.addWidget(self.ion_hist_xmax_edit, 2, 3)
-        ion_hist_grid.addWidget(QLabel("Fine ROI min"), 3, 0)
         self.ion_fine_xmin_edit = QLineEdit("")
         self.ion_fine_xmin_edit.setPlaceholderText("all")
         self.ion_fine_xmin_edit.setMaximumWidth(110)
         self.ion_fine_xmin_edit.returnPressed.connect(self.apply_ion_fine_roi_from_inputs)
-        ion_hist_grid.addWidget(self.ion_fine_xmin_edit, 3, 1)
-        ion_hist_grid.addWidget(QLabel("Fine ROI max"), 3, 2)
         self.ion_fine_xmax_edit = QLineEdit("")
         self.ion_fine_xmax_edit.setPlaceholderText("all")
         self.ion_fine_xmax_edit.setMaximumWidth(110)
         self.ion_fine_xmax_edit.returnPressed.connect(self.apply_ion_fine_roi_from_inputs)
-        ion_hist_grid.addWidget(self.ion_fine_xmax_edit, 3, 3)
         self.apply_ion_hist_roi_btn = QPushButton("Update Hist ROI")
         self.apply_ion_hist_roi_btn.clicked.connect(self.apply_ion_hist_x_roi_from_inputs)
-        ion_hist_grid.addWidget(self.apply_ion_hist_roi_btn, 4, 0, 1, 2)
         self.apply_ion_fine_roi_btn = QPushButton("Update Fine ROI")
         self.apply_ion_fine_roi_btn.clicked.connect(self.apply_ion_fine_roi_from_inputs)
-        ion_hist_grid.addWidget(self.apply_ion_fine_roi_btn, 4, 2, 1, 2)
-        ion_hist_grid.addWidget(QLabel("events.h5 export (optional)"), 5, 0, 1, 3)
         self.export_pair_debug_btn = QPushButton("Export events.h5")
         self.export_pair_debug_btn.setToolTip(
             "Export the current coincidence events as an HDF5 file with key 'events' and columns xe, ye, xi, yi, tof."
         )
         self.export_pair_debug_btn.setMaximumWidth(150)
         self.export_pair_debug_btn.clicked.connect(self.export_pair_debug_txt)
-        ion_hist_grid.addWidget(self.export_pair_debug_btn, 5, 3)
-        ion_hist_grid.addWidget(QLabel("X ticks"), 6, 0)
         self.ion_hist_xtick_count_edit = QLineEdit("8")
         self.ion_hist_xtick_count_edit.setMaximumWidth(110)
         self.ion_hist_xtick_count_edit.returnPressed.connect(self._on_ion_hist_xtick_count_changed)
-        ion_hist_grid.addWidget(self.ion_hist_xtick_count_edit, 6, 1)
         self.ion_mq_axis_checkbox = QCheckBox("Histogram X axis = m/q (use ref below)")
         self.ion_mq_axis_checkbox.toggled.connect(self._on_ion_axis_controls_changed)
-        ion_hist_grid.addWidget(self.ion_mq_axis_checkbox, 6, 2, 1, 2)
-        ion_hist_grid.addWidget(QLabel("Ref m/q"), 7, 0)
         self.ion_mq_ref_edit = QLineEdit("")
         self.ion_mq_ref_edit.setPlaceholderText("e.g. 40")
         self.ion_mq_ref_edit.setMaximumWidth(110)
         self.ion_mq_ref_edit.returnPressed.connect(self._on_ion_axis_controls_changed)
         self.ion_mq_ref_edit.editingFinished.connect(self._on_ion_axis_reference_edited)
-        ion_hist_grid.addWidget(self.ion_mq_ref_edit, 7, 1)
-        ion_hist_grid.addWidget(QLabel("Ref TOF center (ns)"), 7, 2)
         self.ion_tof_ref_edit = QLineEdit("")
         self.ion_tof_ref_edit.setPlaceholderText("e.g. 1250")
         self.ion_tof_ref_edit.setMaximumWidth(110)
         self.ion_tof_ref_edit.returnPressed.connect(self._on_ion_axis_controls_changed)
         self.ion_tof_ref_edit.editingFinished.connect(self._on_ion_axis_reference_edited)
-        ion_hist_grid.addWidget(self.ion_tof_ref_edit, 7, 3)
         self.ion_take_fine_ref_tof_btn = QPushButton("Take Fine ROI as Ref TOF")
         self.ion_take_fine_ref_tof_btn.clicked.connect(self._on_take_fine_roi_as_tof_ref_clicked)
-        ion_hist_grid.addWidget(self.ion_take_fine_ref_tof_btn, 8, 0, 1, 2)
-        ion_hist_grid.addWidget(QLabel("Ref TOF range (ns)"), 8, 2)
         self.ion_tof_ref_range_edit = QLineEdit("")
         self.ion_tof_ref_range_edit.setPlaceholderText("[min, max] from Fine ROI")
         self.ion_tof_ref_range_edit.setMaximumWidth(140)
         self.ion_tof_ref_range_edit.returnPressed.connect(self._on_ion_axis_controls_changed)
         self.ion_tof_ref_range_edit.editingFinished.connect(self._on_ion_axis_reference_edited)
-        ion_hist_grid.addWidget(self.ion_tof_ref_range_edit, 8, 3)
         self.ion_hist_logy_checkbox = QCheckBox("Y axis log scale")
         self.ion_hist_logy_checkbox.setChecked(False)
         self.ion_hist_logy_checkbox.toggled.connect(self._on_ion_hist_log_scale_toggled)
-        ion_hist_grid.addWidget(self.ion_hist_logy_checkbox, 9, 0, 1, 2)
         self.ion_hist_norm_to_peak_checkbox = QCheckBox("Normalize to peak")
         self.ion_hist_norm_to_peak_checkbox.setChecked(False)
         self.ion_hist_norm_to_peak_checkbox.toggled.connect(self._on_ion_hist_normalize_toggled)
-        ion_hist_grid.addWidget(self.ion_hist_norm_to_peak_checkbox, 9, 2, 1, 2)
-        ion_hist_grid.addWidget(QLabel("Manual labels: Ctrl+LMB add, dblclick remove"), 10, 0, 1, 2)
         self.clear_ion_hist_peak_btn = QPushButton("Clear markers")
         self.clear_ion_hist_peak_btn.clicked.connect(self.clear_ion_hist_peak_markers)
-        ion_hist_grid.addWidget(self.clear_ion_hist_peak_btn, 10, 2, 1, 2)
         self.ion_hist_set_norm_ref_btn = QPushButton("Use Fine ROI as Norm Ref")
         self.ion_hist_set_norm_ref_btn.clicked.connect(self._on_ion_hist_set_norm_ref_clicked)
-        ion_hist_grid.addWidget(self.ion_hist_set_norm_ref_btn, 11, 0, 1, 2)
-        ion_hist_grid.addWidget(QLabel("Norm ref peak"), 11, 2)
         self.ion_hist_norm_ref_peak_edit = QLineEdit("")
         self.ion_hist_norm_ref_peak_edit.setPlaceholderText("blank=global max")
         self.ion_hist_norm_ref_peak_edit.setMaximumWidth(110)
         self.ion_hist_norm_ref_peak_edit.returnPressed.connect(self._on_ion_hist_norm_ref_edited)
         self.ion_hist_norm_ref_peak_edit.editingFinished.connect(self._on_ion_hist_norm_ref_edited)
-        ion_hist_grid.addWidget(self.ion_hist_norm_ref_peak_edit, 11, 3)
-        ion_hist_grid.addWidget(QLabel("BG law"), 12, 0)
         self.ion_hist_bg_law_combo = QComboBox()
         self.ion_hist_bg_law_combo.addItem("Adaptive variable-slope", "adaptive")
         self.ion_hist_bg_law_combo.addItem("Power law 1/m^p", "power_m")
@@ -1285,7 +1251,6 @@ class MainWindow(QMainWindow):
             "an adaptive variable-slope envelope, 1/t^(2p) for 1/m^p, 1/t for 1/sqrt(m), or 1/t^2 for 1/m."
         )
         self.ion_hist_bg_law_combo.currentIndexChanged.connect(self._on_ion_hist_bg_fit_law_changed)
-        ion_hist_grid.addWidget(self.ion_hist_bg_law_combo, 12, 1)
         self.ion_hist_bg_curve_mode_combo = QComboBox()
         self.ion_hist_bg_curve_mode_combo.addItem("Auto 1-2", "auto")
         self.ion_hist_bg_curve_mode_combo.addItem("1 curve", "one")
@@ -1303,69 +1268,46 @@ class MainWindow(QMainWindow):
             "TOF-domain fitting applies the law in t and then plots it back on m/q."
         )
         self.ion_hist_bg_domain_combo.currentIndexChanged.connect(self._on_ion_hist_bg_fit_domain_changed)
-        ion_hist_grid.addWidget(self.ion_hist_bg_domain_combo, 13, 1)
         self.ion_hist_bg_fit_btn = QPushButton("Fit BG Curve")
         self.ion_hist_bg_fit_btn.setToolTip(
             "Fit one or two background curves on the ion histogram using a robust lower-envelope baseline."
         )
         self.ion_hist_bg_fit_btn.clicked.connect(self.fit_ion_hist_background_curves)
-        ion_hist_grid.addWidget(self.ion_hist_bg_fit_btn, 12, 2)
         self.ion_hist_bg_clear_btn = QPushButton("Clear BG Fit")
         self.ion_hist_bg_clear_btn.setToolTip("Clear the current ion-histogram background fit overlay.")
         self.ion_hist_bg_clear_btn.clicked.connect(self.clear_ion_hist_background_fit)
-        ion_hist_grid.addWidget(self.ion_hist_bg_clear_btn, 12, 3)
-        ion_hist_grid.addWidget(QLabel("BG fit domain"), 13, 0)
-        ion_hist_grid.addWidget(QLabel("BG fit mode"), 14, 0)
-        ion_hist_grid.addWidget(self.ion_hist_bg_curve_mode_combo, 14, 1)
         self.ion_hist_bg_result_label = QLabel("No histogram BG fit.")
         self.ion_hist_bg_result_label.setWordWrap(True)
         self.ion_hist_bg_result_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        ion_hist_grid.addWidget(self.ion_hist_bg_result_label, 15, 0, 1, 4)
-        control_grid.addWidget(ion_hist_group, 0, 0, 1, 8)
 
         # Ion coordinate-vs-TOF map controls (color represents counts)
-        ion_tof_group = QGroupBox("Ion X/Y-TOF Map")
-        ion_tof_grid = QGridLayout(ion_tof_group)
-        ion_tof_grid.setHorizontalSpacing(10)
-        ion_tof_grid.addWidget(QLabel("Count scale"), 0, 0)
         self.ion_tof_z_scale_combo = QComboBox()
         self.ion_tof_z_scale_combo.addItem("Linear", "linear")
         self.ion_tof_z_scale_combo.addItem("Log", "log")
         self.ion_tof_z_scale_combo.addItem("Exponential", "exp")
         self.ion_tof_z_scale_combo.setCurrentIndex(0)
         self.ion_tof_z_scale_combo.currentIndexChanged.connect(self._on_ion_tof_pos_controls_changed)
-        ion_tof_grid.addWidget(self.ion_tof_z_scale_combo, 0, 1)
-        ion_tof_grid.addWidget(QLabel("Y axis"), 1, 0)
         self.ion_tof_coord_axis_combo = QComboBox()
         self.ion_tof_coord_axis_combo.addItem("X", "x")
         self.ion_tof_coord_axis_combo.addItem("Y", "y")
         self.ion_tof_coord_axis_combo.setCurrentIndex(1)
         self.ion_tof_coord_axis_combo.currentIndexChanged.connect(self._on_ion_tof_pos_controls_changed)
-        ion_tof_grid.addWidget(self.ion_tof_coord_axis_combo, 1, 1)
-        ion_tof_grid.addWidget(QLabel("TOF bin"), 2, 0)
         self.ion_tof_bin_size_edit = QLineEdit("")
         self.ion_tof_bin_size_edit.setPlaceholderText("auto")
         self.ion_tof_bin_size_edit.setMaximumWidth(110)
         self.ion_tof_bin_size_edit.editingFinished.connect(self._on_ion_tof_pos_bins_changed)
-        ion_tof_grid.addWidget(self.ion_tof_bin_size_edit, 2, 1)
-        ion_tof_grid.addWidget(QLabel("Coord bin"), 3, 0)
         self.ion_tof_coord_bin_size_edit = QLineEdit("")
         self.ion_tof_coord_bin_size_edit.setPlaceholderText("auto")
         self.ion_tof_coord_bin_size_edit.setMaximumWidth(110)
         self.ion_tof_coord_bin_size_edit.editingFinished.connect(self._on_ion_tof_pos_bins_changed)
-        ion_tof_grid.addWidget(self.ion_tof_coord_bin_size_edit, 3, 1)
-        ion_tof_grid.addWidget(QLabel("TOF ROI min"), 4, 0)
         self.ion_tof_zmin_edit = QLineEdit("")
         self.ion_tof_zmin_edit.setPlaceholderText("auto")
         self.ion_tof_zmin_edit.setMaximumWidth(110)
         self.ion_tof_zmin_edit.editingFinished.connect(self._on_ion_tof_z_filter_changed)
-        ion_tof_grid.addWidget(self.ion_tof_zmin_edit, 4, 1)
-        ion_tof_grid.addWidget(QLabel("TOF ROI max"), 5, 0)
         self.ion_tof_zmax_edit = QLineEdit("")
         self.ion_tof_zmax_edit.setPlaceholderText("auto")
         self.ion_tof_zmax_edit.setMaximumWidth(110)
         self.ion_tof_zmax_edit.editingFinished.connect(self._on_ion_tof_z_filter_changed)
-        ion_tof_grid.addWidget(self.ion_tof_zmax_edit, 5, 1)
         self.ion_tof_bg_pick_btn = QPushButton("BG Uses Fit Boxes")
         self.ion_tof_bg_pick_btn.setCheckable(False)
         self.ion_tof_bg_pick_btn.setEnabled(False)
@@ -1374,28 +1316,23 @@ class MainWindow(QMainWindow):
             "Use 'Pick Boxes on Plot' to mark the signal region first, then run 'Fit BG Model'."
         )
         self.ion_tof_bg_pick_btn.toggled.connect(self._on_ion_tof_bg_pick_toggled)
-        ion_tof_grid.addWidget(self.ion_tof_bg_pick_btn, 6, 0, 1, 2)
         self.ion_tof_bg_fit_btn = QPushButton("Fit BG Model")
         self.ion_tof_bg_fit_btn.setToolTip(
             "Use the points outside the stored X-TOF and Y-TOF fit boxes as background examples, then fit a smoothed XY-density plus radial-floor background model across all raw points."
         )
         self.ion_tof_bg_fit_btn.clicked.connect(self.fit_ion_tof_background_model)
-        ion_tof_grid.addWidget(self.ion_tof_bg_fit_btn, 7, 0, 1, 2)
         self.ion_tof_bg_enable_checkbox = QCheckBox("Enable BG subtraction")
         self.ion_tof_bg_enable_checkbox.setChecked(False)
         self.ion_tof_bg_enable_checkbox.setToolTip(
             "Remove raw ion points classified as background by the fitted outside-box XY-density/radial-floor background model."
         )
         self.ion_tof_bg_enable_checkbox.toggled.connect(self._on_ion_tof_bg_enabled_toggled)
-        ion_tof_grid.addWidget(self.ion_tof_bg_enable_checkbox, 8, 0, 1, 2)
         self.ion_tof_bg_clear_btn = QPushButton("Clear BG")
         self.ion_tof_bg_clear_btn.setToolTip("Clear the current fitted background model, any legacy BG ranges, and the subtraction state.")
         self.ion_tof_bg_clear_btn.clicked.connect(self.clear_ion_tof_background_subtraction)
-        ion_tof_grid.addWidget(self.ion_tof_bg_clear_btn, 9, 0, 1, 2)
         self.ion_tof_bg_result_label = QLabel("No background subtraction fit.")
         self.ion_tof_bg_result_label.setWordWrap(True)
         self.ion_tof_bg_result_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        ion_tof_grid.addWidget(self.ion_tof_bg_result_label, 10, 0, 1, 2)
         self.ion_tof_fit_pick_btn = QPushButton("Pick Boxes on Plot")
         self.ion_tof_fit_pick_btn.setCheckable(True)
         self.ion_tof_fit_pick_btn.setToolTip(
@@ -1403,59 +1340,41 @@ class MainWindow(QMainWindow):
             "to add each rectangle, and double-click inside a box to remove it."
         )
         self.ion_tof_fit_pick_btn.toggled.connect(self._on_ion_tof_fit_pick_toggled)
-        ion_tof_grid.addWidget(self.ion_tof_fit_pick_btn, 11, 0, 1, 2)
         self.ion_tof_fit_btn = QPushButton("Fit Main Axis")
         self.ion_tof_fit_btn.setToolTip(
             "Use the current picked rectangles when present: find the densest raw-scatter region inside each box and "
             "fit the combined dense support from all boxes. If no boxes are stored, fall back to the single-ROI ridge fit."
         )
         self.ion_tof_fit_btn.clicked.connect(self.fit_ion_tof_alignment_line)
-        ion_tof_grid.addWidget(self.ion_tof_fit_btn, 12, 0, 1, 2)
-        ion_tof_grid.addWidget(QLabel("Fit TOF min"), 13, 0)
         self.ion_tof_fit_tmin_edit = QLineEdit("")
         self.ion_tof_fit_tmin_edit.setPlaceholderText("blank=view")
         self.ion_tof_fit_tmin_edit.setMaximumWidth(110)
         self.ion_tof_fit_tmin_edit.returnPressed.connect(self.fit_ion_tof_alignment_line)
-        ion_tof_grid.addWidget(self.ion_tof_fit_tmin_edit, 13, 1)
-        ion_tof_grid.addWidget(QLabel("Fit TOF max"), 14, 0)
         self.ion_tof_fit_tmax_edit = QLineEdit("")
         self.ion_tof_fit_tmax_edit.setPlaceholderText("blank=view")
         self.ion_tof_fit_tmax_edit.setMaximumWidth(110)
         self.ion_tof_fit_tmax_edit.returnPressed.connect(self.fit_ion_tof_alignment_line)
-        ion_tof_grid.addWidget(self.ion_tof_fit_tmax_edit, 14, 1)
         self.ion_tof_fit_coord_min_label = QLabel("Fit coord min")
-        ion_tof_grid.addWidget(self.ion_tof_fit_coord_min_label, 15, 0)
         self.ion_tof_fit_coord_min_edit = QLineEdit("")
         self.ion_tof_fit_coord_min_edit.setPlaceholderText("blank=view")
         self.ion_tof_fit_coord_min_edit.setMaximumWidth(110)
         self.ion_tof_fit_coord_min_edit.returnPressed.connect(self.fit_ion_tof_alignment_line)
-        ion_tof_grid.addWidget(self.ion_tof_fit_coord_min_edit, 15, 1)
         self.ion_tof_fit_coord_max_label = QLabel("Fit coord max")
-        ion_tof_grid.addWidget(self.ion_tof_fit_coord_max_label, 16, 0)
         self.ion_tof_fit_coord_max_edit = QLineEdit("")
         self.ion_tof_fit_coord_max_edit.setPlaceholderText("blank=view")
         self.ion_tof_fit_coord_max_edit.setMaximumWidth(110)
         self.ion_tof_fit_coord_max_edit.returnPressed.connect(self.fit_ion_tof_alignment_line)
-        ion_tof_grid.addWidget(self.ion_tof_fit_coord_max_edit, 16, 1)
         self.ion_tof_apply_align_btn = QPushButton("Apply Align to 0")
         self.ion_tof_apply_align_btn.setToolTip("Subtract the fitted line from the displayed coordinate so the fitted main line moves to 0.")
         self.ion_tof_apply_align_btn.clicked.connect(self.apply_ion_tof_alignment_to_zero)
-        ion_tof_grid.addWidget(self.ion_tof_apply_align_btn, 17, 0, 1, 2)
         self.ion_tof_clear_align_btn = QPushButton("Clear Align")
         self.ion_tof_clear_align_btn.setToolTip("Clear the current X/Y-TOF alignment correction for the selected axis.")
         self.ion_tof_clear_align_btn.clicked.connect(self.clear_ion_tof_alignment)
-        ion_tof_grid.addWidget(self.ion_tof_clear_align_btn, 18, 0, 1, 2)
         self.ion_tof_fit_result_label = QLabel("No alignment fit.")
         self.ion_tof_fit_result_label.setWordWrap(True)
         self.ion_tof_fit_result_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        ion_tof_grid.addWidget(self.ion_tof_fit_result_label, 19, 0, 1, 2)
-        control_grid.addWidget(ion_tof_group, 0, 8, 1, 4)
 
         # Step 4 + Step 5 controls (electron ring filter, center estimate, and binning)
-        e_scatter_group = QGroupBox("Electron Scatter Plot")
-        e_scatter_grid = QGridLayout(e_scatter_group)
-        e_scatter_grid.setHorizontalSpacing(10)
-        e_scatter_grid.addWidget(QLabel("Center estimator"), 0, 0)
         self.center_mode_combo = QComboBox()
         # Two kept estimators (2026-09-01 pruning): the legacy `edge_fit`,
         # `centroid` and `geo_median` modes were removed. `quadrant_symmetry`
@@ -1471,133 +1390,87 @@ class MainWindow(QMainWindow):
             "requires a valid Polar ROI (r min / r max) from the Polar Matrix."
         )
         self.center_mode_combo.currentIndexChanged.connect(self._on_center_mode_changed)
-        e_scatter_grid.addWidget(self.center_mode_combo, 0, 1)
         self.center_once_btn = QPushButton("Estimate Center Once")
         self.center_once_btn.setToolTip(
             "Estimate center once from currently selected electrons (ion filter is optional; "
             "polar-outermost mode uses ROI-only fitting from Polar ROI band)."
         )
         self.center_once_btn.clicked.connect(self.estimate_center_once)
-        e_scatter_grid.addWidget(self.center_once_btn, 0, 2, 1, 3)
-        e_scatter_grid.addWidget(QLabel("Ring center X"), 1, 0)
         self.circle_cx_edit = QLineEdit("0")
         self.circle_cx_edit.setMaximumWidth(100)
-        e_scatter_grid.addWidget(self.circle_cx_edit, 1, 1)
-        e_scatter_grid.addWidget(QLabel("Ring center Y"), 1, 2)
         self.circle_cy_edit = QLineEdit("0")
         self.circle_cy_edit.setMaximumWidth(100)
-        e_scatter_grid.addWidget(self.circle_cy_edit, 1, 3)
-        e_scatter_grid.addWidget(QLabel("Inner radius (signal)"), 2, 0)
         self.inner_r_edit = QLineEdit("26")
         self.inner_r_edit.setMaximumWidth(100)
-        e_scatter_grid.addWidget(self.inner_r_edit, 2, 1)
-        e_scatter_grid.addWidget(QLabel("Outer radius (noise)"), 2, 2)
         self.outer_r_edit = QLineEdit("32")
         self.outer_r_edit.setMaximumWidth(100)
-        e_scatter_grid.addWidget(self.outer_r_edit, 2, 3)
         self.outer_ring_filter_enable_checkbox = QCheckBox("Enable outer-ring noise filter")
         self.outer_ring_filter_enable_checkbox.setChecked(False)
-        e_scatter_grid.addWidget(self.outer_ring_filter_enable_checkbox, 3, 0, 1, 3)
-        e_scatter_grid.addWidget(QLabel("Filter mode"), 4, 0)
         self.electron_filter_mode_combo = QComboBox()
         self.electron_filter_mode_combo.addItem("Spatial distribution", "spatial")
         self.electron_filter_mode_combo.addItem("Point density", "density")
         self.electron_filter_mode_combo.setCurrentIndex(0)
         self.electron_filter_mode_combo.currentIndexChanged.connect(self._on_electron_filter_mode_changed)
-        e_scatter_grid.addWidget(self.electron_filter_mode_combo, 4, 1)
-        e_scatter_grid.addWidget(QLabel("Density keep (%)"), 4, 2)
         self.electron_density_keep_edit = QLineEdit("100")
         self.electron_density_keep_edit.setMaximumWidth(100)
         self.electron_density_keep_edit.setToolTip("Keep top X% densest electron points when filter mode is Point density.")
         self.electron_density_keep_edit.editingFinished.connect(self._on_electron_density_filter_params_changed)
-        e_scatter_grid.addWidget(self.electron_density_keep_edit, 4, 3)
-        e_scatter_grid.addWidget(QLabel("Density bin"), 5, 0)
         self.electron_density_bin_edit = QLineEdit("")
         self.electron_density_bin_edit.setPlaceholderText("auto")
         self.electron_density_bin_edit.setMaximumWidth(100)
         self.electron_density_bin_edit.setToolTip("Optional density-bin size for electron density filtering. Blank = auto.")
         self.electron_density_bin_edit.editingFinished.connect(self._on_electron_density_filter_params_changed)
-        e_scatter_grid.addWidget(self.electron_density_bin_edit, 5, 1)
         self.electron_scatter_colorbar_checkbox = QCheckBox("Show colorbar")
         self.electron_scatter_colorbar_checkbox.setChecked(True)
         self.electron_scatter_colorbar_checkbox.toggled.connect(self._on_electron_scatter_colorbar_toggled)
-        e_scatter_grid.addWidget(self.electron_scatter_colorbar_checkbox, 6, 0, 1, 2)
-        e_scatter_grid.addWidget(QLabel("Color scale"), 6, 2)
         self.electron_scatter_scale_combo = QComboBox()
         self.electron_scatter_scale_combo.addItem("Linear", "linear")
         self.electron_scatter_scale_combo.addItem("Log", "log")
         self.electron_scatter_scale_combo.setCurrentIndex(0)
         self.electron_scatter_scale_combo.currentIndexChanged.connect(self._on_electron_scatter_scale_changed)
-        e_scatter_grid.addWidget(self.electron_scatter_scale_combo, 6, 3)
         self.electron_scatter_polar_toggle_btn = QPushButton("Show Polar Matrix")
         self.electron_scatter_polar_toggle_btn.setCheckable(True)
         self.electron_scatter_polar_toggle_btn.setToolTip("Show theta-vs-r view. In polar view, left-drag vertically inside the plot to create or adjust the Polar ROI band.")
         self.electron_scatter_polar_toggle_btn.toggled.connect(self._on_electron_scatter_polar_toggled)
-        e_scatter_grid.addWidget(self.electron_scatter_polar_toggle_btn, 6, 4)
-        e_scatter_grid.addWidget(QLabel("Polar ROI r"), 7, 0)
         self.polar_roi_rmin_edit = QLineEdit("")
         self.polar_roi_rmin_edit.setPlaceholderText("min")
         self.polar_roi_rmin_edit.setMaximumWidth(100)
         self.polar_roi_rmin_edit.setToolTip("Manual polar ROI lower radius. You can also left-drag vertically on the polar matrix to set this band.")
         self.polar_roi_rmin_edit.editingFinished.connect(self._on_polar_roi_changed)
-        e_scatter_grid.addWidget(self.polar_roi_rmin_edit, 7, 1)
-        e_scatter_grid.addWidget(QLabel("to"), 7, 2)
         self.polar_roi_rmax_edit = QLineEdit("")
         self.polar_roi_rmax_edit.setPlaceholderText("max")
         self.polar_roi_rmax_edit.setMaximumWidth(100)
         self.polar_roi_rmax_edit.setToolTip("Manual polar ROI upper radius. You can also left-drag vertically on the polar matrix to set this band.")
         self.polar_roi_rmax_edit.editingFinished.connect(self._on_polar_roi_changed)
-        e_scatter_grid.addWidget(self.polar_roi_rmax_edit, 7, 3)
         self.apply_circle_btn = QPushButton("Apply Ring Selection and Bin")
         self.apply_circle_btn.clicked.connect(self.apply_circle_selection)
-        e_scatter_grid.addWidget(self.apply_circle_btn, 2, 4, 2, 1)
-        control_grid.addWidget(e_scatter_group, 1, 0, 1, 7)
 
         # Step 4 controls (ion rectangle filter and alignment)
-        ion_scatter_group = QGroupBox("Ion Scatter Plot")
-        ion_scatter_grid = QGridLayout(ion_scatter_group)
-        ion_scatter_grid.setHorizontalSpacing(10)
-        ion_scatter_grid.addWidget(QLabel("Filter center X"), 0, 0)
         self.ion_filter_cx_edit = QLineEdit("0")
         self.ion_filter_cx_edit.setMaximumWidth(100)
-        ion_scatter_grid.addWidget(self.ion_filter_cx_edit, 0, 1)
-        ion_scatter_grid.addWidget(QLabel("Filter center Y"), 0, 2)
         self.ion_filter_cy_edit = QLineEdit("0")
         self.ion_filter_cy_edit.setMaximumWidth(100)
-        ion_scatter_grid.addWidget(self.ion_filter_cy_edit, 0, 3)
-        ion_scatter_grid.addWidget(QLabel("Filter width"), 1, 0)
         self.ion_filter_w_edit = QLineEdit("5")
         self.ion_filter_w_edit.setMaximumWidth(100)
-        ion_scatter_grid.addWidget(self.ion_filter_w_edit, 1, 1)
-        ion_scatter_grid.addWidget(QLabel("Filter height"), 1, 2)
         self.ion_filter_h_edit = QLineEdit("5")
         self.ion_filter_h_edit.setMaximumWidth(100)
-        ion_scatter_grid.addWidget(self.ion_filter_h_edit, 1, 3)
         self.ion_filter_enable_checkbox = QCheckBox("Enable ion filter")
         self.ion_filter_enable_checkbox.setChecked(False)
-        ion_scatter_grid.addWidget(self.ion_filter_enable_checkbox, 2, 0, 1, 2)
-        ion_scatter_grid.addWidget(QLabel("Filter mode"), 3, 0)
         self.ion_filter_mode_combo = QComboBox()
         self.ion_filter_mode_combo.addItem("Spatial distribution", "spatial")
         self.ion_filter_mode_combo.addItem("Point density", "density")
         self.ion_filter_mode_combo.addItem("Point density -> spatial", "both")
         self.ion_filter_mode_combo.setCurrentIndex(0)
         self.ion_filter_mode_combo.currentIndexChanged.connect(self._on_ion_filter_mode_changed)
-        ion_scatter_grid.addWidget(self.ion_filter_mode_combo, 3, 1)
-        ion_scatter_grid.addWidget(QLabel("Density keep (%)"), 3, 2)
         self.ion_density_keep_edit = QLineEdit("100")
         self.ion_density_keep_edit.setMaximumWidth(100)
         self.ion_density_keep_edit.setToolTip("Keep top X% densest ion points when filter mode is Point density.")
         self.ion_density_keep_edit.editingFinished.connect(self._on_ion_density_filter_params_changed)
-        ion_scatter_grid.addWidget(self.ion_density_keep_edit, 3, 3)
-        ion_scatter_grid.addWidget(QLabel("Density bin"), 4, 0)
         self.ion_density_bin_edit = QLineEdit("")
         self.ion_density_bin_edit.setPlaceholderText("auto")
         self.ion_density_bin_edit.setMaximumWidth(100)
         self.ion_density_bin_edit.setToolTip("Optional density-bin size for ion density filtering. Blank = auto.")
         self.ion_density_bin_edit.editingFinished.connect(self._on_ion_density_filter_params_changed)
-        ion_scatter_grid.addWidget(self.ion_density_bin_edit, 4, 1)
-        ion_scatter_grid.addWidget(QLabel("Density remove M"), 4, 2)
         self.ion_density_remove_edit = QLineEdit("")
         self.ion_density_remove_edit.setPlaceholderText("0")
         self.ion_density_remove_edit.setMaximumWidth(100)
@@ -1605,51 +1478,36 @@ class MainWindow(QMainWindow):
             "Optionally remove exactly M lowest-density ion points in Point density mode. Blank/0 = disabled."
         )
         self.ion_density_remove_edit.editingFinished.connect(self._on_ion_density_filter_params_changed)
-        ion_scatter_grid.addWidget(self.ion_density_remove_edit, 4, 3)
         self.ion_align_horizon_btn = QPushButton("Rotate Main Direction to Horizontal")
         self.ion_align_horizon_btn.setToolTip(
             "One-shot action: align current ion main direction to horizontal once, "
             "write the resulting angle to Rotation offset, then keep manual control."
         )
         self.ion_align_horizon_btn.clicked.connect(self.align_ion_main_direction_once)
-        ion_scatter_grid.addWidget(self.ion_align_horizon_btn, 2, 2, 1, 2)
-        ion_scatter_grid.addWidget(QLabel("Rotation offset (deg)"), 5, 0)
         self.ion_rot_offset_edit = QLineEdit("0")
         self.ion_rot_offset_edit.setMaximumWidth(100)
-        ion_scatter_grid.addWidget(self.ion_rot_offset_edit, 5, 1)
         self.apply_ion_rot_btn = QPushButton("Apply Rotation")
         self.apply_ion_rot_btn.clicked.connect(self.apply_ion_rotation_offset)
-        ion_scatter_grid.addWidget(self.apply_ion_rot_btn, 5, 2)
         self.ion_dirline_btn = QPushButton("Show Main Direction Line")
         self.ion_dirline_btn.setCheckable(True)
         self.ion_dirline_btn.setChecked(False)
         self.ion_dirline_btn.toggled.connect(self._on_toggle_ion_direction_line)
-        ion_scatter_grid.addWidget(self.ion_dirline_btn, 5, 3)
         self.ion_scatter_colorbar_checkbox = QCheckBox("Show colorbar")
         self.ion_scatter_colorbar_checkbox.setChecked(True)
         self.ion_scatter_colorbar_checkbox.toggled.connect(self._on_ion_scatter_colorbar_toggled)
-        ion_scatter_grid.addWidget(self.ion_scatter_colorbar_checkbox, 6, 0, 1, 2)
-        ion_scatter_grid.addWidget(QLabel("Color scale"), 6, 2)
         self.ion_scatter_scale_combo = QComboBox()
         self.ion_scatter_scale_combo.addItem("Linear", "linear")
         self.ion_scatter_scale_combo.addItem("Log", "log")
         self.ion_scatter_scale_combo.setCurrentIndex(0)
         self.ion_scatter_scale_combo.currentIndexChanged.connect(self._on_ion_scatter_scale_changed)
-        ion_scatter_grid.addWidget(self.ion_scatter_scale_combo, 6, 3)
-        ion_scatter_grid.addWidget(QLabel("Rot center X"), 7, 0)
         self.ion_rot_cx_edit = QLineEdit("0")
         self.ion_rot_cx_edit.setMaximumWidth(100)
         self.ion_rot_cx_edit.returnPressed.connect(self.apply_ion_rotation_center_from_inputs)
-        ion_scatter_grid.addWidget(self.ion_rot_cx_edit, 7, 1)
-        ion_scatter_grid.addWidget(QLabel("Rot center Y"), 7, 2)
         self.ion_rot_cy_edit = QLineEdit("0")
         self.ion_rot_cy_edit.setMaximumWidth(100)
         self.ion_rot_cy_edit.returnPressed.connect(self.apply_ion_rotation_center_from_inputs)
-        ion_scatter_grid.addWidget(self.ion_rot_cy_edit, 7, 3)
         self.center_ion_peak_btn = QPushButton("Center Peak + Set Rot Center")
         self.center_ion_peak_btn.clicked.connect(self.center_ion_peak_to_origin)
-        ion_scatter_grid.addWidget(self.center_ion_peak_btn, 8, 0, 1, 4)
-        ion_scatter_grid.addWidget(QLabel("TOF fit axis"), 9, 0)
         self.ion_scatter_tof_center_axis_combo = QComboBox()
         self.ion_scatter_tof_center_axis_combo.addItem("X from X-TOF", "x")
         self.ion_scatter_tof_center_axis_combo.addItem("Y from Y-TOF", "y")
@@ -1657,63 +1515,43 @@ class MainWindow(QMainWindow):
         self.ion_scatter_tof_center_axis_combo.currentIndexChanged.connect(
             self._on_ion_scatter_tof_center_axis_changed
         )
-        ion_scatter_grid.addWidget(self.ion_scatter_tof_center_axis_combo, 9, 1)
         self.ion_scatter_apply_tof_center_btn = QPushButton("Apply Temp Center Corr")
         self.ion_scatter_apply_tof_center_btn.setToolTip(
             "Temporarily subtract the current X/Y-TOF fit from the matching ion-scatter axis for easier ion selection."
         )
         self.ion_scatter_apply_tof_center_btn.clicked.connect(self.apply_ion_scatter_tof_center_correction)
-        ion_scatter_grid.addWidget(self.ion_scatter_apply_tof_center_btn, 9, 2, 1, 2)
         self.ion_scatter_clear_tof_center_btn = QPushButton("Clear Temp Center Corr")
         self.ion_scatter_clear_tof_center_btn.setToolTip(
             "Clear the temporary display-only TOF-fit centering for the selected ion-scatter axis."
         )
         self.ion_scatter_clear_tof_center_btn.clicked.connect(self.clear_ion_scatter_tof_center_correction)
-        ion_scatter_grid.addWidget(self.ion_scatter_clear_tof_center_btn, 10, 0, 1, 4)
         self.ion_scatter_tof_center_state_label = QLabel("No temporary TOF-fit center correction.")
         self.ion_scatter_tof_center_state_label.setWordWrap(True)
         self.ion_scatter_tof_center_state_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        ion_scatter_grid.addWidget(self.ion_scatter_tof_center_state_label, 11, 0, 1, 4)
-        control_grid.addWidget(ion_scatter_group, 1, 7, 1, 5)
 
         # Step 5 + Step 7 controls (projection bin size + start reconstruction)
-        projection_group = QGroupBox("Electron Projection Image")
-        projection_grid = QGridLayout(projection_group)
-        projection_grid.addWidget(QLabel("Centered bin size"), 0, 0)
         self.center_bin_edit = QLineEdit(f"{DEFAULT_CENTER_BIN_SIZE:g}")
         self.center_bin_edit.setMaximumWidth(100)
-        projection_grid.addWidget(self.center_bin_edit, 0, 1)
         self.centered_bin_colorbar_checkbox = QCheckBox("Show colorbar")
         self.centered_bin_colorbar_checkbox.setChecked(True)
         self.centered_bin_colorbar_checkbox.toggled.connect(self._on_centered_bin_colorbar_toggled)
-        projection_grid.addWidget(self.centered_bin_colorbar_checkbox, 1, 0, 1, 2)
-        projection_grid.addWidget(QLabel("Bin map scale"), 1, 2)
         self.centered_bin_scale_combo = QComboBox()
         self.centered_bin_scale_combo.addItem("Linear", "linear")
         self.centered_bin_scale_combo.addItem("Log", "log")
         self.centered_bin_scale_combo.setCurrentIndex(0)
         self.centered_bin_scale_combo.currentIndexChanged.connect(self._on_centered_bin_scale_changed)
-        projection_grid.addWidget(self.centered_bin_scale_combo, 1, 3)
-        projection_grid.addWidget(QLabel("Theta (deg)"), 2, 0)
         self.theta_profile_theta_edit = QLineEdit("0")
         self.theta_profile_theta_edit.setMaximumWidth(100)
         self.theta_profile_theta_edit.returnPressed.connect(self._on_theta_profile_controls_changed)
-        projection_grid.addWidget(self.theta_profile_theta_edit, 2, 1)
-        projection_grid.addWidget(QLabel("dTheta (deg)"), 2, 2)
         self.theta_profile_width_edit = QLineEdit("1")
         self.theta_profile_width_edit.setMaximumWidth(100)
         self.theta_profile_width_edit.returnPressed.connect(self._on_theta_profile_controls_changed)
-        projection_grid.addWidget(self.theta_profile_width_edit, 2, 3)
         self.theta_profile_apply_btn = QPushButton("Update Theta Profile")
         self.theta_profile_apply_btn.clicked.connect(self._on_theta_profile_controls_changed)
-        projection_grid.addWidget(self.theta_profile_apply_btn, 3, 0, 1, 2)
-        projection_grid.addWidget(QLabel("Radial bin"), 3, 2)
         self.profile_radial_bin_edit = QLineEdit("")
         self.profile_radial_bin_edit.setPlaceholderText("auto")
         self.profile_radial_bin_edit.setMaximumWidth(100)
         self.profile_radial_bin_edit.returnPressed.connect(self._on_profile_radial_bin_changed)
-        projection_grid.addWidget(self.profile_radial_bin_edit, 3, 3)
-        projection_grid.addWidget(QLabel("Profile mode"), 4, 0)
         self.radial_profile_mode_combo = QComboBox()
         self.radial_profile_mode_combo.addItem("Radial Profile (raw)", "raw")
         self.radial_profile_mode_combo.addItem(
@@ -1722,70 +1560,44 @@ class MainWindow(QMainWindow):
         )
         self.radial_profile_mode_combo.setCurrentIndex(0)
         self.radial_profile_mode_combo.currentIndexChanged.connect(self._on_radial_profile_mode_changed)
-        projection_grid.addWidget(self.radial_profile_mode_combo, 4, 1, 1, 3)
-        projection_grid.addWidget(QLabel("Profile Y scale"), 5, 0)
         self.radial_profile_yscale_combo = QComboBox()
         self.radial_profile_yscale_combo.addItem("Linear", "linear")
         self.radial_profile_yscale_combo.addItem("Log", "log")
         self.radial_profile_yscale_combo.setCurrentIndex(0)
         self.radial_profile_yscale_combo.currentIndexChanged.connect(self._on_radial_profile_yscale_changed)
-        projection_grid.addWidget(self.radial_profile_yscale_combo, 5, 1, 1, 3)
         self.reconstruct_btn = QPushButton("Start Reconstruction")
         self.reconstruct_btn.clicked.connect(self.run_reconstruction_now)
-        projection_grid.addWidget(self.reconstruct_btn, 0, 2, 1, 2)
-        control_grid.addWidget(projection_group, 2, 0, 1, 6)
 
         # Extra physical-parameter panel: parse F from filename and derive voltages.
-        field_param_group = QGroupBox("Field/Voltage Parameters")
-        field_param_grid = QGridLayout(field_param_group)
-        field_param_grid.setHorizontalSpacing(8)
-        field_param_grid.addWidget(QLabel("F (V/cm)"), 0, 0)
         self.field_f_vcm_edit = QLineEdit("")
         self.field_f_vcm_edit.setPlaceholderText("auto from filename")
         self.field_f_vcm_edit.setMaximumWidth(120)
-        field_param_grid.addWidget(self.field_f_vcm_edit, 0, 1)
-        field_param_grid.addWidget(QLabel("Lens L"), 0, 2)
         self.field_l_edit = QLineEdit("1.0")
         self.field_l_edit.setMaximumWidth(90)
-        field_param_grid.addWidget(self.field_l_edit, 0, 3)
-        field_param_grid.addWidget(QLabel("V_offset"), 0, 4)
         self.voltage_offset_edit = QLineEdit("0")
         self.voltage_offset_edit.setMaximumWidth(90)
-        field_param_grid.addWidget(self.voltage_offset_edit, 0, 5)
         self.auto_offset_checkbox = QCheckBox("Auto offset (force V_I.Grid = 0)")
         self.auto_offset_checkbox.setChecked(True)
-        field_param_grid.addWidget(self.auto_offset_checkbox, 1, 0, 1, 3)
 
-        field_param_grid.addWidget(QLabel("V_I.Grid"), 2, 0)
         self.v_ion_grid_edit = QLineEdit("n/a")
         self.v_ion_grid_edit.setReadOnly(True)
         self.v_ion_grid_edit.setMaximumWidth(90)
-        field_param_grid.addWidget(self.v_ion_grid_edit, 2, 1)
-        field_param_grid.addWidget(QLabel("V_Repeller"), 2, 2)
         self.v_repeller_edit = QLineEdit("n/a")
         self.v_repeller_edit.setReadOnly(True)
         self.v_repeller_edit.setMaximumWidth(90)
-        field_param_grid.addWidget(self.v_repeller_edit, 2, 3)
-        field_param_grid.addWidget(QLabel("V_E.Grid"), 2, 4)
         self.v_e_grid_edit = QLineEdit("n/a")
         self.v_e_grid_edit.setReadOnly(True)
         self.v_e_grid_edit.setMaximumWidth(90)
-        field_param_grid.addWidget(self.v_e_grid_edit, 2, 5)
 
-        field_param_grid.addWidget(QLabel("V_Extractor"), 3, 0)
         self.v_extractor_edit = QLineEdit("n/a")
         self.v_extractor_edit.setReadOnly(True)
         self.v_extractor_edit.setMaximumWidth(90)
-        field_param_grid.addWidget(self.v_extractor_edit, 3, 1)
-        field_param_grid.addWidget(QLabel("V_Detector"), 3, 2)
         self.v_detector_edit = QLineEdit("n/a")
         self.v_detector_edit.setReadOnly(True)
         self.v_detector_edit.setMaximumWidth(90)
-        field_param_grid.addWidget(self.v_detector_edit, 3, 3)
-        control_grid.addWidget(field_param_group, 2, 6, 1, 6)
 
         # Step 6 controls: split reconstruction parameters into two boxed panels.
-        rbasex_param_group = QGroupBox("rBasex Reconstruction Parameters")
+        rbasex_param_group = QGroupBox("rBasex Model Parameters")
         rbasex_param_grid = QGridLayout(rbasex_param_group)
         rbasex_param_grid.setHorizontalSpacing(10)
 
@@ -1951,7 +1763,6 @@ class MainWindow(QMainWindow):
         self.rbasex_profile_range_clear_btn.clicked.connect(self._clear_rbasex_profile_range_selection)
         rbasex_param_grid.addWidget(self.rbasex_profile_range_clear_btn, 7, 6, 1, 2)
 
-        control_grid.addWidget(rbasex_param_group, 3, 0, 1, 12)
 
         def make_grid_section(title: str) -> tuple[QGroupBox, QGridLayout]:
             group = QGroupBox(title)
@@ -2001,7 +1812,7 @@ class MainWindow(QMainWindow):
             QLabel("Use the top File bar for cache/session actions so the plot dashboard stays visible.")
         )
 
-        ion_hist_controls_group, ion_hist_controls_layout = make_grid_section("Controls")
+        ion_hist_controls_group, ion_hist_controls_layout = make_grid_section("Ion Histogram — ROI, Binning & m/q")
         ion_hist_controls_layout.addWidget(QLabel("Histogram bins"), 0, 0)
         ion_hist_controls_layout.addWidget(self.bins_edit, 0, 1)
         ion_hist_controls_layout.addWidget(self.apply_ion_hist_roi_btn, 0, 2, 1, 2)
@@ -2040,14 +1851,14 @@ class MainWindow(QMainWindow):
         ion_hist_controls_layout.addWidget(self.ion_hist_bg_curve_mode_combo, 12, 1)
         ion_hist_controls_layout.addWidget(self.ion_hist_bg_result_label, 13, 0, 1, 4)
 
-        ion_hist_display_group, ion_hist_display_layout = make_grid_section("Display")
+        ion_hist_display_group, ion_hist_display_layout = make_grid_section("Ion Histogram — Display")
         ion_hist_display_layout.addWidget(QLabel("X ticks"), 0, 0)
         ion_hist_display_layout.addWidget(self.ion_hist_xtick_count_edit, 0, 1)
         ion_hist_display_layout.addWidget(self.ion_mq_axis_checkbox, 1, 0, 1, 4)
         ion_hist_display_layout.addWidget(self.ion_hist_logy_checkbox, 2, 0, 1, 2)
         ion_hist_display_layout.addWidget(self.ion_hist_norm_to_peak_checkbox, 2, 2, 1, 2)
 
-        ion_tof_params_group, ion_tof_params_layout = make_grid_section("Parameters")
+        ion_tof_params_group, ion_tof_params_layout = make_grid_section("Ion X/Y-TOF Map — Binning & ROI")
         ion_tof_params_layout.addWidget(QLabel("Y axis"), 0, 0)
         ion_tof_params_layout.addWidget(self.ion_tof_coord_axis_combo, 0, 1)
         ion_tof_params_layout.addWidget(QLabel("TOF bin"), 1, 0)
@@ -2059,10 +1870,10 @@ class MainWindow(QMainWindow):
         ion_tof_params_layout.addWidget(QLabel("TOF ROI max"), 4, 0)
         ion_tof_params_layout.addWidget(self.ion_tof_zmax_edit, 4, 1)
 
-        ion_tof_display_group, ion_tof_display_layout = make_grid_section("Display")
+        ion_tof_display_group, ion_tof_display_layout = make_grid_section("Ion X/Y-TOF Map — Display & Background")
         ion_tof_display_layout.addWidget(QLabel("Count scale"), 0, 0)
         ion_tof_display_layout.addWidget(self.ion_tof_z_scale_combo, 0, 1)
-        ion_tof_alignment_group, ion_tof_alignment_layout = make_grid_section("Alignment")
+        ion_tof_alignment_group, ion_tof_alignment_layout = make_grid_section("Ion TOF Alignment")
         ion_tof_alignment_layout.addWidget(self.ion_tof_bg_pick_btn, 0, 0, 1, 2)
         ion_tof_alignment_layout.addWidget(self.ion_tof_bg_fit_btn, 0, 2, 1, 2)
         ion_tof_alignment_layout.addWidget(self.ion_tof_bg_enable_checkbox, 1, 0, 1, 2)
@@ -2082,11 +1893,11 @@ class MainWindow(QMainWindow):
         ion_tof_alignment_layout.addWidget(self.ion_tof_clear_align_btn, 6, 2, 1, 2)
         ion_tof_alignment_layout.addWidget(self.ion_tof_fit_result_label, 7, 0, 1, 4)
 
-        electron_actions_group, electron_actions_layout = make_grid_section("Actions")
+        electron_actions_group, electron_actions_layout = make_grid_section("Electron Scatter — Actions")
         electron_actions_layout.addWidget(self.center_once_btn, 0, 0, 1, 2)
         electron_actions_layout.addWidget(self.apply_circle_btn, 0, 2, 1, 2)
 
-        electron_params_group, electron_params_layout = make_grid_section("Parameters")
+        electron_params_group, electron_params_layout = make_grid_section("Center Estimation, Rings & Filters")
         electron_params_layout.addWidget(QLabel("Center estimator"), 0, 0)
         electron_params_layout.addWidget(self.center_mode_combo, 0, 1, 1, 3)
         electron_params_layout.addWidget(QLabel("Ring center X"), 1, 0)
@@ -2109,13 +1920,13 @@ class MainWindow(QMainWindow):
         electron_params_layout.addWidget(QLabel("Polar ROI max"), 6, 2)
         electron_params_layout.addWidget(self.polar_roi_rmax_edit, 6, 3)
 
-        electron_display_group, electron_display_layout = make_grid_section("Display")
+        electron_display_group, electron_display_layout = make_grid_section("Electron Scatter — Display")
         electron_display_layout.addWidget(self.electron_scatter_colorbar_checkbox, 0, 0, 1, 2)
         electron_display_layout.addWidget(QLabel("Color scale"), 0, 2)
         electron_display_layout.addWidget(self.electron_scatter_scale_combo, 0, 3)
         electron_display_layout.addWidget(self.electron_scatter_polar_toggle_btn, 1, 0, 1, 4)
 
-        ion_scatter_actions_group, ion_scatter_actions_layout = make_grid_section("Actions")
+        ion_scatter_actions_group, ion_scatter_actions_layout = make_grid_section("Ion Scatter — Actions & TOF Centering")
         ion_scatter_actions_layout.addWidget(self.ion_align_horizon_btn, 0, 0, 1, 2)
         ion_scatter_actions_layout.addWidget(self.apply_ion_rot_btn, 0, 2, 1, 2)
         ion_scatter_actions_layout.addWidget(self.center_ion_peak_btn, 1, 0, 1, 4)
@@ -2125,7 +1936,7 @@ class MainWindow(QMainWindow):
         ion_scatter_actions_layout.addWidget(self.ion_scatter_clear_tof_center_btn, 3, 0, 1, 4)
         ion_scatter_actions_layout.addWidget(self.ion_scatter_tof_center_state_label, 4, 0, 1, 4)
 
-        ion_scatter_params_group, ion_scatter_params_layout = make_grid_section("Parameters")
+        ion_scatter_params_group, ion_scatter_params_layout = make_grid_section("Ion Rectangle Filter & Rotation")
         ion_scatter_params_layout.addWidget(self.ion_filter_enable_checkbox, 0, 0, 1, 4)
         ion_scatter_params_layout.addWidget(QLabel("Filter center X"), 1, 0)
         ion_scatter_params_layout.addWidget(self.ion_filter_cx_edit, 1, 1)
@@ -2150,17 +1961,16 @@ class MainWindow(QMainWindow):
         ion_scatter_params_layout.addWidget(QLabel("Rot center Y"), 7, 2)
         ion_scatter_params_layout.addWidget(self.ion_rot_cy_edit, 7, 3)
 
-        ion_scatter_display_group, ion_scatter_display_layout = make_grid_section("Display")
+        ion_scatter_display_group, ion_scatter_display_layout = make_grid_section("Ion Scatter — Display")
         ion_scatter_display_layout.addWidget(self.ion_dirline_btn, 0, 0, 1, 2)
         ion_scatter_display_layout.addWidget(self.ion_scatter_colorbar_checkbox, 0, 2, 1, 2)
         ion_scatter_display_layout.addWidget(QLabel("Color scale"), 1, 0)
         ion_scatter_display_layout.addWidget(self.ion_scatter_scale_combo, 1, 1)
 
-        projection_actions_group, projection_actions_layout = make_grid_section("Actions")
+        projection_actions_group, projection_actions_layout = make_grid_section("Radial Profile — Update")
         projection_actions_layout.addWidget(self.theta_profile_apply_btn, 0, 0, 1, 2)
-        projection_actions_layout.addWidget(self.reconstruct_btn, 0, 2, 1, 2)
 
-        projection_params_group, projection_params_layout = make_grid_section("Parameters")
+        projection_params_group, projection_params_layout = make_grid_section("Centered Bin Map & Radial Profile")
         projection_params_layout.addWidget(QLabel("Centered bin size"), 0, 0)
         projection_params_layout.addWidget(self.center_bin_edit, 0, 1)
         projection_params_layout.addWidget(QLabel("Theta (deg)"), 1, 0)
@@ -2171,37 +1981,35 @@ class MainWindow(QMainWindow):
         projection_params_layout.addWidget(self.profile_radial_bin_edit, 2, 1)
         projection_params_layout.addWidget(QLabel("Profile mode"), 2, 2)
         projection_params_layout.addWidget(self.radial_profile_mode_combo, 2, 3)
-        projection_params_layout.addWidget(QLabel("F (V/cm)"), 3, 0)
-        projection_params_layout.addWidget(self.field_f_vcm_edit, 3, 1)
-        projection_params_layout.addWidget(QLabel("Lens L"), 3, 2)
-        projection_params_layout.addWidget(self.field_l_edit, 3, 3)
-        projection_params_layout.addWidget(QLabel("V_offset"), 4, 0)
-        projection_params_layout.addWidget(self.voltage_offset_edit, 4, 1)
-        projection_params_layout.addWidget(self.auto_offset_checkbox, 4, 2, 1, 2)
 
-        projection_display_group, projection_display_layout = make_grid_section("Display")
+        projection_display_group, projection_display_layout = make_grid_section("Centered Bin Map & Profile Display")
         projection_display_layout.addWidget(self.centered_bin_colorbar_checkbox, 0, 0, 1, 2)
         projection_display_layout.addWidget(QLabel("Bin map scale"), 0, 2)
         projection_display_layout.addWidget(self.centered_bin_scale_combo, 0, 3)
         projection_display_layout.addWidget(QLabel("Profile Y scale"), 1, 0)
         projection_display_layout.addWidget(self.radial_profile_yscale_combo, 1, 1)
 
-        projection_voltage_group, projection_voltage_layout = make_grid_section("Voltages")
-        projection_voltage_layout.addWidget(QLabel("V_I.Grid"), 0, 0)
-        projection_voltage_layout.addWidget(self.v_ion_grid_edit, 0, 1)
-        projection_voltage_layout.addWidget(QLabel("V_Repeller"), 0, 2)
-        projection_voltage_layout.addWidget(self.v_repeller_edit, 0, 3)
-        projection_voltage_layout.addWidget(QLabel("V_E.Grid"), 1, 0)
-        projection_voltage_layout.addWidget(self.v_e_grid_edit, 1, 1)
+        projection_voltage_group, projection_voltage_layout = make_grid_section("Spectrometer Voltages & Calibration")
+        projection_voltage_layout.addWidget(QLabel("F (V/cm)"), 0, 0)
+        projection_voltage_layout.addWidget(self.field_f_vcm_edit, 0, 1)
+        projection_voltage_layout.addWidget(QLabel("Lens L"), 0, 2)
+        projection_voltage_layout.addWidget(self.field_l_edit, 0, 3)
+        projection_voltage_layout.addWidget(QLabel("V_offset"), 1, 0)
+        projection_voltage_layout.addWidget(self.voltage_offset_edit, 1, 1)
+        projection_voltage_layout.addWidget(self.auto_offset_checkbox, 1, 2, 1, 2)
+        projection_voltage_layout.addWidget(QLabel("V_I.Grid"), 2, 0)
+        projection_voltage_layout.addWidget(self.v_ion_grid_edit, 2, 1)
+        projection_voltage_layout.addWidget(QLabel("V_Repeller"), 2, 2)
+        projection_voltage_layout.addWidget(self.v_repeller_edit, 2, 3)
+        projection_voltage_layout.addWidget(QLabel("V_E.Grid"), 3, 0)
+        projection_voltage_layout.addWidget(self.v_e_grid_edit, 3, 1)
         projection_voltage_layout.addWidget(QLabel("V_Extractor"), 1, 2)
         projection_voltage_layout.addWidget(self.v_extractor_edit, 1, 3)
         projection_voltage_layout.addWidget(QLabel("V_Detector"), 2, 0)
         projection_voltage_layout.addWidget(self.v_detector_edit, 2, 1)
 
-        reconstruction_group, reconstruction_layout = make_vbox_section("Reconstruction Parameters")
-        self.update_reconstruction_btn = QPushButton("Update Reconstruction")
-        self.update_reconstruction_btn.clicked.connect(self.run_reconstruction_now)
-        reconstruction_layout.addWidget(self.update_reconstruction_btn)
+        reconstruction_group, reconstruction_layout = make_vbox_section("rBasex — Run")
+        reconstruction_layout.addWidget(self.reconstruct_btn)
         reconstruction_layout.addWidget(
             QLabel("Prepare the centered image in Electron Binned Image, then tune rBasex settings here.")
         )
@@ -2272,17 +2080,34 @@ class MainWindow(QMainWindow):
             }
             """
         )
-        self.control_tabs.addTab(self._build_control_tab_scroll_area(file_group, file_notes_group), "File")
         self.control_tabs.addTab(
-            self._build_control_tab_scroll_area(ion_hist_controls_group, ion_hist_display_group),
+            self._build_control_tab_scroll_area(
+                file_group, file_notes_group, drives="file loading, trigger mode, sessions"
+            ),
+            "File",
+        )
+        self.control_tabs.addTab(
+            self._build_control_tab_scroll_area(
+                ion_hist_controls_group, ion_hist_display_group, drives="Ion Histogram panel (top row, 1st)"
+            ),
             "Ion Histogram",
         )
         self.control_tabs.addTab(
-            self._build_control_tab_scroll_area(ion_tof_params_group, ion_tof_display_group, ion_tof_alignment_group),
+            self._build_control_tab_scroll_area(
+                ion_tof_params_group,
+                ion_tof_display_group,
+                ion_tof_alignment_group,
+                drives="Ion X/Y-TOF Map panel (bottom row, 1st)",
+            ),
             "Ion Coincidence",
         )
         self.control_tabs.addTab(
-            self._build_control_tab_scroll_area(electron_actions_group, electron_params_group, electron_display_group),
+            self._build_control_tab_scroll_area(
+                electron_actions_group,
+                electron_params_group,
+                electron_display_group,
+                drives="Electron Scatter panel (top row, 2nd)",
+            ),
             "Electron Scatter",
         )
         self.control_tabs.addTab(
@@ -2290,6 +2115,7 @@ class MainWindow(QMainWindow):
                 ion_scatter_actions_group,
                 ion_scatter_params_group,
                 ion_scatter_display_group,
+                drives="Ion Scatter panel (bottom row, 2nd)",
             ),
             "Ion Scatter",
         )
@@ -2299,11 +2125,16 @@ class MainWindow(QMainWindow):
                 projection_params_group,
                 projection_display_group,
                 projection_voltage_group,
+                drives="Centered Bin Map (top row, 3rd) + Radial Profile (bottom row, 3rd)",
             ),
             "Electron Binned Image",
         )
         self.control_tabs.addTab(
-            self._build_control_tab_scroll_area(reconstruction_group, rbasex_param_group),
+            self._build_control_tab_scroll_area(
+                reconstruction_group,
+                rbasex_param_group,
+                drives="rBasex Reconstruction image (top row, 4th) + rBasex Recovered Profile (bottom row, 4th)",
+            ),
             "Reconstruction",
         )
         self.control_tab_indices = {
@@ -2328,6 +2159,8 @@ class MainWindow(QMainWindow):
         file_bar_row.addWidget(self.settings_toggle_btn)
         self.settings_target_label = QLabel("Target: File")
         self.settings_target_label.setStyleSheet("color: #666; font-weight: 600; padding-left: 2px;")
+        self.settings_target_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.settings_target_label.setMinimumWidth(0)
         file_bar_row.addWidget(self.settings_target_label)
         file_bar_row.addWidget(self.load_btn)
         file_bar_row.addWidget(self.process_btn)
@@ -2341,6 +2174,8 @@ class MainWindow(QMainWindow):
 
         status_row = QHBoxLayout()
         self.status_label = QLabel("Status: waiting for files")
+        self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.status_label.setMinimumWidth(0)
         status_row.addWidget(self.status_label, stretch=1)
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
@@ -2461,6 +2296,15 @@ class MainWindow(QMainWindow):
         set_widget_bg_white(self.plot_scroll.viewport())
         self.plot_scroll.viewport().setMouseTracking(True)
         plot_layout.addWidget(self.plot_scroll, stretch=1)
+        # Debounced canvas re-fit on window resizes (see resizeEvent): keeps
+        # maximized/full-screen windows showing the whole dashboard, while
+        # tray toggles (no window resize) keep the canvas size stable.
+        self._canvas_refit_timer = QTimer(self)
+        self._canvas_refit_timer.setSingleShot(True)
+        self._canvas_refit_timer.setInterval(250)
+        self._canvas_refit_timer.timeout.connect(
+            lambda: self._configure_plot_canvas_size(fit_to_viewport=True)
+        )
 
         self.h_view_slider = QSlider(Qt.Horizontal)
         self.h_view_slider.setMinimum(0)
@@ -3993,12 +3837,20 @@ class MainWindow(QMainWindow):
         hbar.rangeChanged.connect(lambda _a, _b: update_slider_range())
         update_slider_range()
 
-    def _build_control_tab_scroll_area(self, *groups: QGroupBox) -> QScrollArea:
-        """Wrap one or more existing control groups into a tab-local scroll area."""
+    def _build_control_tab_scroll_area(self, *groups: QGroupBox, drives: str = "") -> QScrollArea:
+        """Wrap one or more existing control groups into a tab-local scroll area.
+
+        ``drives`` names the dashboard panels the tab controls, shown as a
+        one-line hint at the top so the tab-to-panel mapping is obvious.
+        """
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
+        if drives:
+            drives_label = QLabel(f"Drives: {drives}")
+            drives_label.setStyleSheet("color: #5a6572; font-size: 11px; padding: 1px 2px;")
+            layout.addWidget(drives_label)
         for group in groups:
             if group is not None:
                 layout.addWidget(group)
@@ -4837,13 +4689,18 @@ class MainWindow(QMainWindow):
             self._sync_toolbar_current_view_for_axis(self.ax_hist_ion)
             self.canvas.draw_idle()
 
-    def _configure_plot_canvas_size(self) -> None:
-        """Size the plot canvas without forcing an oversized main-window minimum."""
+    def _configure_plot_canvas_size(self, *, fit_to_viewport: bool = False) -> None:
+        """Size the plot canvas without forcing an oversized main-window minimum.
+
+        With ``fit_to_viewport`` (used on window resizes) the canvas is also
+        clamped DOWN to the current plot viewport, so maximized/full-screen
+        windows show the whole dashboard without panning; below the minimum
+        floors the scrollbars take over (always visible).
+        """
         dpi = float(self.figure.get_dpi())
         scale = float(PLOT_CANVAS_DISPLAY_SCALE)
         preferred_w = max(int(round(self.figure.get_figwidth() * dpi * scale)), 1480)
         preferred_h = max(int(round(self.figure.get_figheight() * dpi * scale)), 700)
-        self.canvas.resize(preferred_w, preferred_h)
 
         min_w = 1080
         min_h = 500
@@ -4852,8 +4709,31 @@ class MainWindow(QMainWindow):
             geom = screen.availableGeometry()
             min_w = min(min_w, max(760, int(geom.width()) - 260))
             min_h = min(min_h, max(400, int(geom.height()) - 300))
+
+        if fit_to_viewport and getattr(self, "plot_scroll", None) is not None:
+            viewport = self.plot_scroll.viewport()
+            avail_w = int(viewport.width()) - 4
+            avail_h = int(viewport.height()) - 4
+            if avail_w > 50:
+                preferred_w = min(preferred_w, max(avail_w, min_w))
+            if avail_h > 50:
+                preferred_h = min(preferred_h, max(avail_h, min_h))
+
+        self.canvas.resize(preferred_w, preferred_h)
         self.canvas.setMinimumSize(max(min_w, 1), max(min_h, 1))
         self._sync_plot_canvas_host_size()
+
+    def resizeEvent(self, event):  # noqa: N802 (Qt override)
+        """Debounced canvas re-fit so window resizes keep the dashboard fully visible.
+
+        The re-fit is keyed to WINDOW resizes only: settings-tray toggles
+        change the viewport without resizing the window, so the stable canvas
+        size guarantee from §14.4 is preserved during tray toggles.
+        """
+        super().resizeEvent(event)
+        timer = getattr(self, "_canvas_refit_timer", None)
+        if timer is not None:
+            timer.start()
 
     def _sync_plot_canvas_host_size(self) -> None:
         """Keep the scroll host/preview exactly aligned to the live matplotlib canvas size.
@@ -8410,51 +8290,55 @@ class MainWindow(QMainWindow):
         self._clear_colorbar_attr("centered_bin_compare_colorbar")
         self._clear_colorbar_attr("centered_bin_compare_colorbar_ax")
 
-    def _create_centered_bin_colorbar_axis(self, side: str):
-        """Create a dedicated colorbar axis near centered-bin panel without resizing it."""
+    def _create_centered_bin_colorbar_axis(self, index: int = 0, count: int = 1):
+        """Create a dedicated colorbar axis right of the centered-bin panel.
+
+        ``index``/``count`` vertically stack ``count`` bars in the right gap:
+        index 0 is the UPPER slot, index 1 the lower one. Compare mode stacks
+        the projection (upper) and rBasex (lower) bars so neither is squeezed
+        into an inter-panel gap with its labels sticking into neighbouring
+        panel text; side-by-side bars cannot work because each bar's
+        right-facing tick labels (~40 px) are wider than any safe inter-bar
+        gap. Single-colorbar mode (count=1) keeps the historical geometry.
+        """
         ax = getattr(self, "ax_centered_bin", None)
         if ax is None:
             return None
 
         pos = ax.get_position()
-        y0 = float(pos.y0 + 0.06 * pos.height)
-        h = float(max(0.12 * pos.height, 0.88 * pos.height))
+        count = max(1, int(count))
+        index = min(max(0, int(index)), count - 1)
 
-        if side == "left":
-            neighbor = getattr(self, "ax_scatter_e", None)
-            neighbor_edge = float(neighbor.get_position().x1) if neighbor is not None else float(pos.x0 - 0.03)
-            gap = max(float(pos.x0 - neighbor_edge), 0.010)
-            width = float(np.clip(gap * 0.22, 0.0038, 0.0075))
-            pad = float(np.clip(gap * 0.42, 0.0065, 0.015))
-            x0 = float(pos.x0 - pad - width)
-            x0 = max(0.001, x0)
+        neighbor = getattr(self, "ax_reserved_top", None)
+        neighbor_edge = float(neighbor.get_position().x0) if neighbor is not None else float(pos.x1 + 0.03)
+        gap = max(float(neighbor_edge - pos.x1), 0.010)
+        width = float(np.clip(gap * 0.22, 0.0038, 0.0075))
+        pad = float(np.clip(gap * 0.34, 0.0055, 0.012))
+        x0 = float(pos.x1 + pad)
+        x_max = 0.999 - width
+        x0 = min(max(0.001, x0), max(0.001, x_max))
+
+        base_y0 = float(pos.y0 + 0.06 * pos.height)
+        total_h = float(max(0.12 * pos.height, 0.88 * pos.height))
+        if count <= 1:
+            y0, h = base_y0, total_h
         else:
-            neighbor = getattr(self, "ax_reserved_top", None)
-            neighbor_edge = float(neighbor.get_position().x0) if neighbor is not None else float(pos.x1 + 0.03)
-            gap = max(float(neighbor_edge - pos.x1), 0.010)
-            width = float(np.clip(gap * 0.22, 0.0038, 0.0075))
-            pad = float(np.clip(gap * 0.34, 0.0055, 0.012))
-            x0 = float(pos.x1 + pad)
-            x_max = 0.999 - width
-            x0 = min(max(0.001, x0), max(0.001, x_max))
+            slot_gap = 0.06 * pos.height
+            slot_h = max((total_h - slot_gap * (count - 1)) / count, 0.08 * pos.height)
+            y0 = base_y0 + (count - 1 - index) * (slot_h + slot_gap)
+            h = slot_h
 
         cax = self.figure.add_axes([x0, y0, width, h])
         cax.set_in_layout(False)
         return cax
 
     @staticmethod
-    def _style_centered_bin_colorbar(colorbar, side: str) -> None:
+    def _style_centered_bin_colorbar(colorbar, side: str = "right") -> None:
         """Place colorbar ticks/label on the outer side to avoid overlap with image."""
         if colorbar is None:
             return
         cax = getattr(colorbar, "ax", None)
         if cax is None:
-            return
-        if side == "left":
-            with contextlib.suppress(Exception):
-                cax.yaxis.set_ticks_position("left")
-                cax.yaxis.set_label_position("left")
-                cax.tick_params(axis="y", left=True, right=False, labelleft=True, labelright=False, pad=2)
             return
         with contextlib.suppress(Exception):
             cax.yaxis.set_ticks_position("right")
@@ -22703,19 +22587,30 @@ class MainWindow(QMainWindow):
                 )
         if ax is self.ax_centered_bin and self.centered_bin_colorbar_checkbox.isChecked():
             if image_left is not None:
-                cbar_side = "left" if compare_mode else "right"
-                self.centered_bin_colorbar_ax = self._create_centered_bin_colorbar_axis(cbar_side)
+                # Compare mode stacks BOTH colorbars vertically in the right
+                # gap (projection upper, rBasex lower) with compact labels:
+                # side-by-side bars cannot work (each bar's right-facing tick
+                # labels are wider than any safe inter-bar gap), and a left
+                # gap bar sticks its label into the neighbouring panel.
+                cbar_count = 2 if compare_mode else 1
+                self.centered_bin_colorbar_ax = self._create_centered_bin_colorbar_axis(index=0, count=cbar_count)
                 self.centered_bin_colorbar = self.figure.colorbar(image_left, cax=self.centered_bin_colorbar_ax)
-                self.centered_bin_colorbar.set_label(
-                    "Denoised counts (log scale)" if scale_mode == "log" else "Denoised counts",
-                    labelpad=6,
-                )
-                self._style_centered_bin_colorbar(self.centered_bin_colorbar, cbar_side)
+                if compare_mode:
+                    self.centered_bin_colorbar.set_label(
+                        "Counts (log)" if scale_mode == "log" else "Counts",
+                        labelpad=4,
+                    )
+                else:
+                    self.centered_bin_colorbar.set_label(
+                        "Denoised counts (log scale)" if scale_mode == "log" else "Denoised counts",
+                        labelpad=6,
+                    )
+                self._style_centered_bin_colorbar(self.centered_bin_colorbar)
             if compare_mode and image_right is not None:
-                self.centered_bin_compare_colorbar_ax = self._create_centered_bin_colorbar_axis("right")
+                self.centered_bin_compare_colorbar_ax = self._create_centered_bin_colorbar_axis(index=1, count=2)
                 self.centered_bin_compare_colorbar = self.figure.colorbar(image_right, cax=self.centered_bin_compare_colorbar_ax)
-                self.centered_bin_compare_colorbar.set_label("rBasex intensity (display scale)", labelpad=6)
-                self._style_centered_bin_colorbar(self.centered_bin_compare_colorbar, "right")
+                self.centered_bin_compare_colorbar.set_label("rBasex", labelpad=4)
+                self._style_centered_bin_colorbar(self.centered_bin_compare_colorbar)
         ax.axhline(0.0, color="#8f8f8f", linewidth=1.0, alpha=0.7)
         ax.axvline(0.0, color="#8f8f8f", linewidth=1.0, alpha=0.7)
         if compare_mode:
@@ -23110,6 +23005,7 @@ class MainWindow(QMainWindow):
         self._clear_rbasex_profile_secondary_xaxis()
         self._clear_rbasex_profile_secondary_yaxis()
         ax.clear()
+        ax.set_title("rBasex Recovered Profile")
         self.rbasex_profile_last_r_centers = np.zeros(0, dtype=np.float64)
         self.rbasex_profile_last_x_display = np.zeros(0, dtype=np.float64)
         self.rbasex_profile_last_y_raw = np.zeros(0, dtype=np.float64)

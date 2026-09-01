@@ -690,3 +690,57 @@ background and the press recaptures, full 360-degree sweep) and
 invalidates both buffers + geometry keys; both toggle directions leave no
 stale-geometry background). All suites green; goldens byte-unchanged;
 `bench_drag` ghost detector 17/17 EXACT-INTERIOR.
+
+### 16j. UI polish round (2026-09-01)
+
+> User-reported: (1) compare-mode left colorbar overlapped text, (2) settings
+> tabs felt disorganized, (3) the rBasex radial-profile panel had no title,
+> (4) full screen clipped the app with no scrollbars until exiting.
+
+**16j-1 Compare colorbar + profile title.** In compare mode the projection
+colorbar was squeezed into the narrow left inter-panel gap (8-17 px wide)
+with its outward-facing label overlapping neighbouring text. Side-by-side
+bars in the right gap cannot work (each bar's right-facing tick labels are
+wider than any safe inter-bar gap), so compare mode now stacks BOTH colorbars
+vertically in the right gap (projection upper, rBasex lower) with compact
+labels ("Counts"/"Counts (log)", "rBasex"); single-colorbar mode keeps the
+historical geometry and label. `_create_centered_bin_colorbar_axis` gained
+index/count stacking; the dead "left" branch was removed. A new bbox
+intersection check (`check_compare_colorbar_no_overlap`) asserts zero >1px^2
+conflicts between every colorbar cax and all texts/axes/other cax, in both
+compare ON and OFF states. The rBasex radial-profile panel now carries the
+"rBasex Recovered Profile" title (placeholder path included); the startup
+placeholder check no longer exempts it.
+
+**16j-2 Settings tab reorganization.** The control builder still contained
+the entire pre-tab legacy layout (`control_grid` + six outer group boxes,
+~200 statements) that is never displayed — every widget it added was
+re-parented by the later per-tab sections (verified: zero widgets existed
+only in the legacy grids; the constructed widget tree is byte-identical
+before/after deletion). The dead layout was removed. The live sections were
+renamed from generic titles ("Controls"/"Parameters"/"Display"/"Actions"/
+"Voltages") to panel-driven ones (e.g. "Center Estimation, Rings & Filters",
+"Ion X/Y-TOF Map — Binning & ROI", "Centered Bin Map & Radial Profile",
+"Spectrometer Voltages & Calibration" — the F/Lens/V_offset calibration rows
+moved in with the detector voltages they belong to), and every tab now opens
+with a "Drives: <panels>" hint line mapping the tab to its dashboard panels.
+"Start Reconstruction" moved into the Reconstruction tab (rBasex — Run),
+replacing the duplicate "Update Reconstruction" button (same slot, zero
+external references). No signal connections changed; the widget-set dump is
+identical apart from the six new hint labels.
+
+**16j-3 Window-mode fit.** The main window's minimum width was pinned at
+2404 px by the file bar (the trigger-mode combo's 726 px widest-item hint
+plus text-width labels), so in full screen the central widget overflowed the
+screen and the clipped right edge carried the scrollbars — the reported
+"no scrollbars until exiting full screen". The combo now uses
+AdjustToMinimumContentsLengthWithIcon and the three file-bar labels are
+horizontally Ignored, bringing the window minimum to ~1534 px (the push
+button text floor). `_configure_plot_canvas_size(fit_to_viewport=)` clamps
+the canvas to the plot viewport, and a debounced (250 ms) `resizeEvent` hook
+re-fits on WINDOW resizes only — settings-tray toggles do not resize the
+window, preserving the §14.4 stable-canvas guarantee. New
+`check_window_mode_fit` locks: shrinkable window, viewport-fit canvas at
+resized sizes, scrollbars visible with real ranges when below the canvas
+floors, and no canvas re-target on tray toggles. All suites green; goldens
+byte-unchanged; bench_drag ghost detector PASS.

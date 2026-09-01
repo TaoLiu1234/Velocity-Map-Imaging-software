@@ -309,7 +309,7 @@ The **Ion Scatter** tab limits which ion events define the coincidences.
   ![Centered bin map and radial profile populated](img/step4_ring_selection.png)
 
 - **Reconstruction parameters.** On the **Reconstruction** tab, the
-  **rBasex Reconstruction Parameters** box controls the pyAbel rBasex
+  **rBasex Model Parameters** box controls the pyAbel rBasex
   inversion: **Order** (basis expansion order, default 2), **Odd terms**
   (include odd beta orders; off by default), **Reg** (regularization,
   blank = None, e.g. 200 for noisy data), **rmax** (`MIN`, `MAX` or an
@@ -317,8 +317,8 @@ The **Ion Scatter** tab limits which ion events define the coincidences.
   **Peak height** (0.12), **Peak prominence** (0.08), **Max peaks** (5),
   **Min-dist frac** (0.06); **Display percentile** (99.7) sets the image
   display clipping.
-- **Run it.** Press **Start Reconstruction** (or **Update Reconstruction**
-  on the Reconstruction tab). The inversion runs asynchronously with a
+- **Run it.** Press **Start Reconstruction** on the **Reconstruction** tab
+  (rBasex — Run box). The inversion runs asynchronously with a
   progress bar; the UI stays responsive. The **rBasex Recon** panel shows
   the inverted image and lists the recovered peaks, one line each:
 
