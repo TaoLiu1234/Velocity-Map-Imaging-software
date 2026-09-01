@@ -972,6 +972,12 @@ class MainWindow(QMainWindow):
         self.bg_ion_rotation = None
         self.bg_rbasex_range = None
         self._ion_rotation_blit_region = None
+        # Canvas pixel size recorded when each blit background was captured.
+        # A restore_region from a background captured at a different canvas
+        # size writes outside the Qt backing store (hard crash on screen;
+        # offscreen Agg only clips), so every fast path validates the geometry
+        # first and falls back to a normal redraw on mismatch.
+        self._blit_bg_geom: dict[str, tuple[int, int] | None] = {}
         # Animated-artist blit sessions for overlay drags (16f): while a drag
         # session is active its overlay artists are excluded from every normal
         # draw, so captured backgrounds can never contain baked-in overlays.
@@ -2993,6 +2999,9 @@ class MainWindow(QMainWindow):
             self.pending_theta_drag_source = None
             self.pending_theta_drag_xy = None
             self.pending_theta_drag_deg = None
+            # 16i: a cancelled theta drag never reaches the release commit, so
+            # clear its draw-event suspension here as well.
+            self._suspend_overlay_draw_event_sync = False
             if theta_source == "centered" and self.centered_hist_data is not None:
                 self._refresh_theta_profile_panels(announce=False, fast_drag=False)
             elif theta_source == "rbasex" and self.rbasex_recon_result is not None:
@@ -3580,6 +3589,7 @@ class MainWindow(QMainWindow):
         """Drop the cached coincidence-map preview background."""
         self.bg_ion_tof_xy_preview = None
         self._ion_tof_fit_preview_bg_key = None
+        self._blit_bg_geom["ion_tof_xy_preview"] = None
 
     def _clear_ion_tof_fit_preview_artists(self) -> None:
         """Remove live coincidence-map preview artists, if present."""
@@ -3635,6 +3645,7 @@ class MainWindow(QMainWindow):
                 try:
                     ax.draw(renderer)  # animated preview artists are skipped: clean
                     self.bg_ion_tof_xy_preview = self.canvas.copy_from_bbox(ax.bbox)
+                    self._record_blit_bg_size("ion_tof_xy_preview")
                 finally:
                     for txt, visible in hidden:
                         with contextlib.suppress(Exception):
@@ -3642,6 +3653,7 @@ class MainWindow(QMainWindow):
                 self._ion_tof_fit_preview_bg_key = bg_key
                 return self.bg_ion_tof_xy_preview is not None
             self.bg_ion_tof_xy_preview = self.canvas.copy_from_bbox(ax.bbox)
+            self._record_blit_bg_size("ion_tof_xy_preview")
             self._ion_tof_fit_preview_bg_key = bg_key
             return True
         except Exception:
@@ -3652,6 +3664,10 @@ class MainWindow(QMainWindow):
         """Present the coincidence preview from cached background without a full redraw."""
         ax = getattr(self, "ax_ion_tof_xy", None)
         if ax is None or self.bg_ion_tof_xy_preview is None:
+            return False
+        if not self._blit_bg_size_matches("ion_tof_xy_preview"):
+            # Stale geometry: never restore, fall back to a normal redraw.
+            self._invalidate_ion_tof_fit_preview_background()
             return False
         try:
             self.canvas.restore_region(self.bg_ion_tof_xy_preview)
@@ -5899,6 +5915,9 @@ class MainWindow(QMainWindow):
             return False
 
         self.centered_right_half_compare_enabled = not self.centered_right_half_compare_enabled
+        # 16i: the centered image is replaced (recon overlay on/off) — the
+        # cached theta-guide backgrounds show the previous content.
+        self._invalidate_theta_blit_backgrounds()
         self._refresh_reconstruction_panels_only()
         self._reset_toolbar_navigation_history()
         if self.centered_right_half_compare_enabled:
@@ -9168,6 +9187,7 @@ class MainWindow(QMainWindow):
         if bool(getattr(self, "_plot_scroll_preview_active", False)):
             self._end_plot_scroll_burst()
         bg = self.bg_scatter_e if axis_key == "electron" else self.bg_scatter_i
+        bg_key = "scatter_e" if axis_key == "electron" else "scatter_i"
         try:
             if bg is None:
                 bg = self._capture_scatter_overlay_blit_background(axis_key)
@@ -9178,6 +9198,16 @@ class MainWindow(QMainWindow):
                     self.bg_scatter_e = bg
                 else:
                     self.bg_scatter_i = bg
+                self._record_blit_bg_size(bg_key)
+            if not self._blit_bg_size_matches(bg_key):
+                # Stale geometry (canvas resized since capture): never restore.
+                if axis_key == "electron":
+                    self.bg_scatter_e = None
+                else:
+                    self.bg_scatter_i = None
+                self._blit_bg_geom[bg_key] = None
+                self._overlay_blit_downgrade(axis_key)
+                return False
             self.canvas.restore_region(bg)
             max_z = 0.0
             ordered = sorted(
@@ -9259,6 +9289,7 @@ class MainWindow(QMainWindow):
             try:
                 ax.draw(renderer)  # animated direction line is skipped: clean base
                 self.bg_ion_rotation = self.canvas.copy_from_bbox(region)
+                self._record_blit_bg_size("ion_rotation")
             finally:
                 for txt, visible in hidden:
                     with contextlib.suppress(Exception):
@@ -9284,6 +9315,13 @@ class MainWindow(QMainWindow):
                 if not self._capture_ion_rotation_blit_background():
                     self._overlay_blit_downgrade("rotation")
                     return False
+            if not self._blit_bg_size_matches("ion_rotation"):
+                # Stale geometry: never restore, fall back to a normal redraw.
+                self.bg_ion_rotation = None
+                self._ion_rotation_blit_region = None
+                self._blit_bg_geom["ion_rotation"] = None
+                self._overlay_blit_downgrade("rotation")
+                return False
             self.canvas.restore_region(self.bg_ion_rotation)
             if self.ion_main_axis_line is not None and self.ion_main_axis_line.axes is ax:
                 ax.draw_artist(self.ion_main_axis_line)
@@ -9338,6 +9376,7 @@ class MainWindow(QMainWindow):
                 try:
                     ax.draw(renderer)  # animated span/text are skipped: clean base
                     self.bg_rbasex_range = self.canvas.copy_from_bbox(ax.bbox)
+                    self._record_blit_bg_size("rbasex_range")
                 finally:
                     for txt, visible in hidden:
                         with contextlib.suppress(Exception):
@@ -9345,6 +9384,12 @@ class MainWindow(QMainWindow):
                 if self.bg_rbasex_range is None:
                     self._overlay_blit_downgrade("rbasex_range")
                     return False
+            if not self._blit_bg_size_matches("rbasex_range"):
+                # Stale geometry: never restore, fall back to a normal redraw.
+                self.bg_rbasex_range = None
+                self._blit_bg_geom["rbasex_range"] = None
+                self._overlay_blit_downgrade("rbasex_range")
+                return False
             self.canvas.restore_region(self.bg_rbasex_range)
             # Z-order sorted like the normal draw: the span (z 3.8) composites
             # over the stats text (z 3) exactly as Axes.draw would.
@@ -9401,6 +9446,36 @@ class MainWindow(QMainWindow):
         self.bg_ion_rotation = None
         self.bg_rbasex_range = None
         self._ion_rotation_blit_region = None
+        self._blit_bg_geom.clear()
+
+    def _record_blit_bg_size(self, key: str) -> None:
+        """Record the canvas size at which a blit background was just captured."""
+        try:
+            self._blit_bg_geom[key] = tuple(self.canvas.get_width_height())
+        except Exception:
+            self._blit_bg_geom[key] = None
+
+    def _blit_bg_size_matches(self, key: str) -> bool:
+        """True if a captured blit background still matches the current canvas size.
+
+        A background captured at a different canvas size must never be passed
+        to ``restore_region``: offscreen Agg silently clips, but the on-screen
+        Qt backing store write goes out of bounds and hard-crashes the app.
+        """
+        geom = self._blit_bg_geom.get(key)
+        if geom is None:
+            return False
+        try:
+            return tuple(geom) == tuple(self.canvas.get_width_height())
+        except Exception:
+            return False
+
+    def _invalidate_theta_blit_backgrounds(self) -> None:
+        """Drop the theta-guide blit backgrounds (centered image changed)."""
+        self.bg_theta_centered = None
+        self.bg_theta_rbasex = None
+        self._blit_bg_geom["theta_centered"] = None
+        self._blit_bg_geom["theta_rbasex"] = None
 
     def _dedupe_overlay_artists(self) -> None:
         """Remove stale duplicate overlay artists from scatter axes."""
@@ -9522,6 +9597,8 @@ class MainWindow(QMainWindow):
         try:
             self.bg_scatter_e = self.canvas.copy_from_bbox(self.ax_scatter_e.bbox)
             self.bg_scatter_i = self.canvas.copy_from_bbox(self.ax_scatter_i.bbox)
+            self._record_blit_bg_size("scatter_e")
+            self._record_blit_bg_size("scatter_i")
         except Exception:
             self._invalidate_blit_background()
 
@@ -9537,14 +9614,18 @@ class MainWindow(QMainWindow):
         if electron:
             try:
                 self.bg_scatter_e = self.canvas.copy_from_bbox(self.ax_scatter_e.bbox)
+                self._record_blit_bg_size("scatter_e")
             except Exception:
                 self.bg_scatter_e = None
+                self._blit_bg_geom["scatter_e"] = None
                 ok = False
         if ion:
             try:
                 self.bg_scatter_i = self.canvas.copy_from_bbox(self.ax_scatter_i.bbox)
+                self._record_blit_bg_size("scatter_i")
             except Exception:
                 self.bg_scatter_i = None
+                self._blit_bg_geom["scatter_i"] = None
                 ok = False
         return ok
 
@@ -9605,6 +9686,8 @@ class MainWindow(QMainWindow):
                 ax_rbasex.draw(renderer)
                 self.bg_theta_centered = self.canvas.copy_from_bbox(ax_centered.bbox)
                 self.bg_theta_rbasex = self.canvas.copy_from_bbox(ax_rbasex.bbox)
+                self._record_blit_bg_size("theta_centered")
+                self._record_blit_bg_size("theta_rbasex")
             finally:
                 for txt, visible in hidden_texts:
                     with contextlib.suppress(Exception):
@@ -9612,6 +9695,8 @@ class MainWindow(QMainWindow):
         except Exception:
             self.bg_theta_centered = None
             self.bg_theta_rbasex = None
+            self._blit_bg_geom["theta_centered"] = None
+            self._blit_bg_geom["theta_rbasex"] = None
         finally:
             for artist, visible in to_hide:
                 with contextlib.suppress(Exception):
@@ -9636,6 +9721,16 @@ class MainWindow(QMainWindow):
 
         if bg is None:
             return False
+        if not self._blit_bg_size_matches("theta_centered" if source == "centered" else "theta_rbasex"):
+            # Canvas was resized (or the panel image replaced) since capture:
+            # never restore a stale region, recapture on the next frame instead.
+            if source == "centered":
+                self.bg_theta_centered = None
+                self._blit_bg_geom["theta_centered"] = None
+            else:
+                self.bg_theta_rbasex = None
+                self._blit_bg_geom["theta_rbasex"] = None
+            return False
         for artist in (main, lo, hi):
             if artist is None or artist.axes is not ax:
                 return False
@@ -9654,8 +9749,10 @@ class MainWindow(QMainWindow):
         except Exception:
             if source == "centered":
                 self.bg_theta_centered = None
+                self._blit_bg_geom["theta_centered"] = None
             else:
                 self.bg_theta_rbasex = None
+                self._blit_bg_geom["theta_rbasex"] = None
             return False
 
     @staticmethod
@@ -11101,6 +11198,7 @@ class MainWindow(QMainWindow):
         self.noise_removed_total = 0.0
         self.rbasex_recon_result = None
         self.centered_right_half_compare_enabled = False
+        self._invalidate_theta_blit_backgrounds()
         self.theta_profile_selected_radius = None
         self.theta_profile_selected_radii = []
         self.theta_profile_last_r_centers = np.zeros(0, dtype=np.float64)
@@ -12325,6 +12423,7 @@ class MainWindow(QMainWindow):
 
         self.centered_hist_data = self._copy_centered_hist_data(results.get("centered_hist_data"))
         self.rbasex_recon_result = self._copy_recon_result(results.get("rbasex_recon_result"))
+        self._invalidate_theta_blit_backgrounds()
         self.noise_removed_total = float(results.get("noise_removed_total", 0.0))
 
         circle_centroid = results.get("circle_centroid")
@@ -12927,6 +13026,7 @@ class MainWindow(QMainWindow):
                 npz_payload.get("rbasex_image"),
                 npz_payload.get("rbasex_extent"),
             )
+            self._invalidate_theta_blit_backgrounds()
 
             center_meta = metadata.get("centering", {})
             circle_centroid = center_meta.get("circle_centroid")
@@ -19378,6 +19478,7 @@ class MainWindow(QMainWindow):
         self.noise_removed_total = float(centered_hist_data.get("removed_total", 0.0))
         self.rbasex_recon_result = None
         self.centered_right_half_compare_enabled = False
+        self._invalidate_theta_blit_backgrounds()
         self.theta_profile_selected_radius = None
         self.theta_profile_selected_radii = []
         self.rbasex_profile_selected_radius = None
@@ -19509,6 +19610,9 @@ class MainWindow(QMainWindow):
         if result is None:
             return
         self.rbasex_recon_result = result
+        # 16i: the recon panel image is replaced — the cached theta-guide
+        # background for that panel shows the previous content.
+        self._invalidate_theta_blit_backgrounds()
         self._progress_update(90, "Refreshing reconstruction panels...")
         self._refresh_reconstruction_panels_only()
         self._reset_toolbar_navigation_history()
@@ -19934,6 +20038,13 @@ class MainWindow(QMainWindow):
             if theta_deg is None:
                 return
             self.dragging_theta_source = source
+            # 16i: suspend the draw-event background sync for the whole drag
+            # session. Its per-draw recapture would otherwise escalate every
+            # draw_idle fallback into a full re-render storm (the freeze).
+            self._suspend_overlay_draw_event_sync = True
+            # Capture the clean guide background once, against the CURRENT
+            # panel content; the frames only blit from here on.
+            self._capture_theta_line_blit_background()
             self.pending_theta_drag_source = None
             self.pending_theta_drag_xy = None
             self.pending_theta_drag_deg = theta_deg
@@ -20178,18 +20289,23 @@ class MainWindow(QMainWindow):
             else:
                 self._clear_ion_tof_fit_pending_selection(update_preview=True)
         if was_dragging_theta is not None:
-            target_ax = self.ax_centered_bin if was_dragging_theta == "centered" else self.ax_reserved_top
-            theta_commit = None
-            if event is not None and event.inaxes is target_ax and event.xdata is not None and event.ydata is not None:
-                theta_commit = self._theta_from_xy(float(event.xdata), float(event.ydata))
-            if theta_commit is None:
-                theta_commit = self.pending_theta_drag_deg
-            if theta_commit is not None:
-                self._apply_theta_from_value(was_dragging_theta, theta_commit, announce=True)
-            elif was_dragging_theta == "centered":
-                self._refresh_theta_profile_panels(announce=True, fast_drag=False)
-            else:
-                self._refresh_rbasex_profile_panels(announce=True, fast_drag=False)
+            try:
+                target_ax = self.ax_centered_bin if was_dragging_theta == "centered" else self.ax_reserved_top
+                theta_commit = None
+                if event is not None and event.inaxes is target_ax and event.xdata is not None and event.ydata is not None:
+                    theta_commit = self._theta_from_xy(float(event.xdata), float(event.ydata))
+                if theta_commit is None:
+                    theta_commit = self.pending_theta_drag_deg
+                if theta_commit is not None:
+                    self._apply_theta_from_value(was_dragging_theta, theta_commit, announce=True)
+                elif was_dragging_theta == "centered":
+                    self._refresh_theta_profile_panels(announce=True, fast_drag=False)
+                else:
+                    self._refresh_rbasex_profile_panels(announce=True, fast_drag=False)
+            finally:
+                # 16i: the theta drag suspended the draw-event background sync;
+                # restore it on every exit path so later draws recapture again.
+                self._suspend_overlay_draw_event_sync = False
         self.pending_theta_drag_source = None
         self.pending_theta_drag_xy = None
         self.pending_theta_drag_deg = None
@@ -20681,7 +20797,15 @@ class MainWindow(QMainWindow):
         """Redraw only overlay artists (ring/rectangle) using cached backgrounds."""
         if bool(getattr(self, "_plot_scroll_preview_active", False)):
             self._end_plot_scroll_burst()
-        if self.bg_scatter_e is None or self.bg_scatter_i is None:
+        if (
+            self.bg_scatter_e is None
+            or self.bg_scatter_i is None
+            or not self._blit_bg_size_matches("scatter_e")
+            or not self._blit_bg_size_matches("scatter_i")
+        ):
+            # Missing or stale-geometry background: force a normal redraw and
+            # recapture instead of restoring an out-of-date region.
+            self._invalidate_blit_background()
             self.canvas.draw_idle()
             return
         try:
@@ -22201,6 +22325,11 @@ class MainWindow(QMainWindow):
         lo.set_data([0.0, r_line * np.cos(lo_rad)], [0.0, r_line * np.sin(lo_rad)])
         hi.set_data([0.0, r_line * np.cos(hi_rad)], [0.0, r_line * np.sin(hi_rad)])
         if not self._blit_theta_guides(source):
+            # 16i: bg missing or stale (e.g. canvas resized mid-drag) — recapture
+            # the clean background once and retry the blit instead of falling
+            # back to a full canvas draw on every frame of the drag.
+            if self._capture_theta_line_blit_background() and self._blit_theta_guides(source):
+                return True
             self.canvas.draw_idle()
         return True
 

@@ -133,6 +133,20 @@ baseline.
    (off-data inner ring -> "(fallback: full set)" branch) and
    `check_empty_selection_scatter` (0-event ion filter -> "No selected
    points" annotation + cleared colorbar).
+3. **FIXED (2026-09-01): theta-guide drag freeze + hard crash (screen-only).**
+   Dragging the radial-profile theta guide through 360 degrees after switching
+   the electron panel to polar view froze the app and then segfaulted it: (a)
+   the draw-event handler re-captured blit backgrounds on every draw during a
+   drag (re-render storm), and (b) `restore_region` of a background captured
+   at a different canvas size writes out of bounds on the real Qt backing
+   store (offscreen Agg only clips, so the crash itself is not reproducible
+   offscreen). Fixed in the app (ARCHITECTURE.md section 16i): geometry-safe
+   blits, draw-event suspension for the whole drag session, self-healing
+   recapture, and invalidation on content change. The offscreen guards are
+   locked by `check_theta_drag_blit_safety` (suspend window, mid-drag resize
+   rejection, press recapture, 360-degree sweep) and
+   `check_compare_toggle_blit_invalidation` (compare refused without a
+   reconstruction; invalidation helper clears both buffers + geometry keys).
 2. **Session restore of the ring center has `%.6g` fidelity.**
    `_load_session_output_from_metadata_path` round-trips the center through
    the `circle_cx/cy_edit` QLineEdits (formatted `%.6g`), so the restored

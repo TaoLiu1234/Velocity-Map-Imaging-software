@@ -1081,6 +1081,231 @@ def check_ion_tof_xy_cache_invalidation(app, MainWindow, windows: list) -> None:
     )
 
 
+def _theta_mouse_event(win, kind: str, xdata: float, ydata: float, button: int = 1):
+    """Build a real MouseEvent at a centered-image data position.
+
+    matplotlib's MouseEvent constructor resolves ``inaxes``/``xdata``/``ydata``
+    from the display position, so transforming through ``transData`` produces
+    an event indistinguishable from a real pointer event on that axes.
+    """
+    from matplotlib.backend_bases import MouseEvent
+
+    ax = win.ax_centered_bin
+    px, py = ax.transData.transform((float(xdata), float(ydata)))
+    return MouseEvent(kind, win.canvas, float(px), float(py), button=button)
+
+
+def _drive_theta_drag_sweep(app, win, angles) -> None:
+    """Press, sweep the theta guide through ``angles`` (degrees), release."""
+    import numpy as np
+
+    xlim = win.ax_centered_bin.get_xlim()
+    ylim = win.ax_centered_bin.get_ylim()
+    r = 0.5 * max(abs(xlim[0]), abs(xlim[1]), abs(ylim[0]), abs(ylim[1]))
+    press = _theta_mouse_event(
+        win, "button_press_event", r * np.cos(np.deg2rad(angles[0])), r * np.sin(np.deg2rad(angles[0]))
+    )
+    if press.inaxes is not win.ax_centered_bin:
+        raise _fail("theta_drag_blit_safety", "press event did not land on the centered image axes")
+    win._on_canvas_press(press)
+    if win.dragging_theta_source != "centered":
+        raise _fail("theta_drag_blit_safety", f"press did not start a theta drag ({win.dragging_theta_source!r})")
+    for angle in angles:
+        move = _theta_mouse_event(
+            win, "motion_notify_event", r * np.cos(np.deg2rad(angle)), r * np.sin(np.deg2rad(angle))
+        )
+        win._on_canvas_move(move)
+        win._flush_theta_drag_preview()
+        app.processEvents()
+    release = _theta_mouse_event(
+        win, "button_release_event", r * np.cos(np.deg2rad(angles[-1])), r * np.sin(np.deg2rad(angles[-1]))
+    )
+    win._on_canvas_release(release)
+    app.processEvents()
+
+
+def _make_binned_window(step: str, app, MainWindow, windows: list):
+    """Prepared window taken through estimate + apply-ring so the centered image exists."""
+    win = _make_prepared_window(app, MainWindow, windows, fine_roi=True)
+    win.circle_cx_edit.setText(f"{INITIAL_CENTER[0]:g}")
+    win.circle_cy_edit.setText(f"{INITIAL_CENTER[1]:g}")
+    win.inner_r_edit.setText(f"{INNER_RADIUS:g}")
+    win.outer_r_edit.setText(f"{OUTER_RADIUS:g}")
+    win.outer_ring_filter_enable_checkbox.setChecked(True)
+    app.processEvents()
+    win.estimate_center_once()
+    wait_until(
+        app,
+        lambda: getattr(win, "circle_centroid", None) is not None or not getattr(win, "_center_busy", False),
+        LOAD_TIMEOUT_S,
+        step,
+        "center estimate",
+    )
+    win.apply_circle_selection()
+    wait_until(
+        app,
+        lambda: getattr(win, "centered_hist_data", None) is not None and not getattr(win, "_proj_busy", False),
+        LOAD_TIMEOUT_S,
+        step,
+        "circle projection",
+    )
+    app.processEvents()
+    if win.centered_hist_data is None:
+        raise _fail(step, "centered histogram missing after apply_circle_selection")
+    return win
+
+
+def check_theta_drag_blit_safety(app, MainWindow, windows: list) -> None:
+    """16i: theta-guide drag must suspend the draw-event sync and guard geometry.
+
+    The reported freeze+crash came from (a) the draw-event handler re-capturing
+    the guide background on every draw during a drag (re-render storm) and
+    (b) ``restore_region`` of a background captured at a different canvas size
+    (out-of-bounds backing-store write on screen; Agg clips offscreen). This
+    check locks the guards: suspend covers the whole press->release window,
+    the handler short-circuits while suspended, a resized canvas invalidates
+    the background instead of restoring it, and a drag press recaptures.
+    """
+    step = "theta_drag_blit_safety"
+    win = _make_binned_window(step, app, MainWindow, windows)
+
+    # Sanity: with a valid background at the current geometry the blit works.
+    win._capture_theta_line_blit_background()
+    if win.bg_theta_centered is None or not win._blit_bg_size_matches("theta_centered"):
+        raise _fail(step, "theta background was not captured at the current canvas size")
+    if not win._blit_theta_guides("centered"):
+        raise _fail(step, "theta guide blit failed at matching geometry")
+
+    # Guard 1: resizing the canvas mid-drag (draw-event sync suspended, so the
+    # handler cannot recapture) must leave the stale background rejected by the
+    # geometry check, never restored (the on-screen out-of-bounds write that
+    # hard-crashed). Outside a drag the draw-event handler legitimately
+    # recaptures after a resize, so suspension is what isolates the guard.
+    old_w, old_h = tuple(win.canvas.get_width_height())
+    dpi = float(win.canvas.figure.dpi)
+    win._suspend_overlay_draw_event_sync = True
+    try:
+        win.canvas.figure.set_size_inches(0.8 * old_w / dpi, old_h / dpi, forward=True)
+        win.canvas.draw()
+        app.processEvents()
+        if win._blit_theta_guides("centered"):
+            raise _fail(step, "theta blit restored a background captured at the pre-resize canvas size")
+        if win.bg_theta_centered is not None:
+            raise _fail(step, "stale theta background survived the geometry check")
+    finally:
+        win._suspend_overlay_draw_event_sync = False
+
+    # Guard 2: a drag press recaptures against the current content and blits.
+    xlim = win.ax_centered_bin.get_xlim()
+    left_x = float(xlim[0]) + 0.25 * (float(xlim[1]) - float(xlim[0]))  # left half: no compare toggle
+    press = _theta_mouse_event(win, "button_press_event", left_x, 0.0)
+    win._on_canvas_press(press)
+    try:
+        if win.dragging_theta_source != "centered":
+            raise _fail(step, "theta drag did not start on the left half of the centered image")
+        if not bool(win._suspend_overlay_draw_event_sync):
+            raise _fail(step, "theta drag press did not suspend the draw-event background sync")
+        if win.bg_theta_centered is None or not win._blit_bg_size_matches("theta_centered"):
+            raise _fail(step, "drag press did not recapture the theta background")
+        if not win._blit_theta_guides("centered"):
+            raise _fail(step, "theta blit failed right after the drag-press recapture")
+
+        # Guard 3: while suspended, the draw-event handler must short-circuit
+        # (no re-render/recapture storm during the drag).
+        calls = {"n": 0}
+        original_capture = win._capture_blit_background_from_current_canvas
+
+        def counting_capture():
+            calls["n"] += 1
+            return original_capture()
+
+        win._capture_blit_background_from_current_canvas = counting_capture
+        try:
+            win._on_canvas_draw_event(None)
+            if calls["n"] != 0:
+                raise _fail(step, "draw-event handler recaptured backgrounds while the drag suspended it")
+        finally:
+            win._capture_blit_background_from_current_canvas = original_capture
+    finally:
+        # Always end the drag so the suspend flag cannot leak into later checks.
+        if win.dragging_theta_source is not None:
+            release = _theta_mouse_event(win, "button_release_event", left_x, 0.0)
+            win._on_canvas_release(release)
+            app.processEvents()
+    if bool(win._suspend_overlay_draw_event_sync):
+        raise _fail(step, "draw-event suspension stayed on after the drag ended")
+
+    # Full 360-degree sweep (the reported gesture) must complete without error
+    # and leave a consistent guide line.
+    _drive_theta_drag_sweep(app, win, list(range(-180, 181, 5)))
+    main_line = getattr(win, "theta_profile_line_main", None)
+    if main_line is None or main_line.axes is not win.ax_centered_bin:
+        raise _fail(step, "theta guide line missing after the 360-degree sweep")
+    theta_text = str(win.theta_profile_theta_edit.text()).strip()
+    if theta_text not in {"180", "180.0", "-180", "-180.0"}:
+        raise _fail(step, f"theta edit after a full 360-degree sweep is {theta_text!r}, want the +-180 wrap")
+    print("Theta drag blit safety OK: suspend window, geometry guard, 360-degree sweep")
+
+
+def check_compare_toggle_blit_invalidation(app, MainWindow, windows: list) -> None:
+    """16i: right-half compare toggling must refresh the theta-guide background.
+
+    With no reconstruction the toggle must be refused (already the case); with
+    a valid rBasex result it must invalidate the cached theta backgrounds in
+    BOTH directions, because the centered image content is replaced.
+    """
+    import numpy as np
+
+    step = "compare_toggle_blit_invalidation"
+    win = _make_binned_window(step, app, MainWindow, windows)
+
+    # Without a reconstruction the compare toggle is refused.
+    if win._toggle_centered_right_half_compare():
+        raise _fail(step, "compare toggle enabled without a reconstruction result")
+    if win.centered_right_half_compare_enabled:
+        raise _fail(step, "compare mode turned on without a reconstruction result")
+
+    # With a reconstruction the toggle works. The toggle must (a) invalidate
+    # the cached guide backgrounds before any refresh (so no drag can restore
+    # pre-toggle content) and (b) produce compare content on the image.
+    win.run_reconstruction_now()
+    wait_until(
+        app,
+        lambda: getattr(win, "rbasex_recon_result", None) is not None and not getattr(win, "_recon_busy", False),
+        120.0,
+        step,
+        "rBasex reconstruction",
+    )
+    app.processEvents()
+    win._capture_theta_line_blit_background()
+    if win.bg_theta_centered is None:
+        raise _fail(step, "theta background missing before the compare toggle")
+    # Unit-pin the invalidation helper itself (both buffers + geometry keys).
+    win._invalidate_theta_blit_backgrounds()
+    if win.bg_theta_centered is not None or win.bg_theta_rbasex is not None:
+        raise _fail(step, "_invalidate_theta_blit_backgrounds left a theta background behind")
+    if win._blit_bg_size_matches("theta_centered") or win._blit_bg_size_matches("theta_rbasex"):
+        raise _fail(step, "_invalidate_theta_blit_backgrounds left geometry keys behind")
+
+    if not win._toggle_centered_right_half_compare() or not win.centered_right_half_compare_enabled:
+        raise _fail(step, "compare toggle failed with a valid reconstruction result")
+    compare_data = win._build_centered_right_half_compare_data(
+        np.asarray(win.centered_hist_data["xedges"], dtype=np.float64),
+        np.asarray(win.centered_hist_data["yedges"], dtype=np.float64),
+    )
+    if compare_data is None:
+        raise _fail(step, "compare data unavailable while compare mode is ON")
+    # After the toggle, whatever background exists must match the current
+    # canvas geometry (stale content is never restorable).
+    if win.bg_theta_centered is not None and not win._blit_bg_size_matches("theta_centered"):
+        raise _fail(step, "stale-geometry theta background survived the compare toggle")
+    if not win._toggle_centered_right_half_compare() or win.centered_right_half_compare_enabled:
+        raise _fail(step, "compare toggle failed to switch OFF")
+    if win.bg_theta_centered is not None and not win._blit_bg_size_matches("theta_centered"):
+        raise _fail(step, "stale-geometry theta background survived the compare toggle OFF")
+    print("Compare toggle blit invalidation OK: refused without recon, invalidated on both toggles")
+
+
 def run_regression_checks(app, MainWindow, windows: list) -> None:
     """Run the post-fix regression extensions (not part of the golden dict)."""
     check_startup_placeholders(app, MainWindow, windows)
@@ -1089,6 +1314,8 @@ def run_regression_checks(app, MainWindow, windows: list) -> None:
     check_empty_selection_scatter(app, MainWindow, windows)
     check_ion_tof_alignment(app, MainWindow, windows)
     check_ion_tof_xy_cache_invalidation(app, MainWindow, windows)
+    check_theta_drag_blit_safety(app, MainWindow, windows)
+    check_compare_toggle_blit_invalidation(app, MainWindow, windows)
 
 
 def main(argv: list[str] | None = None) -> int:

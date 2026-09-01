@@ -629,3 +629,64 @@ unchanged and still pass bit-exactly.
   Four unused-local (F841) findings and one benign quoted-annotation
   (F821) finding in working code were investigated and intentionally left
   untouched. Both test suites re-run green afterwards.
+
+### 16i. Polar/theta-guide blit freeze-and-crash fix (2026-09-01)
+
+> User report: after switching the electron scatter to the polar view, dragging
+> the radial-profile theta guide through a full 360-degree sweep froze the app
+> and then hard-crashed it. Clicking the right half of the centered image
+> (right-half = rBasex recon compare) without a reconstruction was suspected.
+> That toggle was verified to be correctly refused without a reconstruction;
+> the crash came from the drag-blit machinery itself.
+
+Root causes (two compounding bugs left by the 16f refactor):
+
+1. **Draw-event recapture storm (the freeze).** `_on_canvas_draw_event`
+   re-captures the blit backgrounds (a full single-axes re-render) on every
+   canvas draw. During a theta drag, any `draw_idle` fallback fired a draw,
+   which re-entered the handler, re-captured, and re-blitted — escalating the
+   60 Hz drag into a full re-render storm. The existing
+   `_suspend_overlay_draw_event_sync` guard flag existed but the theta drag
+   never set it.
+2. **Stale / geometry-mismatched background (the segfault).**
+   `_toggle_centered_right_half_compare` and `_on_electron_scatter_polar_toggled`
+   replace panel image artists without invalidating `bg_theta_centered` /
+   `bg_theta_rbasex`, and nothing validated that a captured background still
+   matched the current canvas size. `restore_region` of a mismatched buffer is
+   silently clipped by the offscreen Agg buffer, but on the real Qt backing
+   store it writes out of bounds and hard-crashes the process (no Python
+   traceback — why the offscreen harness could not reproduce it).
+
+Fix (all interactive blit backgrounds, uniformly):
+
+- **Geometry-safe blit**: every `copy_from_bbox` capture site records the
+  canvas size (`_blit_bg_geom`, keys `theta_centered`, `theta_rbasex`,
+  `scatter_e`, `scatter_i`, `ion_rotation`, `rbasex_range`,
+  `ion_tof_xy_preview`); every fast path validates the geometry via
+  `_blit_bg_size_matches` BEFORE `restore_region` and on mismatch drops the
+  buffer and falls back to the whole-axes safe redraw. A stale region can
+  never be restored again.
+- **Suspend for the whole drag session**: the theta-drag press sets
+  `_suspend_overlay_draw_event_sync = True` and captures the clean guide
+  background once against the current content; the release commit resets the
+  flag in a `finally` (and the drag-cancel helper resets it too), so no draw
+  can trigger the recapture storm mid-drag and the flag cannot leak.
+- **Self-healing drag frames**: `_preview_theta_line_only` now recaptures the
+  background once and retries the blit when the geometry check rejects it
+  (e.g. a canvas resize mid-drag), instead of degrading every remaining frame
+  to full canvas redraws.
+- **Invalidation on content change**: `_invalidate_theta_blit_backgrounds()`
+  is called when the centered/recon images are replaced — compare toggle (both
+  directions), `_apply_circle_projection_result`, `_clear_circle_result`,
+  `_collect_recon_results`, and both session-restore paths. The electron polar
+  toggle does not touch those images (the geometry guard covers its canvas
+  resize side effect).
+
+Regression tests (offscreen; they lock the guards, since the segfault itself
+is screen-only): `check_theta_drag_blit_safety` (suspend window press->release,
+handler short-circuit while suspended, mid-drag resize rejects the stale
+background and the press recaptures, full 360-degree sweep) and
+`check_compare_toggle_blit_invalidation` (refused without recon; helper
+invalidates both buffers + geometry keys; both toggle directions leave no
+stale-geometry background). All suites green; goldens byte-unchanged;
+`bench_drag` ghost detector 17/17 EXACT-INTERIOR.
