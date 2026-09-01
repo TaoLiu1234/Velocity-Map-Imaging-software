@@ -1808,6 +1808,99 @@ def check_recon_busy_popup_safety(app, MainWindow, windows: list) -> None:
                 win._recon_busy = False
 
 
+def check_recon_collect_no_pump(app, MainWindow, windows: list) -> None:
+    """16p: recon completion must not pump the event loop at all.
+
+    The collection slot clears ``_recon_busy`` at its top (the combo unlock,
+    thread teardown and status paths rely on that position), so the 16o busy
+    guard no longer covers the two ``_progress_update`` pumps (90% / 100%)
+    that sit around the full-canvas panel refresh. A pump there dispatches
+    paint events re-entrantly into a half-finished render — the
+    "QPainter: Painter not active" freeze/hang seen by the user on Qt 6.7
+    (offscreen Agg tolerates it, so this lock counts the calls instead).
+
+    Locks in: the unconditional suspension flag is set during the direct
+    ``_collect_recon_results`` call (with the popup closed, worker finished)
+    such that ZERO ``QApplication.processEvents`` calls happen between slot
+    entry and the finished status, and the flag is restored False after.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    import VMI_workflow_reconstruction as vwr
+
+    step = "recon_collect_no_pump"
+    win = _make_binned_window(step, app, MainWindow, windows)
+    idx = win.recon_method_combo.findData("hansenlaw")
+    if idx < 0:
+        raise _fail(step, "hansenlaw missing from the method combo")
+    win.recon_method_combo.setCurrentIndex(idx)
+    app.processEvents()
+
+    real_transform = vwr.abel.Transform
+    state = {"calls": 0}
+
+    def slow_transform(*args, **kwargs):
+        state["calls"] += 1
+        time.sleep(1.5)
+        return real_transform(*args, **kwargs)
+
+    real_process_events = QApplication.processEvents
+    pumped = {"n": 0}
+
+    def counting_process_events(*args, **kwargs):
+        pumped["n"] += 1
+        return real_process_events(*args, **kwargs)
+
+    try:
+        vwr.abel.Transform = slow_transform
+        win.run_reconstruction_now()
+        app.processEvents()
+        wait_until(app, lambda: state["calls"] >= 1, 15.0, step, "slow Transform invocation")
+        # Stop the poll timer so the automatic completion tick cannot collect;
+        # the worker below finishes during the wait and stays uncollected.
+        win._recon_progress_timer.stop()
+        wait_until(
+            app,
+            lambda: win._recon_worker is not None and getattr(win._recon_worker, "finished", False),
+            30.0,
+            step,
+            "slow transform completion",
+        )
+        if not getattr(win, "_recon_busy", False):
+            raise _fail(step, "_recon_busy must still be True before collection")
+        if win.rbasex_recon_result is not None:
+            raise _fail(step, "result set before the direct collection (poll timer not stopped?)")
+
+        # Drive the completion slot directly (popup closed) and count every
+        # QApplication.processEvents call made from inside it.
+        QApplication.processEvents = staticmethod(counting_process_events)
+        pumped["n"] = 0
+        win._collect_recon_results(win._recon_worker)
+        QApplication.processEvents = real_process_events
+        if pumped["n"] != 0:
+            raise _fail(step, f"collection pumped the event loop {pumped['n']}x (re-entrancy crash class)")
+        if getattr(win, "_suspend_progress_event_pump_unconditional", False):
+            raise _fail(step, "unconditional pump suspension flag left set after collection")
+        if getattr(win, "_recon_busy", False):
+            raise _fail(step, "_recon_busy must be False after the direct collection")
+        if win.rbasex_recon_result is None:
+            raise _fail(step, "rbasex_recon_result missing after the direct collection")
+        if not win.recon_method_combo.isEnabled():
+            raise _fail(step, "method combo must unlock after the direct collection")
+        print("Recon collect no-pump OK: zero processEvents during completion, suspension flag restored")
+    finally:
+        QApplication.processEvents = real_process_events
+        vwr.abel.Transform = real_transform
+        if getattr(win, "_recon_busy", False):
+            with contextlib_suppress():
+                win.recon_method_combo.setEnabled(True)
+                win._recon_busy = False
+        with contextlib_suppress():
+            win._suspend_progress_event_pump_unconditional = False
+        with contextlib_suppress():
+            win._recon_progress_timer.stop()
+
+
 def contextlib_suppress():
     import contextlib
 
@@ -1829,6 +1922,7 @@ def run_regression_checks(app, MainWindow, windows: list) -> None:
     check_tab_toggle_and_theme(app, MainWindow, windows)
     check_alt_method_reconstruction(app, MainWindow, windows)
     check_recon_busy_popup_safety(app, MainWindow, windows)
+    check_recon_collect_no_pump(app, MainWindow, windows)
 
 
 def main(argv: list[str] | None = None) -> int:

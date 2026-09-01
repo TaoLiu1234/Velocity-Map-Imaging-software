@@ -929,6 +929,9 @@ class MainWindow(QMainWindow):
         self.session_saved_trigger_event_counts: tuple[int, ...] | None = None
         self._suspend_layout_refresh = False
         self._suspend_overlay_draw_event_sync = False
+        # 16p: unconditional (all platforms) progress-pump suspension, set for
+        # the whole _collect_recon_results slot (see _pump_progress_events_if_safe).
+        self._suspend_progress_event_pump_unconditional = False
         self.operation_log: list[dict[str, str]] = []
         self._subplot_action_markers: dict[str, dict[str, object]] = {}
         self._axis_last_blit_extents: dict[int, tuple[float, float, float, float]] = {}
@@ -10712,6 +10715,16 @@ class MainWindow(QMainWindow):
         120 ms poll timer), so the normal event loop repaints everything
         without any pumping; skip the pump entirely while it runs.
         """
+        # 16p: during reconstruction completion the collection slot must never
+        # pump while it runs: it clears _recon_busy at its top (so the 16o
+        # guard no longer covers it) and then refreshes panels with a
+        # full-canvas re-render between the 90% and 100% progress updates —
+        # re-entrant event dispatch into a half-finished render is the
+        # "QPainter: Painter not active" freeze/hang class on Qt 6.7. This
+        # flag is unconditional (all platforms) and is honored BEFORE the
+        # Windows-only save/export flag, whose platform scoping is unrelated.
+        if bool(getattr(self, "_suspend_progress_event_pump_unconditional", False)):
+            return
         if sys.platform.startswith("win") and bool(getattr(self, "_suspend_progress_event_pump", False)):
             return
         # 16o: never pump while the async reconstruction runs (slot re-entrancy
@@ -19575,46 +19588,59 @@ class MainWindow(QMainWindow):
 
     def _collect_recon_results(self, worker: _ReconWorker) -> None:
         """Apply finished worker results on the main thread and tear down."""
-        self._recon_progress_timer.stop()
-        self._recon_busy = False
-        if hasattr(self, "recon_method_combo"):
-            with contextlib.suppress(Exception):
-                self.recon_method_combo.setEnabled(True)
-        thread = self._recon_worker_thread
-        self._recon_worker = None
-        self._recon_worker_thread = None
+        # 16p: THIS SLOT is exactly the re-entrancy window — it clears
+        # _recon_busy at the top (deliberately: the combo unlock, thread
+        # teardown and status paths below all rely on it being False), so the
+        # 16o busy guard no longer covers the two _progress_update pumps (90% /
+        # 100%) that sit around the full-canvas panel refresh. Suspend the
+        # progress pump unconditionally for the whole slot and restore it in a
+        # finally, so no step can re-enter the event loop into a half-finished
+        # render (the "QPainter: Painter not active" freeze on Qt 6.7).
+        previous_suspend_pump = bool(getattr(self, "_suspend_progress_event_pump_unconditional", False))
+        self._suspend_progress_event_pump_unconditional = True
+        try:
+            self._recon_progress_timer.stop()
+            self._recon_busy = False
+            if hasattr(self, "recon_method_combo"):
+                with contextlib.suppress(Exception):
+                    self.recon_method_combo.setEnabled(True)
+            thread = self._recon_worker_thread
+            self._recon_worker = None
+            self._recon_worker_thread = None
 
-        if thread is not None:
-            try:
-                if thread.isRunning():
-                    thread.quit()
-                    thread.wait(1500)
-            except Exception:
-                pass
-            # Worker/thread teardown via thread.finished -> worker.deleteLater /
-            # thread.deleteLater, queued on the main event loop. Never delete
-            # the QObject worker here: deleting a QObject from a thread other
-            # than its (finished) worker thread aborts natively.
+            if thread is not None:
+                try:
+                    if thread.isRunning():
+                        thread.quit()
+                        thread.wait(1500)
+                except Exception:
+                    pass
+                # Worker/thread teardown via thread.finished -> worker.deleteLater /
+                # thread.deleteLater, queued on the main event loop. Never delete
+                # the QObject worker here: deleting a QObject from a thread other
+                # than its (finished) worker thread aborts natively.
 
-        if worker.error:
-            self._set_status(f"Reconstruction failed: {worker.error}")
-            return
-        result = worker.result
-        if result is None:
-            return
-        self.rbasex_recon_result = result
-        # 16i: the recon panel image is replaced — the cached theta-guide
-        # background for that panel shows the previous content.
-        self._invalidate_theta_blit_backgrounds()
-        self._progress_update(90, "Refreshing reconstruction panels...")
-        self._refresh_reconstruction_panels_only()
-        self._reset_toolbar_navigation_history()
-        self._progress_update(100, "Reconstruction finished.")
-        rb_n = len(self.rbasex_recon_result.get("peaks", [])) if self.rbasex_recon_result else 0
-        # 16n: label from the RESULT (the combo was locked during the run, but
-        # read the result anyway so legacy/edge paths cannot mislabel).
-        method_label = abel_method_label(worker.result.get("method"))
-        self._set_status(f"Reconstruction finished: {method_label} peaks={rb_n}.")
+            if worker.error:
+                self._set_status(f"Reconstruction failed: {worker.error}")
+                return
+            result = worker.result
+            if result is None:
+                return
+            self.rbasex_recon_result = result
+            # 16i: the recon panel image is replaced — the cached theta-guide
+            # background for that panel shows the previous content.
+            self._invalidate_theta_blit_backgrounds()
+            self._progress_update(90, "Refreshing reconstruction panels...")
+            self._refresh_reconstruction_panels_only()
+            self._reset_toolbar_navigation_history()
+            self._progress_update(100, "Reconstruction finished.")
+            rb_n = len(self.rbasex_recon_result.get("peaks", [])) if self.rbasex_recon_result else 0
+            # 16n: label from the RESULT (the combo was locked during the run, but
+            # read the result anyway so legacy/edge paths cannot mislabel).
+            method_label = abel_method_label(worker.result.get("method"))
+            self._set_status(f"Reconstruction finished: {method_label} peaks={rb_n}.")
+        finally:
+            self._suspend_progress_event_pump_unconditional = previous_suspend_pump
 
     # ------------------------------------------------------------------
     # Mouse/overlay interaction for ring and ion rectangle

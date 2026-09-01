@@ -155,6 +155,15 @@ baseline.
    therefore compares the restored center with a 1e-3 px tolerance (other
    restored quantities, e.g. denoised histogram sums and rBasex peaks, are
    compared exactly).
+4. **FIXED (2026-09-01): completion-refresh re-entrancy freeze
+   ("QPainter: Painter not active").** The recon collection slot cleared
+   `_recon_busy` at its top, disengaging the 16o busy pump guard while the
+   90%/100% progress updates pumped the event loop around the full-canvas
+   panel refresh (re-entrant paint into a half-finished render; Qt 6.7
+   freezes/aborts the backing store). Fixed in the app (ARCHITECTURE.md
+   section 16p) with an unconditional pump suspension for the whole
+   collection slot; locked by `check_recon_collect_no_pump` (zero
+   `QApplication.processEvents` calls during the completion, flag restored).
 
 ## Notes for later agents: driving the app offscreen
 

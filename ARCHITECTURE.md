@@ -909,3 +909,94 @@ Dual-env testing requirement: UI crash classes are Qt-version-sensitive —
 before releases run `tests/test_smoke.py` in the oldest supported env (the
 user's Qt 6.7.3) AND in the dev env (Qt 6.11.1); see tests/README.md,
 "Testing in multiple environments".
+
+### 16p. Completion-refresh re-entrancy freeze (QPainter not active) (2026-09-01)
+
+> User report: during reconstruction COMPLETION — at the
+> "Refreshing reconstruction panels..." (90%) stage — the app froze and the
+> console showed `QPainter::fillRect: Painter not active` /
+> `QPainter::end: Painter not active, aborted`; the app hung (backing store
+> aborted). Reproduced in the user env (`c:\Users\Tao\.conda\envs\my-env`,
+> Python 3.11.11, PySide6 6.7.2 / Qt 6.7.3) only; the dev env (Python 3.12.9,
+> PySide6 6.11.1 / Qt 6.11.1) tolerates the same call sequence.
+
+Root mechanism (verified by code reading, and consistent with the observed
+signature): `_collect_recon_results` set `self._recon_busy = False` at its
+very TOP, which disengages the 16o busy-guard (`_pump_progress_events_if_safe`
+skips `processEvents()` while `_recon_busy` is True) for the entire
+completion path. Then:
+1. `_progress_update(90, "Refreshing reconstruction panels...")` →
+   `_pump_progress_events_if_safe()` → `QApplication.processEvents()` —
+   RE-ENTRANT event dispatch in the middle of the collection slot.
+2. `_refresh_reconstruction_panels_only()` re-plots the reconstruction image +
+   radial profile (+ the centered compare left half when compare mode is on)
+   and calls `_force_full_canvas_redraw_for_layout_change()` — a full-canvas
+   raster of the large figure, so paint events delivered re-entrantly land in
+   a half-finished render.
+3. `_progress_update(100, ...)` pumps again; `_reset_toolbar_navigation_history()`
+   follows.
+On Qt 6.7 (real window) the re-entrant paint into the incomplete render is the
+"Painter not active" + backing-store abort; Qt 6.11 tolerates it (why the
+offscreen suites were green in both).
+
+Fix (unconditional pump suspension for the whole slot): the collection body
+(including both `_progress_update` pumps, the panel refresh, and the early
+return paths) is now wrapped in `try/finally` that first saves the current
+value, sets a NEW flag `_suspend_progress_event_pump_unconditional = True`,
+and restores it in the `finally`. `_pump_progress_events_if_safe` honors this
+flag unconditionally (all platforms), BEFORE the pre-existing Windows-only
+`_suspend_progress_event_pump` (its only setter is `save_session_output`,
+which deliberately scopes it to Windows; the new flag was kept separate so the
+save/export semantics stay untouched). `_recon_busy = False` was deliberately
+NOT moved to the end — the combo unlock, thread teardown and status paths in
+the slot rely on it being False at their point of use (grep-verified: the only
+`_recon_busy` consumers are the busy gate in `run_reconstruction_now`, the 16o
+pump guard and the slot itself). No behavior change otherwise: same draws,
+same final visuals, same status text (the normal event loop repaints after the
+slot returns; pumping is never required for correctness of the visuals).
+
+Completed-path audit (no other re-entrancy): `_force_full_canvas_redraw_for_layout_change`,
+`_refresh_reconstruction_panels_only`, `_draw_canvas_without_overlay_draw_event_sync`,
+`_present_canvas_now`, `_draw_axes_immediate`, `_reset_toolbar_navigation_history`
+and `_add_subplot_save_markers` contain NO `processEvents`/`flush_events`/`repaint`
+calls — the only `processEvents` sites in the app are the progress pump, the
+clipboard retry helper (`_try_set_image_on_clipboard_qt`, unrelated) and the
+save/export pump (already guarded). `_present_canvas_now` only schedules
+(`canvas.update()`/`draw_idle`), never dispatches. So the pump route is fully
+covered by the new slot-wide flag; no helper needed routing.
+
+Phase 1 reproduction (`_repro_refresh.py`, scratch — deleted after the run):
+real event loop, tray OPEN, hansenlaw with a 4 s-sleeping `abel.Transform`
+monkeypatch so completion lands with realistic timing; two Start clicks (the
+second with the centered right-half compare enabled); plain-thread heartbeat
+every 300 ms; auto-quit at 34 s; stderr captured (Qt writes "Painter not
+active" at C level):
+
+| Cell | Platform | Fixed | Observer result |
+|---|---|---|---|
+| user env (Qt 6.7) | offscreen | unfixed | pass: both completions, no stall, stderr clean |
+| dev env (Qt 6.11) | offscreen | unfixed | pass: both completions, no stall, stderr clean |
+| user env (Qt 6.7) | on-screen | unfixed | **fail**: heartbeat/logs stop after the Start click; the 34 s auto-quit never fires (event loop frozen — the reported freeze); process AV-crashes ~89 s in — Windows event log: `Qt6Widgets.dll` 6.7.3.0, `0xc0000005`, offset `0x38e114` (the 16o documented offset family 0x38e0f0; same DLL, same class) |
+| user env (Qt 6.7) | on-screen | fixed | not clean: process aborted with exit code 127 shortly after the click WITHOUT a WER "Application Error" record (no access violation logged) — distinct from the unfixed AV but also not a clean pass |
+
+Honest caveats: the exact "QPainter: Painter not active" warning text did NOT
+reproduce on the synthetic data (it appeared in neither offscreen nor
+on-screen cells); the on-screen failure appeared as the freeze + delayed AV on
+the unfixed build, i.e. the same class but a harder manifestation. The
+on-screen fixed cell could not be re-run (cell budget), so the fix was not
+validated on-screen in this session: the actual crash/freeze might also
+depend on event timing (the unfixed freeze began before the first completion's
+refresh could print, i.e. inside or right before the 90% pump window — timing
+consistent with the reported symptom but not proven on the synthetic path).
+
+Regression coverage: `check_recon_collect_no_pump` drives a slow-Transform
+reconstruction, stops the poll timer so the completion is NOT collected
+automatically, then calls `win._collect_recon_results(worker)` DIRECTLY (popup
+closed, worker finished — the exact fix window) while `QApplication.processEvents`
+is replaced with a counting wrapper (the pump calls the class-level static
+method, so the instance-level attribute alone could not intercept it): ZERO
+`processEvents` calls may occur between slot entry and the finished status,
+and `_suspend_progress_event_pump_unconditional` must be restored False
+afterwards (plus the collection results in `rbasex_recon_result` set and the
+method combo unlocked). On the unfixed code this fails with `collection pumped
+the event loop 2x`. All suites green in both envs; goldens byte-unchanged.
