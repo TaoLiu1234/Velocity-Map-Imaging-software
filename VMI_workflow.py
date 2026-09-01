@@ -87,6 +87,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from PySide6.QtGui import QColor, QFont, QPalette
 from shiboken6 import isValid as shiboken_is_valid
 
 from VMI_workflow_core import (
@@ -2154,7 +2155,7 @@ class MainWindow(QMainWindow):
         self.settings_toggle_btn.setCheckable(True)
         self.settings_toggle_btn.setMinimumWidth(136)
         self.settings_toggle_btn.setStyleSheet("font-weight: 600; padding: 2px 7px;")
-        self.settings_toggle_btn.setToolTip("Press Tab while focused on the plot area to show or hide the settings tray.")
+        self.settings_toggle_btn.setToolTip("Press Tab anywhere to show or hide the settings tray.")
         self.settings_toggle_btn.clicked.connect(self._toggle_settings_panel_from_button)
         file_bar_row.addWidget(self.settings_toggle_btn)
         self.settings_target_label = QLabel("Target: File")
@@ -2223,7 +2224,7 @@ class MainWindow(QMainWindow):
         self.settings_close_btn = QPushButton("Hide [Tab]")
         self.settings_close_btn.setMinimumWidth(104)
         self.settings_close_btn.setStyleSheet("font-weight: 600; padding: 2px 7px;")
-        self.settings_close_btn.setToolTip("Hide the tray. Press Tab to bring it back.")
+        self.settings_close_btn.setToolTip("Hide the tray. Press Tab anywhere to bring it back.")
         self.settings_close_btn.clicked.connect(lambda _checked=False: self._set_settings_panel_visible(False))
         settings_header_row.addWidget(self.settings_close_btn)
         settings_layout.addLayout(settings_header_row)
@@ -4088,6 +4089,14 @@ class MainWindow(QMainWindow):
     def _toggle_settings_panel_from_shortcut(self) -> None:
         """Toggle the settings tray from the keyboard while preserving the active control tab."""
         self._set_settings_panel_visible(not self._settings_panel_is_visible())
+        # Hiding the tray can hide the focused control, in which case Qt picks
+        # an arbitrary new focus target. Park focus on the plot canvas so the
+        # keyboard Tab stays a pure tray toggle and canvas key/wheel handling
+        # keeps working.
+        focus_widget = QApplication.focusWidget()
+        if focus_widget is None or not focus_widget.isVisible():
+            with contextlib.suppress(Exception):
+                self.canvas.setFocus()
 
     def _select_control_tab(self, tab_name: str, show_panel: bool = True) -> None:
         """Switch the visible control tab if the requested tab exists."""
@@ -4399,14 +4408,19 @@ class MainWindow(QMainWindow):
                 with contextlib.suppress(Exception):
                     self._schedule_toolbar_interaction_sync()
         if event is not None and event.type() == QEvent.Type.KeyPress:
+            # Tab is reserved app-wide for the settings tray (user request):
+            # plain Tab and Shift+Tab toggle the tray instead of moving focus,
+            # from ANY widget in this window. Modifier combos (Ctrl+Tab) and
+            # events aimed at other top-level windows (dialogs, menus) pass
+            # through untouched.
             if (
-                event.key() == Qt.Key_Tab
+                event.key() in (Qt.Key_Tab, Qt.Key_Backtab)
                 and not event.isAutoRepeat()
-                and event.modifiers() == Qt.NoModifier
+                and event.modifiers() in (Qt.NoModifier, Qt.ShiftModifier)
                 and QApplication.activePopupWidget() is None
             ):
-                focus_widget = QApplication.focusWidget()
-                if self._focus_widget_is_plot_region(focus_widget):
+                target_window = obj.window() if isinstance(obj, QWidget) else None
+                if target_window is None or target_window is self:
                     self._toggle_settings_panel_from_shortcut()
                     return True
         if event is not None and bool(getattr(self, "_plot_scroll_preview_active", False)):
@@ -23637,13 +23651,41 @@ class MainWindow(QMainWindow):
         self._mark_plot_scroll_preview_cache_dirty(refresh_soon=True)
 
 
-def main() -> int:
-    """Application entry point."""
-    app = QApplication(sys.argv)
-    app.setApplicationName("VMI_workflow")
-    # Modern light theme: crisp flat surfaces, subtle borders, rounded accents.
-    # Scoped to named widget types so existing inline per-widget styles keep
-    # their specific overrides (tabs, group boxes, settings tray) untouched.
+def apply_application_theme(app: QApplication) -> None:
+    """Apply the app-wide look: Fusion style, light palette, and QSS.
+
+    Fusion renders identically on every OS and Qt build, which (together with
+    the palette and the stylesheet below) guarantees the same interface on
+    different machines and Python/PySide6 versions; the QSS then layers the
+    modern light theme (crisp flat surfaces, subtle borders, rounded accents)
+    on top. Scoped to named widget types so existing inline per-widget styles
+    keep their specific overrides (tabs, group boxes, settings tray).
+    """
+    app.setStyle("Fusion")
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor("#f7f8fa"))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor("#1c2733"))
+    palette.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#f0f3f6"))
+    palette.setColor(QPalette.ColorRole.Text, QColor("#1c2733"))
+    palette.setColor(QPalette.ColorRole.Button, QColor("#ffffff"))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor("#1c2733"))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor("#2f7ac1"))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor("#222a33"))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor("#f2f5f8"))
+    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor("#9aa5b1"))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor("#9aa5b1"))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor("#9aa5b1"))
+    app.setPalette(palette)
+    font = QFont()
+    families = ["Segoe UI Variable", "Segoe UI", "Noto Sans", "DejaVu Sans", "Arial"]
+    if hasattr(font, "setFamilies"):
+        font.setFamilies(families)
+    else:  # pragma: no cover - very old Qt
+        font.setFamily(families[-1])
+    font.setPointSize(9)
+    app.setFont(font)
     app.setStyleSheet(
         """
         QMainWindow, QWidget {
@@ -23782,8 +23824,59 @@ def main() -> int:
         QStatusBar, QLabel#status_label {
             color: #3c4a58;
         }
+        QCheckBox::indicator:hover {
+            border-color: #5b9bd5;
+        }
+        QRadioButton {
+            spacing: 6px;
+        }
+        QRadioButton::indicator {
+            width: 14px;
+            height: 14px;
+            border: 1px solid #b6c2ce;
+            border-radius: 7px;
+            background: #ffffff;
+        }
+        QRadioButton::indicator:checked {
+            background: qradialgradient(cx:0.5, cy:0.5, radius:0.6, fx:0.5, fy:0.5,
+                stop:0 #2f7ac1, stop:0.55 #2f7ac1, stop:0.7 #ffffff, stop:1 #ffffff);
+            border-color: #2f7ac1;
+        }
+        QMenu {
+            background: #ffffff;
+            border: 1px solid #c9d2dc;
+            border-radius: 5px;
+            padding: 4px;
+        }
+        QMenu::item {
+            padding: 4px 18px;
+            border-radius: 3px;
+        }
+        QMenu::item:selected {
+            background: #d7ebff;
+            color: #173e63;
+        }
+        QDialog {
+            background: #f7f8fa;
+        }
+        QAbstractItemView {
+            background: #ffffff;
+            border: 1px solid #c9d2dc;
+            selection-background-color: #d7ebff;
+            selection-color: #173e63;
+            outline: 0;
+        }
+        QTabBar::tab:focus {
+            outline: none;
+        }
         """
     )
+
+def main() -> int:
+    """Application entry point."""
+    app = QApplication(sys.argv)
+    app.setApplicationName("VMI_workflow")
+    apply_application_theme(app)
     window = MainWindow()
     window.show()
     return app.exec()

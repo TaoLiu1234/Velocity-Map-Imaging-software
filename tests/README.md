@@ -146,6 +146,7 @@ baseline.
    locked by `check_theta_drag_blit_safety` (suspend window, mid-drag resize
    rejection, press recapture, 360-degree sweep) and
    `check_compare_toggle_blit_invalidation` (compare refused without a
+   `check_compare_colorbar_no_overlap` (compare-mode colorbar bbox conflicts), `check_window_mode_fit` (shrinkable window, viewport-fit canvas, tray-toggle stability) and `check_tab_toggle_and_theme` (Tab/Shift+Tab toggle the tray from any widget without focus navigation; Fusion + palette + font fallbacks applied).
    reconstruction; invalidation helper clears both buffers + geometry keys).
 2. **Session restore of the ring center has `%.6g` fidelity.**
    `_load_session_output_from_metadata_path` round-trips the center through

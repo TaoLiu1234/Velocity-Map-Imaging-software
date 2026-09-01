@@ -744,3 +744,33 @@ window, preserving the §14.4 stable-canvas guarantee. New
 resized sizes, scrollbars visible with real ranges when below the canvas
 floors, and no canvas re-target on tray toggles. All suites green; goldens
 byte-unchanged; bench_drag ghost detector PASS.
+
+### 16k. Tab reserved for the tray; cross-machine theme pinning (2026-09-01)
+
+> User request: pressing Tab should toggle the settings tray instead of
+> moving keyboard focus, and the app must look the same on every
+> Python/computer setup.
+
+**Tab behavior.** The global event filter previously intercepted Tab only
+while the plot region had focus; everywhere else Tab performed standard
+focus navigation. It now intercepts plain Tab AND Shift+Tab from ANY widget
+of the main window (key Tab or Backtab, no auto-repeat, modifiers only
+none/Shift, no active popup, event target inside this window) and toggles
+the settings tray. Modifier combos (Ctrl+Tab) and dialogs pass through.
+Because hiding the tray can hide the focused control, the shortcut parks
+focus on the plot canvas whenever the app focus widget ends up hidden — a
+deterministic landing spot that keeps canvas keyboard/wheel handling alive;
+Tab never lands on an arbitrary tab-stop. `check_tab_toggle_and_theme`
+locks this (toggle from a tray line edit, round-trip with Shift+Tab, focus
+invariants).
+
+**Look pinning.** The previous theme was QSS-only, so native widget
+geometries still varied with the OS/Qt build. `apply_application_theme()`
+(factor-out of `main()`) now applies the **Fusion** style — identical
+geometry on all platforms — plus a light `QPalette` (window/base/text/
+highlight/tooltip/disabled roles) and an application `QFont` with a family
+fallback chain (Segoe UI Variable → Segoe UI → Noto Sans → DejaVu Sans →
+Arial) so text metrics do not depend on installed fonts. The QSS was kept
+and extended (radio buttons, menus, dialogs, item views, hover states).
+Note: `app.style().objectName()` reads empty once a stylesheet is active
+(QStyleSheetStyle wrapper); assert via the style class instead.

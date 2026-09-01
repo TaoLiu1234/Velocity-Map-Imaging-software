@@ -123,7 +123,7 @@ The top bar always shows, left to right:
 
 Below it, a status row shows the current status text and (during heavy
 operations) a progress bar. The **Settings Tray** below the plot area holds
-the seven tabs — press **Tab** while the plot area has focus (or click
+the seven tabs — press **Tab** anywhere (or click
 **Settings [Tab]**) to show/hide it.
 
 ![Settings Tray open on the Electron Scatter tab](img/step3b_settings_tray.png)
@@ -392,7 +392,7 @@ The **Ion Scatter** tab limits which ion events define the coincidences.
 | Input | Behaviour |
 |---|---|
 | Mouse wheel over the plot area | fast "burst" scrolling: a cached snapshot of the canvas scrolls instantly, the live figure catches up when the wheel settles (coalesced every ~12 ms). Shift+wheel prefers horizontal scrolling in scroll areas. |
-| **Tab** (plot area focused) | shows/hides the Settings Tray. |
+| **Tab** / **Shift+Tab** (anywhere) | shows/hides the Settings Tray; never moves keyboard focus. |
 | **[copy]** button on each panel | copies that panel's image to the system clipboard. |
 | **[raw]** button on each panel | saves the panel's underlying data bundle to a file. |
 | Typing filter/ROI values | applied live with a ~70-80 ms debounce per edit; drag gestures preview at up to 60 Hz. |

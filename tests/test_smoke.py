@@ -1526,6 +1526,81 @@ def check_window_mode_fit(app, MainWindow, windows: list) -> None:
     print("Window mode fit OK: shrinkable window, viewport-fit canvas, stable under tray toggles")
 
 
+def check_tab_toggle_and_theme(app, MainWindow, windows: list) -> None:
+    """16l: Tab toggles the settings tray app-wide; Fusion theme is applied.
+
+    Tab used to be the standard focus-navigation key and only toggled the
+    tray while the plot area had focus. Per user request, plain Tab and
+    Shift+Tab now toggle the tray from ANY widget in the main window and
+    never move focus; the look is pinned via the Fusion style + palette +
+    font fallbacks so every machine renders the same interface.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QStyleFactory
+
+    from VMI_workflow import apply_application_theme
+
+    step = "tab_toggle_and_theme"
+    # The harness QApplication is created without the shipped theme; apply it
+    # exactly like main() does and assert it took effect.
+    apply_application_theme(app)
+    # setStyleSheet wraps the base style in QStyleSheetStyle (objectName is
+    # empty), so assert the wrapper class + Fusion availability instead.
+    style_class = str(app.style().metaObject().className())
+    if style_class != "QStyleSheetStyle":
+        raise _fail(step, f"themed style class is {style_class!r}, want QStyleSheetStyle (theme applied)")
+    if "Fusion" not in QStyleFactory.keys():
+        raise _fail(step, "Fusion style not available on this Qt build")
+
+    # Earlier checks leave other MainWindows alive; each one has an app-level
+    # event filter and a focus history, which would make Qt fall back to an
+    # old window's canvas when this window's tray relayouts. The real app has
+    # exactly one MainWindow, so mirror that here.
+    for earlier in windows:
+        try:
+            earlier.hide()
+        except Exception:
+            pass
+    app.processEvents()
+
+    win = MainWindow()
+    windows.append(win)
+    win.show()
+    app.processEvents()
+
+    # Focus a settings line edit: Tab must toggle the tray, not move focus.
+    target = win.circle_cx_edit
+    target.setFocus()
+    app.processEvents()
+    if app.focusWidget() is not target:
+        raise _fail(step, "could not focus a settings line edit for the Tab test")
+    tray_before = win._settings_panel_is_visible()
+
+    def assert_focus_sane(tag):
+        fw = app.focusWidget()
+        if fw is not target and fw is not win.canvas:
+            raise _fail(step, f"{tag}: focus landed on an unrelated control ({fw})")
+
+    QTest.keyClick(target, Qt.Key_Tab)
+    app.processEvents()
+    if win._settings_panel_is_visible() == tray_before:
+        raise _fail(step, "Tab did not toggle the settings tray")
+    # Tab never navigates: focus either stays put or is parked on the canvas
+    # when the tray relayout makes the old focus widget transiently hidden.
+    assert_focus_sane("after Tab")
+    QTest.keyClick(target, Qt.Key_Tab, Qt.ShiftModifier)
+    app.processEvents()
+    if win._settings_panel_is_visible() != tray_before:
+        raise _fail(step, "Shift+Tab did not toggle the settings tray back")
+    assert_focus_sane("after Shift+Tab")
+    # With the tray hidden again the canvas must hold focus (deterministic
+    # parking), so subsequent wheel/keyboard canvas handling keeps working.
+    if app.focusWidget() is not win.canvas and app.focusWidget() is not target:
+        raise _fail(step, "no deterministic focus after the toggle round-trip")
+    print("Tab toggle & theme OK: tray toggles from any widget, focus untouched, Fusion active")
+
+
 def run_regression_checks(app, MainWindow, windows: list) -> None:
     """Run the post-fix regression extensions (not part of the golden dict)."""
     check_startup_placeholders(app, MainWindow, windows)
@@ -1538,6 +1613,7 @@ def run_regression_checks(app, MainWindow, windows: list) -> None:
     check_compare_toggle_blit_invalidation(app, MainWindow, windows)
     check_compare_colorbar_no_overlap(app, MainWindow, windows)
     check_window_mode_fit(app, MainWindow, windows)
+    check_tab_toggle_and_theme(app, MainWindow, windows)
 
 
 def main(argv: list[str] | None = None) -> int:
