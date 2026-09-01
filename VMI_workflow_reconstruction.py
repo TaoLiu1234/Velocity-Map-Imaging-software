@@ -102,6 +102,23 @@ def extract_peak_r_beta(
 
     Returns:
     - A list of dict items with keys: `r`, `beta`, `i`.
+    - `area` is also included per peak: trapezoidal integral of I(r) over the
+      valley-clipped segment (fallback: I at the peak index).
+
+    Method / Limitations:
+    - Peak positions are found on the Gaussian-smoothed, normalized profile,
+      but the reported `i` is the *unsmoothed* intensity at that index, so a
+      slightly shifted index can under-report the peak height.
+    - Valley clipping (lowest smoothed point between adjacent peaks) bounds
+      each peak's support; the trapezoid `area` therefore still contains any
+      continuum/background under the peak (no baseline is subtracted), and
+      overlap wings are split at the valley.
+    - `beta` is clipped to [-2, 2]. For pure P2 physics |beta2| <= 2, so the
+      clip only guards numerical noise; if higher odd/even orders leak into
+      the extracted component, strong anisotropies can be distorted.
+    - The radial grid is integer pixel indices (pyabel uses `arange(rmax+1)`),
+      so peak radii are quantized to one pixel and `beta(r)` is reported at
+      that raw resolution (no radial averaging, pyabel `window=1`).
     """
     if r_axis.size == 0 or intensity.size == 0 or beta_profile.size == 0:
         return []
@@ -207,6 +224,22 @@ def run_rbasex_reconstruction(
     - `peaks`: extracted dominant peaks.
     - `display_percentile`: GUI display suggestion.
     - `error`: empty on success, exception text on failure.
+
+    Notes:
+    - The image origin must be the exact center of the central pixel (the
+      core `build_centered_histogram` grid guarantees this); pyabel's default
+      `origin="center"` is relied upon.
+    - pyabel returns `r` as integer pixel indices (`arange(rmax+1)`), so
+      `r * bin_size` maps the radial axis onto the centered data coordinates
+      with zero offset; radial resolution is one pixel.
+    - `rIbeta()` is called with the default `window=1`: I(r) and beta(r) are
+      per-pixel values (beta is not radially averaged); I(r) is only smoothed
+      later, inside `extract_peak_r_beta`, for peak detection.
+    - `reg=None` (default) runs the inverse transform unregularized; noise
+      amplification at large radii is then possible. For `order > 2`,
+      `rIbeta()` returns additional anisotropy components which are ignored.
+    - `rmax="MIN"` (the GUI default) limits the transform to the largest
+      radius with at least one full quadrant of data.
     """
     try:
         # Step 1: inverse Abel transform with rBasex.

@@ -9,7 +9,7 @@ deterministic synthetic triplet from ``tests/make_sample_data.py``:
   3. ``process_and_plot`` in "1e+1i coincidence" mode (paired counts, ion
      histogram with peaks);
   4. ion-TOF fine ROI via the real QLineEdit widgets (``_selected_mask``);
-  5. ``estimate_center_once`` with the DEFAULT edge_fit mode
+  5. ``estimate_center_once`` with the DEFAULT quadrant_symmetry mode
      (polar_outermost and the ring-empty fallback are covered separately by
      ``run_regression_checks`` below);
   6. ``apply_circle_selection`` (denoised centered histogram + panel);
@@ -393,13 +393,13 @@ def _run_workflow(app, MainWindow, session_output_dirname: str, windows: list, w
         raise _fail(step, f"fine ROI selected only {selected_mask_count} events (<10000)")
 
     # ------------------------------------------------------------------
-    # Step 5: estimate_center_once with DEFAULT edge_fit mode
+    # Step 5: estimate_center_once with DEFAULT quadrant_symmetry mode
     # (polar_outermost + ring-empty fallback are covered in
     # run_regression_checks below)
     # ------------------------------------------------------------------
     step = "estimate_center"
-    if str(win._current_center_mode()) != "edge_fit":
-        raise _fail(step, f"default center mode should be edge_fit, got {win._current_center_mode()}")
+    if str(win._current_center_mode()) != "quadrant_symmetry":
+        raise _fail(step, f"default center mode should be quadrant_symmetry, got {win._current_center_mode()}")
     win.circle_cx_edit.setText(f"{INITIAL_CENTER[0]:g}")
     win.circle_cy_edit.setText(f"{INITIAL_CENTER[1]:g}")
     win.inner_r_edit.setText(f"{INNER_RADIUS:g}")
@@ -535,6 +535,21 @@ def _run_workflow(app, MainWindow, session_output_dirname: str, windows: list, w
     ]
     if _rounded(restored_peaks) != _rounded(peaks):
         raise _fail(step, "restored rBasex peaks differ from live peaks")
+
+    # Legacy center-mode strings (sessions saved before the 2026-09-01
+    # estimator pruning) must remap to the new default cleanly instead of
+    # crashing or falling back to a stale combo index.
+    for legacy in ("edge_fit", "centroid", "geo_median", "polar_peak"):
+        win2._restore_ui_state({"combo_boxes": {"center_mode_combo": {"data": legacy, "index": 0}}})
+        if str(win2.center_mode_combo.currentData()) != "quadrant_symmetry":
+            raise _fail(
+                step,
+                f"legacy center mode {legacy!r} did not remap to quadrant_symmetry "
+                f"(got {win2.center_mode_combo.currentData()!r})",
+            )
+    win2._restore_ui_state({"combo_boxes": {"center_mode_combo": {"data": "polar_outermost", "index": 0}}})
+    if str(win2.center_mode_combo.currentData()) != "polar_outermost":
+        raise _fail(step, "kept mode 'polar_outermost' must restore as itself")
 
     workflow = {
         "paired_count": paired_count,
@@ -719,8 +734,9 @@ def check_ring_empty_center_fallback(app, MainWindow, windows: list) -> None:
     win = _make_prepared_window(app, MainWindow, windows, fine_roi=True)
 
     # Move the inner ring completely off the data so ring_inner_selected is
-    # empty; edge_fit with >= 24 candidates must take the "(fallback: full
-    # set)" branch (pre-fix this raised NameError: source_label).
+    # empty; the default quadrant_symmetry mode with >= 24 candidates must
+    # take the "(fallback: full set)" branch (pre-fix this raised
+    # NameError: source_label).
     win.circle_centroid = (400.0, 400.0)
     win.circle_cx_edit.setText("400")
     win.circle_cy_edit.setText("400")

@@ -59,20 +59,5 @@
     "signal_count": 6000,
     "noise_count": 1500,
     "hist_denoised_max": 9.905918
-  },
-  "centers": {
-    "geometric_median": [
-      12.485296,
-      -9.861244
-    ],
-    "circle_fit_kasa": [
-      12.37636,
-      -7.326325,
-      40.019107
-    ],
-    "edge_circle_center": [
-      12.308083,
-      -7.225609
-    ]
   }
 }

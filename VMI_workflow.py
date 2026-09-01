@@ -59,8 +59,8 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Circle, Polygon, Rectangle
 from matplotlib.path import Path
 from matplotlib.ticker import AutoLocator, AutoMinorLocator, LogLocator, MaxNLocator, NullLocator, ScalarFormatter
-from matplotlib.widgets import RectangleSelector, SpanSelector
-from PySide6.QtCore import QByteArray, QBuffer, QEvent, QIODevice, QObject, QPoint, QPointF, QRect, QThread, QTimer, Qt, Signal
+from matplotlib.widgets import SpanSelector
+from PySide6.QtCore import QByteArray, QBuffer, QEvent, QIODevice, QObject, QPoint, QPointF, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QCursor, QImage, QMouseEvent, QPixmap
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
@@ -94,11 +94,10 @@ from VMI_workflow_core import (
     build_denoised_centered_histogram,
     build_polar_histogram,
     density_counts_from_bins,
-    edge_circle_center,
     ensure_2d,
     fast_read_csv_float64,
-    geometric_median,
     polar_outermost_center,
+    quadrant_symmetry_center,
     select_all_one_pairs,
     select_increment_pairs,
     select_one_e_three_i_pairs,
@@ -244,6 +243,7 @@ class _CenterWorker(QObject):
         target_radius: float | None,
         target_window: float | None,
         residual_basis: np.ndarray | None = None,
+        gate_on_metrics: bool = True,
     ) -> None:
         super().__init__()
         self._points = np.asarray(estimation_points, dtype=np.float64).reshape(-1, 2).copy()
@@ -252,6 +252,7 @@ class _CenterWorker(QObject):
         self._mode = str(mode)
         self._target_r = target_radius
         self._target_w = target_window
+        self._gate_on_metrics = bool(gate_on_metrics)
         self._residual_basis = (
             np.asarray(residual_basis, dtype=np.float64).reshape(-1, 2).copy()
             if residual_basis is not None and np.asarray(residual_basis).size > 0
@@ -289,13 +290,15 @@ class _CenterWorker(QObject):
         target_radius: float | None,
         target_window: float | None,
     ) -> np.ndarray:
-        """Dispatch to the core center estimator (thread-safe, no Qt)."""
+        """Dispatch to the core center estimator (thread-safe, no Qt).
+
+        Only the two kept estimators remain: `quadrant_symmetry` (default,
+        no prerequisites) and `polar_outermost` (requires a polar ROI band).
+        Legacy modes (`edge_fit`, `centroid`, `geo_median`) were removed on
+        2026-09-01; unknown mode strings fall back to `quadrant_symmetry`.
+        """
         if pts.shape[0] == 0:
             return fallback.copy()
-        if mode == "centroid":
-            return np.mean(pts, axis=0).astype(np.float64)
-        if mode == "geo_median":
-            return geometric_median(pts)
         if mode == "polar_outermost":
             return polar_outermost_center(
                 pts,
@@ -303,7 +306,7 @@ class _CenterWorker(QObject):
                 target_radius=target_radius,
                 target_window=target_window,
             )
-        return edge_circle_center(pts, fallback)
+        return quadrant_symmetry_center(pts, fallback)
 
     @staticmethod
     def _curve_metrics(
@@ -409,7 +412,15 @@ class _CenterWorker(QObject):
                         best_center = np.asarray(probe_center, dtype=np.float64).reshape(2).copy()
                         best_metrics = probe_metrics
 
-            must_gate = bool(before_metrics.get("ok", False))
+            # Straightness gate. The gate protects a previously applied
+            # center from a metrically worse re-estimate. On the FIRST
+            # estimate there is no previous estimated center (the edits hold
+            # the user's manual guess), so the gate is bypassed: the default
+            # quadrant_symmetry estimator optimizes quadrant symmetry rather
+            # than the dominant-peak straightness metric, and with two rings
+            # that metric is noisy enough to reject an otherwise better
+            # center (2026-09-01 estimator pruning).
+            must_gate = bool(before_metrics.get("ok", False)) and bool(self._gate_on_metrics)
             improved = self._better(best_metrics, before_metrics) if must_gate else True
             residual_xy = (
                 np.mean(self._residual_basis - best_center.reshape(1, 2), axis=0)
@@ -1085,8 +1096,9 @@ class MainWindow(QMainWindow):
 
         quick_guide = QLabel(
             "Workflow: 1) Load to Cache + Process and Plot  2) Coarse Ion Hist X ROI  3) Fine TOF ROI (span or min/max)  "
-            "4) Ion/Electron filter+align  5) Estimate Center Once (optional) + Apply Ring Selection and Bin  6) Set reconstruction params  "
-            "7) Start Reconstruction"
+            "4) Ion/Electron filter+align  5) Estimate Center Once (Quadrant symmetry default; Polar outermost ring line needs a Polar ROI band first) "
+            "+ Apply Ring Selection and Bin  6) Set reconstruction params  7) Start Reconstruction  "
+            "Sessions: Save/Load Session Output restores every control, projection and result."
         )
         quick_guide.setWordWrap(True)
         splitter_hint = QLabel("Drag the gray splitter bar to resize Control Panel and Plot Area.")
@@ -1439,10 +1451,19 @@ class MainWindow(QMainWindow):
         e_scatter_grid.setHorizontalSpacing(10)
         e_scatter_grid.addWidget(QLabel("Center estimator"), 0, 0)
         self.center_mode_combo = QComboBox()
-        self.center_mode_combo.addItem("Edge circle fit (recommended)", "edge_fit")
-        self.center_mode_combo.addItem("Centroid (mean)", "centroid")
-        self.center_mode_combo.addItem("Geometric median", "geo_median")
+        # Two kept estimators (2026-09-01 pruning): the legacy `edge_fit`,
+        # `centroid` and `geo_median` modes were removed. `quadrant_symmetry`
+        # is the default and has no prerequisites; `polar_outermost` needs a
+        # valid Polar ROI band. Legacy session strings are remapped in
+        # `_restore_ui_state`.
+        self.center_mode_combo.addItem("Quadrant symmetry (recommended)", "quadrant_symmetry")
         self.center_mode_combo.addItem("Polar outermost ring line", "polar_outermost")
+        self.center_mode_combo.setToolTip(
+            "Quadrant symmetry: matches diagonal quadrants of the raw scatter points; "
+            "robust for ring distributions, no prerequisites (default).\n"
+            "Polar outermost ring line: straightens the outermost ring; "
+            "requires a valid Polar ROI (r min / r max) from the Polar Matrix."
+        )
         self.center_mode_combo.currentIndexChanged.connect(self._on_center_mode_changed)
         e_scatter_grid.addWidget(self.center_mode_combo, 0, 1)
         self.center_once_btn = QPushButton("Estimate Center Once")
@@ -8905,7 +8926,16 @@ class MainWindow(QMainWindow):
         self.ion_rotation_angle_deg = auto_angle_deg + user_angle_deg
 
     def _transform_ion_xy(self, ion_xy: np.ndarray, ion_t: np.ndarray | None = None) -> np.ndarray:
-        """Apply current ion shift/rotation and active XY-TOF alignment to XY points."""
+        """Apply current ion shift/rotation and active XY-TOF alignment to XY points.
+
+        Order is fixed and shared by all callers: subtract peak shift ->
+        rotate about the effective center -> apply the per-axis linear TOF
+        alignment `-(slope*t + intercept)` in the rotated frame. Because the
+        alignment is applied after rotation, a refit is required after the
+        rotation angle changes; the shared helpers
+        (`_apply_ion_tof_terms_to_xy`, `_ion_tof_display_coord_values`) keep
+        this ordering consistent across all panels.
+        """
         if ion_xy.size == 0:
             return ion_xy.copy()
         shift_xy = np.asarray(self.ion_peak_shift_xy, dtype=np.float64).reshape(-1)
@@ -9852,6 +9882,23 @@ class MainWindow(QMainWindow):
 
         Calibration is constrained to square-law scaling (`b=0`) so each displayed
         integer m/q bin corresponds to a deterministic TOF interval.
+
+        Physics/Method: for a spectrometer with negligible time-zero offset the
+        flight time follows `t = t_ref * sqrt((m/q)/(m/q)_ref)`, i.e. the exact
+        square law through the single reference point `a = (m/q)_ref / t_ref^2`.
+
+        Assumptions / Limitations:
+        - `b=0` forces the time-zero offset `t0` to zero. A real offset `t0`
+          (extraction-pulse delay, cable delays) makes the true law
+          `m/q = a*(t - t0)^2`; the fitted square law is then systematically
+          stretched/compressed away from `t_ref` (relative m/q error grows
+          roughly like `2*t0/t` near the reference and worsens at small t).
+        - Range-fit mode (`arr[2], arr[3]` present) treats the selected TOF
+          range as exactly one integer m/q bin `[m_ref-1/2, m_ref+1/2]` and
+          refits `a` by least squares through the two range edges. If the
+          selected range is not one full bin, the axis is stretched
+          accordingly; the fit has a single free parameter and no feedback of
+          the residual to the user.
         """
         if ref is None:
             return None
@@ -11460,8 +11507,15 @@ class MainWindow(QMainWindow):
                 continue
             idx = -1
             data = combo_state.get("data")
-            if name == "center_mode_combo" and data in {"quadrant_symmetry", "polar_peak"}:
-                data = "edge_fit"
+            if name == "center_mode_combo":
+                # Center-estimator pruning (2026-09-01): sessions saved before
+                # the pruning may carry removed mode strings ("edge_fit",
+                # "centroid", "geo_median", "polar_peak") or even missing data.
+                # Tolerantly remap everything that is not one of the kept
+                # modes to the new default "quadrant_symmetry" so old sessions
+                # restore cleanly instead of falling back to a stale index.
+                if data not in {"quadrant_symmetry", "polar_outermost"}:
+                    data = "quadrant_symmetry"
             with contextlib.suppress(Exception):
                 idx = widget.findData(data)
             if idx < 0:
@@ -13400,7 +13454,25 @@ class MainWindow(QMainWindow):
         window: int,
         quantile: float,
     ) -> tuple[np.ndarray, dict[str, object]]:
-        """Estimate one monotone under-signal histogram baseline from log-count space."""
+        """Estimate one monotone under-signal histogram baseline from log-count space.
+
+        Method: rolling low-quantile (0.22/0.30) in log space -> light
+        smoothing -> weighted isotonic (monotone) regression applied on the
+        reversed array (so the baseline is monotone decreasing along the
+        axis, as a decaying background should be) -> clipped to the counts
+        and made non-increasing by `np.minimum.accumulate`.
+
+        Limitations:
+        - A rolling quantile rides the valley floors: inside wide peaks the
+          envelope is pulled down, so the baseline is systematically *below*
+          the true background under signal (deliberate "under-signal" bias
+          that keeps peaks intact, at the cost of overestimating peak
+          contrast if the curve is used for subtraction).
+        - The monotonicity constraint forbids any background that rises
+          toward the long-time/high-m/q tail.
+        - The fixed window (<= 31 bins) cannot follow structure wider than
+          the window on very long histograms.
+        """
         y_arr = np.asarray(np.clip(counts, 0.0, None), dtype=np.float64).reshape(-1)
         n = int(y_arr.size)
         meta: dict[str, object] = {"mode": "log-envelope"}
@@ -13782,7 +13854,28 @@ class MainWindow(QMainWindow):
         fit_domain_key: str,
         ref: tuple[float, ...] | None,
     ) -> dict[str, object] | None:
-        """Fit one or two adaptive variable-slope lower-envelope background branches."""
+        """Fit one or two adaptive variable-slope lower-envelope background branches.
+
+        Method: each branch is `amp * exp(-(p0*z + 0.5*s*z^2))` in
+        `z = log((u + soft)/(u0 + soft))` space with `u = t^2` (or u = m/q),
+        i.e. a power law whose local exponent drifts from `p0` to `p0+s`.
+        Amplitudes come from a weighted log-space mean, candidates are scored
+        by under-target log-SSE (+ tail and preference penalties), and the
+        sum is projected to never exceed the baseline/counts
+        (`np.minimum.accumulate` + cap at the signal step).
+
+        Limitations:
+        - Selecting on under-target SSE plus the never-exceed-signal
+          projection biases the fitted background *under* the true baseline,
+          especially across signal peaks: the fit hugs the envelope, not the
+          expectation of the background. Peak-interval (valley) background
+          can be underestimated.
+        - The projection and `minimum.accumulate` make the model monotone
+          decreasing; a rising tail cannot be represented.
+        - The second branch is only accepted when it improves the log-SSE by
+          >= 5% and has amplitude >= 8% of the first (heuristic, not a
+          model-selection criterion).
+        """
         x_arr = np.asarray(x_fit, dtype=np.float64).reshape(-1)
         y_arr = np.asarray(np.clip(baseline, 0.0, None), dtype=np.float64).reshape(-1)
         w_arr = np.asarray(weights, dtype=np.float64).reshape(-1)
@@ -13987,7 +14080,19 @@ class MainWindow(QMainWindow):
         target: np.ndarray,
         weights: np.ndarray,
     ) -> np.ndarray:
-        """Solve a tiny weighted non-negative least-squares problem."""
+        """Solve a tiny weighted non-negative least-squares problem.
+
+        Physics/Method: active-set NNLS for a handful of power-law
+        components: plain weighted least squares, then components with
+        non-positive coefficients are dropped and the system re-solved until
+        all remaining coefficients are positive. Degenerate cases fall back
+        to a single-component non-negative scalar solve.
+
+        Limitation: minimizing ordinary weighted SSE against the
+        (already low) envelope target inherits the systematic under-target
+        bias of the background model; the subsequent projection below can
+        only lower the fit further.
+        """
         g = np.asarray(design, dtype=np.float64)
         y = np.asarray(target, dtype=np.float64).reshape(-1)
         w = np.asarray(weights, dtype=np.float64).reshape(-1)
@@ -14028,7 +14133,15 @@ class MainWindow(QMainWindow):
         target: np.ndarray,
         coeffs: np.ndarray,
     ) -> np.ndarray:
-        """Project one tiny non-negative component model so it never exceeds the target."""
+        """Project one tiny non-negative component model so it never exceeds the target.
+
+        Method: iteratively lowers the coefficient whose component most
+        overlaps the excess until `fit <= target` (tolerance 1e-9), then
+        applies one global shrink if needed. The result is a background curve
+        that by construction stays under the lower-envelope target — this is
+        the deliberate "under-signal" constraint, which biases the displayed
+        background low rather than allowing it to cut into peaks.
+        """
         g = np.asarray(design, dtype=np.float64)
         y = np.asarray(target, dtype=np.float64).reshape(-1)
         c = np.asarray(coeffs, dtype=np.float64).reshape(-1)
@@ -15346,7 +15459,21 @@ class MainWindow(QMainWindow):
         y_vals: np.ndarray,
         center_xy: tuple[float, float],
     ) -> dict[str, object] | None:
-        """Fit a radial background floor from outside-box XY points."""
+        """Fit a radial background floor from outside-box XY points.
+
+        Method: bins outside-box points in (r, theta), converts to areal
+        density per annulus, takes a low quantile (0.38) of well-supported
+        angular sectors as the per-radius floor, then fits a log-log power
+        law and blends the data-driven and power-law profiles by angular
+        coverage and radial support. The final profile is smoothed and made
+        monotone non-increasing.
+
+        Limitations: the floor is assumed azimuthally symmetric after the
+        quantile trim; anisotropic background survives only through the
+        sector quantile, and the monotone constraint cannot represent a
+        rising outer halo.
+        """
+
         x_arr = np.asarray(x_vals, dtype=np.float64).reshape(-1)
         y_arr = np.asarray(y_vals, dtype=np.float64).reshape(-1)
         n = int(min(x_arr.size, y_arr.size))
@@ -15462,7 +15589,17 @@ class MainWindow(QMainWindow):
         bg_scores: np.ndarray,
         mixed_scores: np.ndarray,
     ) -> tuple[float, float, float]:
-        """Choose a threshold from outside-box BG scores and inside-box mixed scores."""
+        """Choose a threshold from outside-box BG scores and inside-box mixed scores.
+
+        Method: candidate thresholds are quantiles of the combined score
+        distributions; the objective `0.82*bg_remove + 0.18*mixed_keep`
+        (minus penalties) balances background removal against signal loss.
+        Guardrails: at most 28% of in-box ("mixed") points may be removed and
+        at least 45% must be kept, else the objective is penalized. With too
+        few mixed scores the fallback is the 22nd percentile of BG scores.
+        This is a heuristic operating point, not a statistically calibrated
+        false-positive/false-negative control.
+        """
         bg = np.asarray(bg_scores, dtype=np.float64).reshape(-1)
         bg = bg[np.isfinite(bg)]
         if bg.size < 12:
@@ -15511,42 +15648,38 @@ class MainWindow(QMainWindow):
                 best_mixed_keep = mixed_keep
         return float(best_thr), float(best_bg_remove), float(best_mixed_keep)
 
-    def _adaptive_xy_bg_features(
-        self,
-        x: np.ndarray,
-        y: np.ndarray,
-        *,
-        fit_mask: np.ndarray | None = None,
-    ) -> tuple[np.ndarray, tuple[float, float], tuple[float, float]]:
-        """Build normalized `(x, y)` features for adaptive XY KDE background fitting."""
-        _tof_scale_hint, coord_scale_hint, _ok = self._get_ion_tof_pos_bin_size_overrides(show_dialog=False)
-        x_arr = np.asarray(x, dtype=np.float64).reshape(-1)
-        y_arr = np.asarray(y, dtype=np.float64).reshape(-1)
-        fit_use = np.ones(x_arr.size, dtype=bool)
-        if fit_mask is not None:
-            fit_arr = np.asarray(fit_mask, dtype=bool).reshape(-1)
-            if fit_arr.size == x_arr.size and np.any(fit_arr):
-                fit_use = fit_arr
-        x_fit = x_arr[fit_use] if np.any(fit_use) else x_arr
-        y_fit = y_arr[fit_use] if np.any(fit_use) else y_arr
-        x_center = float(np.median(x_fit)) if x_fit.size > 0 else 0.0
-        y_center = float(np.median(y_fit)) if y_fit.size > 0 else 0.0
-        x_scale = self._pointwise_bg_feature_scale(x_fit, hint=coord_scale_hint)
-        y_scale = self._pointwise_bg_feature_scale(y_fit, hint=coord_scale_hint)
-        features = np.column_stack(
-            (
-                (x_arr - x_center) / max(float(x_scale), 1e-9),
-                (y_arr - y_center) / max(float(y_scale), 1e-9),
-            )
-        )
-        return features, (x_center, y_center), (float(x_scale), float(y_scale))
-
     def _fit_ion_tof_background_model_raw(
         self,
         ion_points_raw: np.ndarray,
         boxes_by_axis: dict[str, tuple[tuple[float, float, float, float], ...]] | None,
     ) -> dict[str, object] | None:
-        """Fit one point-wise XY background model from outside the signal boxes."""
+        """Fit one point-wise XY background model from outside the signal boxes.
+
+        Method: smoothed 2D histograms of all points and of training points
+        outside the user signal boxes give an all density and a local
+        background density; the latter is blended (geometrically, weighted by
+        per-cell support) with a radial floor profile fitted from the same
+        outside-box points. The per-point score `bg_density / all_density` is
+        normalized so that the median outside-box score is 1, and points with
+        score below a chosen threshold are kept as background.
+
+        Assumptions:
+        - The user-drawn boxes cover the signal; whatever lies outside them
+          is background (or signal leakage, which biases the model).
+        - Background is a smooth function of (x, y) only; it does not model
+          TOF-correlated background.
+
+        Limitations / semantics:
+        - The threshold is tuned to remove up to 28% of in-box ("mixed")
+          scores and keep >= 45% of them; it is a density-ratio classifier,
+          not a physics model, so aggressively drawn boxes will misclassify
+          broad signal as background.
+        - Masking semantics: the returned `keep_mask_input` is False for all
+          rows with non-finite (x, y, t) — NaN-coordinate events are always
+          removed while BG subtraction is enabled.
+        - `score < threshold` is a strict comparison; scores are clipped to
+          [0, 40] and the threshold to [0.18, 12].
+        """
         pts = np.asarray(ion_points_raw, dtype=np.float64)
         if pts.ndim != 2 or pts.shape[0] <= 0 or pts.shape[1] < 3:
             return None
@@ -16018,6 +16151,12 @@ class MainWindow(QMainWindow):
         ``scatter_center=True`` from ``_current_ion_scatter_tof_center_enabled``
         plus ``_current_ion_tof_fit_terms(displayed=True)`` (temporary
         display-only centering). All remaining steps are identical.
+
+        Consistency note: this is the single shared implementation of the
+        TOF-coordinate correction; alignment shifts are applied to the
+        already-shifted/rotated coordinates, matching the order in which the
+        line fit measures the slope (`_ion_tof_display_coord_values` reads
+        transformed points).
         """
         pts = np.asarray(ion_xy, dtype=np.float64)
         tof = np.asarray(tof_vals, dtype=np.float64).reshape(-1)
@@ -16530,7 +16669,24 @@ class MainWindow(QMainWindow):
         roi: tuple[float, float, float, float],
         roi_polygon: tuple[tuple[float, float], ...] | list[tuple[float, float]] | None = None,
     ) -> dict[str, float | int] | None:
-        """Fit the dominant bright/high-contrast line inside the user ROI box using log-scaled bin intensity."""
+        """Fit the dominant bright/high-contrast line inside the user ROI box using log-scaled bin intensity.
+
+        Method: 2D histogram of the ROI points -> `log1p` intensity -> 3x3
+        binomial smoothing -> per-column argmax ridge -> keep the brightest
+        70% of columns -> intensity-weighted linear regression -> up to 4
+        rounds of MAD-based outlier rejection (2.5 sigma, floored at 1.5
+        bins) with refitting.
+
+        Assumptions / Limitations:
+        - Exactly one straight ridge dominates the ROI. Crossing or parallel
+          lines make the per-column argmax hop between them; draw a tight ROI
+          around a single line to avoid slope contamination.
+        - Slope precision is limited by the coordinate bin size `c_step` of
+          the ridge grid; the rejection tolerance respects this floor.
+        - Weights are the smoothed log-intensity column maxima, so faint
+          ridge ends contribute less; `r2` is weighted and therefore not
+          comparable to an unweighted least-squares r2.
+        """
         tof = np.asarray(tof_vals, dtype=np.float64).reshape(-1)
         coord = np.asarray(coord_vals, dtype=np.float64).reshape(-1)
         n = int(min(tof.size, coord.size))
@@ -18702,31 +18858,11 @@ class MainWindow(QMainWindow):
         }
 
     def _current_center_mode(self) -> str:
-        """Return selected center estimator key."""
+        """Return selected center estimator key (default: quadrant_symmetry)."""
         mode = self.center_mode_combo.currentData()
         if isinstance(mode, str):
             return mode
-        return "edge_fit"
-
-    def _estimate_center(self, points_xy: np.ndarray, fallback_xy: tuple[float, float]) -> np.ndarray:
-        """Estimate ring center using current center mode."""
-        if points_xy.shape[0] == 0:
-            return np.array([fallback_xy[0], fallback_xy[1]], dtype=np.float64)
-
-        mode = self._current_center_mode()
-        target_r, target_window, _r_min, _r_max = self._current_polar_target_band()
-        if mode == "centroid":
-            return np.mean(points_xy, axis=0).astype(np.float64)
-        if mode == "geo_median":
-            return geometric_median(points_xy)
-        if mode == "polar_outermost":
-            return polar_outermost_center(
-                points_xy,
-                np.array([fallback_xy[0], fallback_xy[1]], dtype=np.float64),
-                target_radius=target_r,
-                target_window=target_window,
-            )
-        return edge_circle_center(points_xy, np.array([fallback_xy[0], fallback_xy[1]], dtype=np.float64))
+        return "quadrant_symmetry"
 
     def _center_curve_metrics(
         self,
@@ -18737,7 +18873,15 @@ class MainWindow(QMainWindow):
         target_radius: float | None,
         target_window: float | None,
     ) -> dict[str, float | bool]:
-        """Evaluate curve-straightness metrics for one center on a fixed point set."""
+        """Evaluate curve-straightness metrics for one center on a fixed point set.
+
+        Builds the polar histogram for the candidate center and returns the
+        straightness score (relative peak-radius std + coverage penalty),
+        the weighted peak-radius std (`sigma`) and the valid-theta fraction.
+        Used by the acceptance gate (`_center_metrics_better`); for
+        multi-ring data the dominant-peak ridge can flip between rings, so
+        the score is indicative rather than a physical observable.
+        """
         pts = np.asarray(points_xy, dtype=np.float64)
         center = np.asarray(center_xy, dtype=np.float64).reshape(-1)
         if pts.ndim != 2 or pts.shape[1] < 2 or pts.shape[0] < 24 or center.size < 2:
@@ -18770,7 +18914,14 @@ class MainWindow(QMainWindow):
         lhs: dict[str, float | bool],
         rhs: dict[str, float | bool],
     ) -> bool:
-        """Return whether `lhs` metrics are meaningfully better (straighter) than `rhs`."""
+        """Return whether `lhs` metrics are meaningfully better (straighter) than `rhs`.
+
+        Strictly asymmetric comparison: `lhs` must win by a relative score
+        margin (5e-4); ties are broken on sigma with a validity guard
+        (`lhs_valid + 1e-3 >= rhs_valid - 0.02`). Guards re-estimates of an
+        already applied center; the FIRST estimate bypasses the gate
+        (see `_CenterWorker.run`, `gate_on_metrics`).
+        """
         lhs_ok = bool(lhs.get("ok", False))
         rhs_ok = bool(rhs.get("ok", False))
         if not lhs_ok:
@@ -18879,10 +19030,12 @@ class MainWindow(QMainWindow):
                 estimation_points = roi_pts
                 estimation_source = f"{source_prefix} ROI [{float(r_min):.6g}, {float(r_max):.6g}]"
             elif ring_inner_selected.shape[0] == 0:
-                if mode_now == "centroid" and electron_candidates.shape[0] > 0:
-                    estimation_points = electron_candidates[:, :2]
-                    estimation_source = f"{source_prefix} (fallback: full set)"
-                elif mode_now in {"geo_median", "edge_fit"} and electron_candidates.shape[0] >= 24:
+                # Only the default quadrant_symmetry mode reaches this branch
+                # (polar_outermost is fully handled above). It matches raw
+                # points directly, so like the removed geo_median/edge_fit
+                # modes it can fall back to the full candidate set when the
+                # inner ring is empty, given enough points.
+                if electron_candidates.shape[0] >= 24:
                     estimation_points = electron_candidates[:, :2]
                     estimation_source = f"{source_prefix} (fallback: full set)"
                 else:
@@ -18923,6 +19076,7 @@ class MainWindow(QMainWindow):
                 target_eval_r,
                 target_eval_w,
                 residual_basis,
+                gate_on_metrics=self.circle_centroid is not None,
             )
             thread = QThread(self)
             worker.moveToThread(thread)
@@ -19074,6 +19228,13 @@ class MainWindow(QMainWindow):
 
     def apply_circle_selection(self) -> None:
         """Step 5: apply ring selection with current center and build denoised projection.
+
+        Method: electron points within `inner_radius` of the center form the
+        signal; with the outer-ring filter enabled, points in the annulus
+        `[inner_radius, outer_radius]` are collected as the background sample
+        for the uniform-density subtraction performed by
+        `build_denoised_centered_histogram`. The annulus is assumed
+        signal-free — choose `outer_radius` beyond the outermost real ring.
 
         The heavy selection/binning runs on a background thread so the GUI stays
         responsive; results are applied and panels refreshed on the main thread
@@ -19253,7 +19414,14 @@ class MainWindow(QMainWindow):
         self._progress_finish()
 
     def run_reconstruction_now(self) -> None:
-        """Step 7: run rBasex reconstruction from current centered image."""
+        """Step 7: run rBasex reconstruction from current centered image.
+
+        Physics/Method: the denoised centered histogram is inverted with
+        pyabel's rBasex (`direction="inverse"`) in a background worker, then
+        radial peaks (r, beta, intensity) are extracted from the recovered
+        profiles; see `VMI_workflow_reconstruction` for numerical details
+        and limitations.
+        """
         if self.centered_hist_data is None:
             QMessageBox.warning(self, "No projection", "Run Apply Ring Selection and Bin first.")
             return

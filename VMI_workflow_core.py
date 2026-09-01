@@ -110,6 +110,21 @@ def _select_strict_delta_pairs(
 
     Both current row and immediately previous row must be valid (non-NaN in both
     columns). The returned indices are from the current row.
+
+    Assumptions:
+    - Trigger rows are in acquisition order; adjacency in the array equals
+      adjacency in time. No sorting or monotonicity check is performed.
+    - Indices are used directly as row lookups into the electron/ion point
+      tables; out-of-range indices are filtered downstream (workflow layer).
+
+    Limitations:
+    - Pairing is strictly local: a NaN row, or the first row of the file,
+      resets the "previous row" state, so pairs spanning it are never formed.
+    - If several acquisitions are concatenated into one trigger file, pairs
+      that would straddle a file boundary (last row of one file vs first row
+      of the next) are silently lost, and accidental deltas of exactly
+      (delta_e, delta_i) across a boundary could in principle form a false
+      pair. Loss/gain is O(number of boundaries) per boundary.
     """
     _ = progress_step  # Kept for API compatibility with previous implementation.
     n_rows = int(trigger_indices.shape[0])
@@ -288,32 +303,22 @@ def density_counts_from_bins(x: np.ndarray, y: np.ndarray, bin_size: float | Non
     return counts_flat[flat]
 
 
-def geometric_median(points_xy: np.ndarray, max_iter: int = 120, tol: float = 1e-6) -> np.ndarray:
-    """Compute geometric median center (robust to outliers)."""
-    if points_xy.shape[0] == 0:
-        return np.array([0.0, 0.0], dtype=np.float64)
-    if points_xy.shape[0] == 1:
-        return points_xy[0].astype(np.float64)
-
-    y = np.mean(points_xy, axis=0).astype(np.float64)
-    for _ in range(max_iter):
-        d = np.linalg.norm(points_xy - y, axis=1)
-        nonzero = d > 1e-12
-        if not np.any(nonzero):
-            return y
-        inv = 1.0 / d[nonzero]
-        y_next = np.sum(points_xy[nonzero] * inv[:, None], axis=0) / np.sum(inv)
-        if np.linalg.norm(y_next - y) <= tol:
-            return y_next
-        y = y_next
-    return y
-
-
 def circle_fit_kasa(
     points_xy: np.ndarray,
     weights: np.ndarray | None = None,
 ) -> tuple[float, float, float] | None:
-    """Fit a circle with an algebraic least-squares method (Kasa fit)."""
+    """Fit a circle with an algebraic least-squares method (Kasa fit).
+
+    Physics/Method: linearizes `(x-a)^2 + (y-b)^2 = r^2` into `2ax + 2by + c =
+    x^2 + y^2` and solves ordinary (optionally weighted) linear least squares.
+
+    Limitations (internal helper, kept only as a seed/re-anchor for the
+    quadrant-symmetry and polar-outermost estimators):
+    - The algebraic objective over-weights large radii, so short-arc or
+      low-SNR point sets show a systematic center/radius bias (Kasa bias).
+    - Sensitive to outliers on the fitted circumference; callers mitigate by
+      trimming and by re-running the fit after robust steps.
+    """
     if points_xy.shape[0] < 3:
         return None
     pts = np.asarray(points_xy, dtype=np.float64)
@@ -352,7 +357,19 @@ def circle_fit_kasa(
 
 
 def edge_circle_center(points_xy: np.ndarray, init_center: np.ndarray, angle_bins: int = 180) -> np.ndarray:
-    """Estimate center from edge envelope, then circle-fit edge points."""
+    """Estimate center from edge envelope, then circle-fit edge points.
+
+    Physics/Method: keeps only the farthest point per angle bin around the
+    current center (the outer envelope), fits a Kasa circle to it, and
+    iterates a few times. Used as an internal seed / no-scipy fallback by
+    `quadrant_symmetry_center` and the polar peak-line estimators.
+
+    Limitations:
+    - One point per angle bin: a single outlier at large radius directly
+      enters the fit and can bias the seed.
+    - Incomplete angular coverage (empty bins) degrades the fit; with fewer
+      than 24 edge points the loop aborts and the previous center is kept.
+    """
     if points_xy.shape[0] < 24:
         return np.mean(points_xy, axis=0).astype(np.float64)
 
@@ -409,6 +426,24 @@ def quadrant_symmetry_center(
     This keeps the objective on raw scatter points rather than 2D histogram
     bins, which is noticeably smoother and more stable under small center
     changes.
+
+    Physics/Method: minimizes a weighted mismatch of nearest-neighbour pairs
+    between diagonally opposite (180-degree rotated) quadrants; the fixed
+    point of this mismatch is the symmetry center.
+
+    Assumptions:
+    - The image has approximate 180-degree rotational symmetry about the true
+      center (velocity-map images of electric-field-projected clouds do).
+
+    Limitations:
+    - Genuine asymmetries (detector dead sectors, partial coverage,
+      asymmetric dissociation) pull the estimate toward the symmetric
+      majority; a fully one-sided cloud degenerates to the seed.
+    - The radial shell weighting is seeded from `_dominant_radius`, so a
+      badly wrong seed radius (e.g. noise dominating the outer envelope,
+      where `edge_circle_center` provides the seed) can degrade the search;
+      a bounded coarse grid search around the seed limits but does not
+      eliminate this.
     """
     pts = np.asarray(points_xy, dtype=np.float64)
     fallback = np.asarray(fallback_xy, dtype=np.float64).reshape(-1)
@@ -952,6 +987,20 @@ def build_polar_histogram(
 
     The returned `hist` array is shaped as `(n_r, n_theta)` so it can be drawn
     directly with `pcolormesh(theta_edges, r_edges, hist)`.
+
+    Physics/Method: a correct ring center makes the per-theta peak radius
+    constant; `peak_r_std` (count-weighted, over columns with a peak) plus a
+    coverage penalty on empty theta columns yields the `straightness_score`
+    used by the center acceptance gate.
+
+    Limitations:
+    - `peak_mode="dominant"` takes a per-column argmax, so on data with two
+      comparable rings the selected ridge can flip between rings along theta,
+      inflating `peak_r_std` and making the straightness metric noisy.
+    - The peak line is histogram-binned: its radial quantization (~r_max /
+      radial_bins) sets the metric's noise floor.
+    - `straightness_score` normalizes by `max(peak_r_mean, 1.0)`, so for
+      sub-pixel mean radii the score is dominated by the coverage penalty.
     """
     pts = np.asarray(points_xy, dtype=np.float64)
     center = np.asarray(center_xy, dtype=np.float64).reshape(-1)
@@ -1118,7 +1167,27 @@ def polar_outermost_center(
     target_radius: float | None = None,
     target_window: float | None = None,
 ) -> np.ndarray:
-    """Estimate center by straightening the outermost ring from raw scatter points."""
+    """Estimate center by straightening the outermost ring from raw scatter points.
+
+    Physics/Method: freezes the outermost significant radial shell (from the
+    reference center), then minimizes the flatness of its (theta -> r) ridge
+    over center candidates with analytic gradients and monotone updates.
+
+    Assumptions:
+    - The outermost shell is a real ring centered on the image center, not
+      detector edge noise; a Polar ROI band (`target_radius`/`target_window`)
+      is strongly recommended (required by the GUI mode) for that reason.
+
+    Limitations:
+    - "Outermost" peak selection follows the last significant peak of the
+      radial histogram: a noisy tail can hijack the shell if no ROI band is
+      given.
+    - Incomplete angular coverage reduces the effective constraint and shows
+      up in the coverage penalty of the straightness metric.
+    - The shell model is rebuilt (re-anchored) a bounded number of times;
+      like all local optimizers, convergence is to a local minimum near the
+      seed candidates (fallback / quadrant_symmetry / edge circle).
+    """
     _ = radial_bins
     return _scatter_peak_line_center(
         points_xy,
@@ -3048,7 +3117,14 @@ def polar_peak_center(
 def build_centered_histogram(
     points: np.ndarray, bin_size: float, force_lim: float | None = None
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-    """Build a square 2D histogram around (0,0) for centered points."""
+    """Build a square 2D histogram around (0,0) for centered points.
+
+    Note: edges are placed at half-integer multiples of `bin_size`, so bin
+    centers sit exactly at integer multiples of `bin_size` with (0,0) at the
+    central pixel. This grid is what makes the rBasex pixel-radius output
+    (`r_px * bin_size` in the reconstruction module) align with the centered
+    data coordinates without any offset.
+    """
     if points.shape[0] == 0 or bin_size <= 0:
         return None
     x = points[:, 0].astype(np.float64, copy=False)
@@ -3073,10 +3149,30 @@ def build_denoised_centered_histogram(
 ) -> dict | None:
     """Build centered histogram and subtract constant inner-ring noise estimate.
 
-    Noise model used here:
+    Physics/Method:
     - Estimate noise density from outer ring count / outer-ring area.
     - Convert to expected noise per bin.
     - Subtract this constant from all bins inside inner ring.
+
+    Model: with `n_out` background events in the annulus
+    `[inner_radius, outer_radius]`, the areal density is
+    `lambda = n_out / (pi*(outer^2 - inner^2))` and each bin inside the inner
+    circle expects `lambda * bin_size^2` background events, which is removed.
+
+    Assumptions:
+    - The background is spatially uniform across the inner disk and equal to
+      the outer-annulus areal density; the annulus itself is signal-free.
+
+    Limitations:
+    - Real VMI background can vary radially (often higher near the center),
+      so the flat model under- or over-subtracts locally.
+    - Subtraction is Poisson-inconsistent for finite counts and the result is
+      clamped at zero (`denoised < 0 -> 0`); the clamp is required because
+      the Abel inversion (rBasex) needs a non-negative image, but it
+      truncates negative fluctuations and therefore biases the remaining
+      background slightly upward (removal count is computed after clamping).
+    - The inner set is defined by bin centers (`x^2 + y^2 <= inner^2`), so
+      bins straddling the boundary are included/excluded coarsely.
     """
     if centered_signal.shape[0] == 0 or bin_size <= 0:
         return None

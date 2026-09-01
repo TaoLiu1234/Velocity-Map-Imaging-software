@@ -8,27 +8,27 @@
     ],
     "selected_mask_count": 21871,
     "center_estimate": [
-      126.634982,
-      124.088852
+      128.679982,
+      125.321352
     ],
-    "center_error_px": 1.963316,
-    "ring_inner_count": 21388,
-    "ring_outer_count": 386,
-    "denoised_hist_sum": 21301.769706,
-    "denoised_removed_total": 86.230294,
+    "center_error_px": 0.703058,
+    "ring_inner_count": 21421,
+    "ring_outer_count": 343,
+    "denoised_hist_sum": 21344.284303,
+    "denoised_removed_total": 76.715697,
     "rbasex_peak_count": 2,
     "rbasex_peaks": [
       {
-        "r": 63.0,
-        "beta": -0.96613,
-        "i": 2422.474576,
-        "area": 17072.178361
+        "r": 61.0,
+        "beta": -0.893267,
+        "i": 2601.926298,
+        "area": 17514.078794
       },
       {
-        "r": 111.0,
-        "beta": 0.129564,
-        "i": 1000.251524,
-        "area": 5959.418897
+        "r": 112.0,
+        "beta": 0.199947,
+        "i": 1161.280871,
+        "area": 6036.949078
       }
     ],
     "restored_paired_count": 21871

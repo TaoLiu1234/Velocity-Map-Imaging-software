@@ -17,8 +17,13 @@ Covered (per regression plan):
 - ``fast_read_csv_float64`` on the sample triplet (shapes + spot values);
 - all four trigger pairing selectors and their pair counts;
 - ``build_denoised_centered_histogram`` checksum on a fixed synthetic input;
-- ``geometric_median``, ``circle_fit_kasa``, ``edge_circle_center`` on fixed
-  synthetic point clouds;
+- hardcoded lock tests for the two kept center estimators
+  ``quadrant_symmetry_center`` / ``polar_outermost_center`` (the golden
+  cases for the pruned estimators ``geometric_median``,
+  ``circle_fit_kasa`` and ``edge_circle_center`` were removed on
+  2026-09-01 together with the center-mode pruning; ``circle_fit_kasa`` /
+  ``edge_circle_center`` survive in the core only as internal helpers of
+  the kept estimators);
 - (rBasex is intentionally NOT covered here -- it is exercised by the E2E
   smoke test.)
 
@@ -40,10 +45,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from VMI_workflow_core import (  # noqa: E402
     build_denoised_centered_histogram,
-    circle_fit_kasa,
-    edge_circle_center,
     fast_read_csv_float64,
-    geometric_median,
     polar_outermost_center,
     quadrant_symmetry_center,
     select_all_one_pairs,
@@ -61,12 +63,6 @@ DENOISE_SEED = 7
 DENOISE_INNER_R = 55.0
 DENOISE_OUTER_R = 90.0
 DENOISE_BIN = 1.0
-
-CENTER_SEED = 11
-CENTER_TRUE = (12.5, -7.25)
-CENTER_RING_R = 40.0
-CENTER_RING_SIGMA = 1.5
-CENTER_N_POINTS = 800
 
 # Lock-test fixtures for the heavy center estimators. Expected values were
 # captured from the pre-refactor code (see _capture_center_locks.py) and are
@@ -143,19 +139,6 @@ def _fixed_denoise_input() -> tuple[np.ndarray, np.ndarray]:
     r_n = np.sqrt(rng.uniform(DENOISE_INNER_R**2, DENOISE_OUTER_R**2, n_noise))
     noise = np.column_stack((r_n * np.cos(theta_n), r_n * np.sin(theta_n)))
     return signal, noise
-
-
-def _fixed_center_input() -> np.ndarray:
-    """Deterministic noisy ring around CENTER_TRUE for center-estimator pins."""
-    rng = np.random.default_rng(CENTER_SEED)
-    theta = rng.uniform(-np.pi, np.pi, CENTER_N_POINTS)
-    r = CENTER_RING_R + CENTER_RING_SIGMA * rng.standard_normal(CENTER_N_POINTS)
-    return np.column_stack(
-        (
-            CENTER_TRUE[0] + r * np.cos(theta),
-            CENTER_TRUE[1] + r * np.sin(theta),
-        )
-    )
 
 
 def _lock_cloud(n_points: int) -> np.ndarray:
@@ -255,23 +238,16 @@ def compute_golden() -> dict:
     }
 
     # 4) center estimation primitives on fixed input ------------------------
-    pts = _fixed_center_input()
-    geo = geometric_median(pts)
-    kasa = circle_fit_kasa(pts)
-    assert kasa is not None
-    edge = edge_circle_center(pts, np.array([10.0, -5.0]))
-    centers = {
-        "geometric_median": [float(geo[0]), float(geo[1])],
-        "circle_fit_kasa": [float(kasa[0]), float(kasa[1]), float(kasa[2])],
-        "edge_circle_center": [float(edge[0]), float(edge[1])],
-    }
+    # (removed 2026-09-01: the golden cases for the pruned estimators
+    # ``geometric_median`` / ``circle_fit_kasa`` / ``edge_circle_center``.
+    # The two kept estimators are pinned by the hardcoded lock tests below,
+    # which are independent of the golden file.)
 
     return {
         "golden_version": GOLDEN_VERSION,
         "loading": loading,
         "pairing": pairing,
         "denoise": denoise,
-        "centers": centers,
     }
 
 
@@ -327,13 +303,6 @@ def test_denoise_checksum_golden():
     golden = _load_golden()
     live = _live_rounded()
     mismatches = _compare(golden["denoise"], live["denoise"], "denoise")
-    assert not mismatches, "Golden mismatch:\n" + "\n".join(mismatches)
-
-
-def test_center_estimators_golden():
-    golden = _load_golden()
-    live = _live_rounded()
-    mismatches = _compare(golden["centers"], live["centers"], "centers")
     assert not mismatches, "Golden mismatch:\n" + "\n".join(mismatches)
 
 

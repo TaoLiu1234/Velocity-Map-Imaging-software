@@ -1,8 +1,10 @@
 # VMI_workflow Regression Safety Net
 
 Baseline test suite pinning the behaviour of `VMI_workflow.py` /
-`VMI_workflow_core.py` / `VMI_workflow_reconstruction.py` **as of
-2026-08-31**. Other agents refactoring the app must keep these tests green.
+`VMI_workflow_core.py` / `VMI_workflow_reconstruction.py` (baseline
+2026-08-31; center-estimator pruning re-baselined 2026-09-01, see
+"Baseline" below). Other agents refactoring the app must keep these tests
+green.
 The scientific numbers live in `golden_core.json` and `golden_smoke.json`;
 do not regenerate them unless an intentional, reviewed behaviour change
 occurred (see "Regenerating goldens").
@@ -12,7 +14,7 @@ occurred (see "Regenerating goldens").
 | File | Purpose |
 |---|---|
 | `make_sample_data.py` | Deterministic synthetic VMI data triplet generator (seed 20260831) |
-| `test_core.py` | Numerics golden tests for `VMI_workflow_core` (pairing, denoise checksum, center estimators) + hardcoded lock tests for `quadrant_symmetry_center` / `polar_outermost_center` (pin pre-refactor results; run under pytest) |
+| `test_core.py` | Numerics golden tests for `VMI_workflow_core` (pairing, denoise checksum) + hardcoded lock tests for the two kept center estimators `quadrant_symmetry_center` / `polar_outermost_center` (pin pre-refactor results; run under pytest). The golden cases for the pruned estimators (`geometric_median`, `circle_fit_kasa`, `edge_circle_center`) were removed on 2026-09-01 |
 | `test_smoke.py` | Offscreen end-to-end smoke test driving the real `MainWindow` through the full 7-step workflow |
 | `golden_core.json` | Golden values for `test_core.py` (generated via `--update-golden`) |
 | `golden_smoke.json` | Golden E2E numbers for `test_smoke.py` (generated via `--update-golden`) |
@@ -97,23 +99,34 @@ outer-ring filter ON, bin 0.5):
 |---|---|
 | paired count (1e+1i) | 25658 |
 | selected mask count (fine ROI) | 21871 |
-| center estimate (edge_fit) | (126.634982, 124.088852), error 1.963 px from true center |
-| ring inner / outer counts | 21388 / 386 |
-| denoised histogram sum | 21301.769706 (removed 86.230294) |
-| rBasex peaks | r=63.0 (beta=-0.966130, i=2422.474576) and r=111.0 (beta=0.129564, i=1000.251524) |
+| center estimate (quadrant_symmetry, 2026-09-01) | (128.679982, 125.321352), error 0.703 px from true center (pre-pruning edge_fit default was (126.634982, 124.088852), 1.963 px) |
+| ring inner / outer counts | 21421 / 343 |
+| denoised histogram sum | 21344.284303 (removed 76.715697) |
+| rBasex peaks | r=61.0 (beta=-0.893267, i=2601.926298) and r=112.0 (beta=0.199947, i=1161.280871) |
 | restored pair count after session roundtrip | 21871 |
-| rBasex wall time | ~5-7 s (timing is NOT part of the golden) |
+| rBasex wall time | ~3-7 s (timing is NOT part of the golden) |
+
+Re-baseline note (2026-09-01 center-estimator pruning): the default center
+mode changed from `edge_fit` to `quadrant_symmetry`. Because
+`estimate_center_once` writes the estimated center back into the
+`circle_cx/cy_edit` widgets and `apply_circle_selection` reads them, every
+value downstream of the ring center shifted deterministically (ring counts,
+denoised sum, rBasex peaks). Values upstream of the center estimation (pair
+counts, fine-ROI selected mask) are bit-identical to the 2026-08-31
+baseline.
 
 ## Known app bugs worked around in the tests (do not "fix" the expectations silently)
 
 1. **FIXED (2026-08-31): `polar_outermost` center mode used to crash with
    `NameError: source_label`**
    (`estimate_center_once`: `source_prefix` was defined but `source_label`
-   was referenced; the same NameError also hit the edge_fit/geo_median
-   FALLBACK path whenever no electron points fell inside the current inner
-   ring). The main workflow still only exercises `edge_fit` with a
-   non-empty inner ring (cx=126, cy=123, inner=118) to keep the golden
-   numbers stable; the previously-crashing paths are now covered by
+   was referenced; the same NameError also hit the (since 2026-09-01
+   removed) edge_fit/geo_median FALLBACK path whenever no electron points
+   fell inside the current inner ring; the default-mode fallback branch is
+   now taken by `quadrant_symmetry`). The main workflow only exercises the
+   default mode with a non-empty inner ring (cx=126, cy=123, inner=118) to
+   keep the golden numbers stable; the previously-crashing paths are now
+   covered by
    `run_regression_checks` in `test_smoke.py`:
    `check_polar_outermost_center` (polar ROI band [40, 130] so the
    formerly-crashing ROI branch runs), `check_ring_empty_center_fallback`
