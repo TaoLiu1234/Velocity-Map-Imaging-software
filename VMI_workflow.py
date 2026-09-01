@@ -10704,6 +10704,13 @@ class MainWindow(QMainWindow):
         """Avoid nested Qt event pumping in crash-prone Windows save/export paths."""
         if sys.platform.startswith("win") and bool(getattr(self, "_suspend_progress_event_pump", False)):
             return
+        # 16n: also skip while a combo/menu popup is open — its native modal
+        # loop already dispatches events, and re-entering processEvents() from
+        # inside it re-orders/re-enters painting and hard-crashes Qt on
+        # Windows (observed with the reconstruction progress timer).
+        with contextlib.suppress(Exception):
+            if QApplication.activePopupWidget() is not None:
+                return
         with contextlib.suppress(Exception):
             QApplication.processEvents()
 
@@ -19490,6 +19497,12 @@ class MainWindow(QMainWindow):
         recon_method = normalize_abel_method(self.recon_method_combo.currentData())
 
         self._recon_busy = True
+        self._recon_started_at = time.monotonic()
+        # 16n: lock the method combo while the worker runs so the completion
+        # status cannot name a method other than the one that produced the
+        # result.
+        with contextlib.suppress(Exception):
+            self.recon_method_combo.setEnabled(False)
         worker = _ReconWorker(centered_hist_snapshot, rbasex_settings, method=recon_method)
         thread = QThread(self)
         worker.moveToThread(thread)
@@ -19498,10 +19511,10 @@ class MainWindow(QMainWindow):
         self._recon_worker_thread = thread
         self._recon_worker = worker
 
-        self._progress_start(
-            f"Running {abel_method_label(self.recon_method_combo.currentData())} reconstruction...",
-            determinate=True,
-        )
+        progress_text = f"Running {abel_method_label(recon_method)} reconstruction..."
+        if recon_method != "rbasex":
+            progress_text += " (first run may generate basis sets — this can take a minute)"
+        self._progress_start(progress_text, determinate=True)
         self._progress_update(6, "Preparing reconstruction input...")
 
         # Poll progress on a timer; apply results only when finished. This keeps
@@ -19524,16 +19537,35 @@ class MainWindow(QMainWindow):
             self._recon_progress_timer.stop()
             return
         if worker.finished:
+            # 16n: never collect (full panel refresh + blocking thread wait)
+            # inside an open combo/menu popup's native modal loop — defer to
+            # the next 120 ms tick, which fires again once it closed.
+            popup_active = False
+            with contextlib.suppress(Exception):
+                popup_active = QApplication.activePopupWidget() is not None
+            if popup_active:
+                return
             self._collect_recon_results(worker)
             return
         frac, message = worker.progress
         pct = min(100, max(0, int(10 + 72 * float(frac))))
-        self._progress_update(pct, message)
+        # 16n liveness: basis-set-generating methods can compute for minutes
+        # between the 5% and 90% worker checkpoints; surface elapsed time so
+        # the run does not look stuck.
+        elapsed_s = 0.0
+        started = getattr(self, "_recon_started_at", None)
+        if started is not None:
+            with contextlib.suppress(Exception):
+                elapsed_s = max(0.0, time.monotonic() - float(started))
+        self._progress_update(pct, f"{message} ({elapsed_s:.0f} s)")
 
     def _collect_recon_results(self, worker: _ReconWorker) -> None:
         """Apply finished worker results on the main thread and tear down."""
         self._recon_progress_timer.stop()
         self._recon_busy = False
+        if hasattr(self, "recon_method_combo"):
+            with contextlib.suppress(Exception):
+                self.recon_method_combo.setEnabled(True)
         thread = self._recon_worker_thread
         self._recon_worker = None
         self._recon_worker_thread = None
@@ -19565,7 +19597,9 @@ class MainWindow(QMainWindow):
         self._reset_toolbar_navigation_history()
         self._progress_update(100, "Reconstruction finished.")
         rb_n = len(self.rbasex_recon_result.get("peaks", [])) if self.rbasex_recon_result else 0
-        method_label = abel_method_label(self.recon_method_combo.currentData())
+        # 16n: label from the RESULT (the combo was locked during the run, but
+        # read the result anyway so legacy/edge paths cannot mislabel).
+        method_label = abel_method_label(worker.result.get("method"))
         self._set_status(f"Reconstruction finished: {method_label} peaks={rb_n}.")
 
     # ------------------------------------------------------------------

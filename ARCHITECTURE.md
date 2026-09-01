@@ -801,3 +801,44 @@ Order/Odd/Reg/rmax are documented as rBasex-only; Peak-* and Display
 percentile apply to all methods. `check_alt_method_reconstruction` drives
 Hansen-Law through the full async GUI path (image shape, peaks, beta n/a,
 method-aware titles). All suites green; goldens byte-unchanged.
+
+### 16n. Reconstruction busy-state popup crash + liveness (2026-09-01)
+
+> User report: pressed Start Reconstruction with a non-rBasex method — the
+> app appeared stuck — then clicked the inversion-method dropdown and the app
+> hard-crashed.
+
+Root causes (two, compounding):
+1. **Apparent freeze**: basis-set-generating methods (BASEX/Daun/Lin-Basex
+   first runs) compute for tens of seconds to minutes between the worker's
+   5% and 90% progress checkpoints, so the progress bar sat at ~13% with no
+   feedback — not a deadlock.
+2. **Segfault**: `_progress_update`/`_progress_start` call
+   `_pump_progress_events_if_safe()` -> `QApplication.processEvents()`. The
+   reconstruction poll is a 120 ms QTimer; opening the QComboBox popup enters
+   a native modal loop (mouse grab on Windows) in which the timer keeps
+   firing, so progress updates re-entered `processEvents()` inside the active
+   popup — event re-ordering/re-entrant painting crashes Qt natively. (The
+   `_suspend_progress_event_pump` flag existed for save/export paths but did
+   not cover this, and `_collect_recon_results` doing a full panel refresh +
+   `thread.wait(1500)` inside the modal loop is the same danger class.)
+
+Fixes:
+- **Popup guard in the pump** (systemic): `_pump_progress_events_if_safe`
+  skips `processEvents()` whenever `QApplication.activePopupWidget()` is set.
+- **Deferred collection**: `_poll_recon_progress` does not call
+  `_collect_recon_results` while a popup is open; the next 120 ms tick
+  (popup closed) collects.
+- **Combo locked while busy**: `recon_method_combo` is disabled during a run
+  and re-enabled on every exit path of `_collect_recon_results`; the
+  completion status now labels the method from the RESULT dict, not the
+  live combo, so a mid-run change can never mislabel.
+- **Liveness**: the running poll appends an elapsed-seconds counter
+  (`_recon_started_at`) to the status message, and non-rBasex runs warn that
+  first runs may generate basis sets.
+
+`check_recon_busy_popup_safety` drives a slow (1.5 s) monkeypatched
+Transform on the worker thread and locks in: combo disabled while busy, the
+pump leaves a sentinel event pending while a popup is active, collection
+defers while the popup is open, exactly one collection after it closes, and
+the elapsed-time status. All suites green; goldens byte-unchanged.

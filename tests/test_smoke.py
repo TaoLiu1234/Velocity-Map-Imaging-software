@@ -1654,6 +1654,142 @@ def check_alt_method_reconstruction(app, MainWindow, windows: list) -> None:
     print("Alt-method reconstruction OK: Hansen-Law image+peaks, method-aware titles, beta n/a")
 
 
+def check_recon_busy_popup_safety(app, MainWindow, windows: list) -> None:
+    """16n: reconstruction busy-state is popup-safe and shows liveness.
+
+    Reported crash: during a long (basis-generating) reconstruction the
+    progress pump re-entered processEvents() inside the open method-combo
+    popup's native modal loop and the app hard-crashed; the run also looked
+    stuck because no feedback was emitted between the worker's 5% and 90%
+    checkpoints. Locks in: combo locked while busy, pump skips while a popup
+    is active, collection deferred while a popup is open, and an elapsed-time
+    counter in the status line.
+    """
+    import numpy as np
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication
+
+    import VMI_workflow_reconstruction as vwr
+
+    step = "recon_busy_popup_safety"
+    win = _make_binned_window(step, app, MainWindow, windows)
+    idx = win.recon_method_combo.findData("hansenlaw")
+    if idx < 0:
+        raise _fail(step, "hansenlaw missing from the method combo")
+    win.recon_method_combo.setCurrentIndex(idx)
+    app.processEvents()
+
+    real_transform = vwr.abel.Transform
+    state = {"calls": 0}
+
+    def slow_transform(*args, **kwargs):
+        state["calls"] += 1
+        time.sleep(1.5)
+        return real_transform(*args, **kwargs)
+
+    collects = {"n": 0}
+    real_collect = win._collect_recon_results
+
+    def counting_collect(worker):
+        collects["n"] += 1
+        return real_collect(worker)
+
+    vwr.abel.Transform = slow_transform
+    win._collect_recon_results = counting_collect
+    popup = None
+    patched_static = False
+    real_active_popup = QApplication.activePopupWidget
+    try:
+        win.run_reconstruction_now()
+        app.processEvents()
+        # The wrapper runs on the worker thread; wait until it is INSIDE the
+        # sleep (the run then holds for the remaining ~1.5 s, enough time for
+        # the busy-state assertions below).
+        wait_until(app, lambda: state["calls"] >= 1, 15.0, step, "slow Transform invocation")
+        if win.recon_method_combo.isEnabled():
+            raise _fail(step, "method combo must be locked while a reconstruction is running")
+
+        # Liveness: manual poll tick shows the elapsed-seconds counter.
+        win._poll_recon_progress()
+        app.processEvents()
+        status_text = str(win.status_label.text())
+        if "s)" not in status_text and " s" not in status_text:
+            raise _fail(step, f"running status lacks the elapsed-time counter: {status_text!r}")
+
+        # Popup active: the pump must skip processEvents entirely (a sentinel
+        # singleShot stays pending) and collection must be deferred.
+        try:
+            win.recon_method_combo.showPopup()
+            app.processEvents()
+            popup = QApplication.activePopupWidget()
+        except Exception:
+            popup = None
+        if popup is None:
+            # Offscreen fallback: fake an active popup deterministically.
+            class _FakePopup:
+                pass
+
+            QApplication.activePopupWidget = staticmethod(lambda: _FakePopup())
+            patched_static = True
+            popup = "faked"
+        fired = []
+        QTimer.singleShot(0, lambda: fired.append(1))
+        win._pump_progress_events_if_safe()
+        # NOTE: no processEvents() here — with the guard active the pump must
+        # leave the sentinel pending; anything that fires it would be exactly
+        # the re-entrancy the guard prevents.
+        if fired:
+            raise _fail(step, "pump processed events while a popup was active (re-entrancy crash class)")
+
+        win._poll_recon_progress()
+        app.processEvents()
+        if collects["n"] != 0:
+            raise _fail(step, "collection ran while the worker/popup state was unsafe")
+
+        # Worker finishes: with the popup still active, polls keep deferring.
+        wait_until(app, lambda: win._recon_worker is not None and win._recon_worker.finished, 30.0, step, "slow transform")
+        for _ in range(6):
+            win._poll_recon_progress()
+            app.processEvents()
+            time.sleep(0.02)
+        if collects["n"] != 0:
+            raise _fail(step, "collection must defer while the combo popup is open")
+
+        # Popup closed: the next poll tick collects exactly once and unlocks.
+        if patched_static:
+            QApplication.activePopupWidget = real_active_popup
+            patched_static = False
+        elif popup is not None:
+            with contextlib_suppress():
+                win.recon_method_combo.hidePopup()
+        popup = None
+        wait_until(app, lambda: collects["n"] >= 1, 10.0, step, "deferred collection after popup closed")
+        if collects["n"] != 1:
+            raise _fail(step, f"collection ran {collects['n']} times, want exactly 1")
+        if not win.recon_method_combo.isEnabled():
+            raise _fail(step, "method combo must unlock after the reconstruction finishes")
+        print("Recon busy popup safety OK: combo locked, pump guarded, collection deferred, liveness shown")
+    finally:
+        vwr.abel.Transform = real_transform
+        win._collect_recon_results = real_collect
+        if patched_static:
+            QApplication.activePopupWidget = real_active_popup
+        try:
+            win.recon_method_combo.hidePopup()
+        except Exception:
+            pass
+        if getattr(win, "_recon_busy", False):
+            with contextlib_suppress():
+                win.recon_method_combo.setEnabled(True)
+                win._recon_busy = False
+
+
+def contextlib_suppress():
+    import contextlib
+
+    return contextlib.suppress(Exception)
+
+
 def run_regression_checks(app, MainWindow, windows: list) -> None:
     """Run the post-fix regression extensions (not part of the golden dict)."""
     check_startup_placeholders(app, MainWindow, windows)
@@ -1668,6 +1804,7 @@ def run_regression_checks(app, MainWindow, windows: list) -> None:
     check_window_mode_fit(app, MainWindow, windows)
     check_tab_toggle_and_theme(app, MainWindow, windows)
     check_alt_method_reconstruction(app, MainWindow, windows)
+    check_recon_busy_popup_safety(app, MainWindow, windows)
 
 
 def main(argv: list[str] | None = None) -> int:
