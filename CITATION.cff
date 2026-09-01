@@ -1,0 +1,22 @@
+# TODO(owner): after creating the public GitHub repository, replace the
+# placeholder `repository-code` URL below with the real repository URL
+# (e.g. https://github.com/<your-org>/vmi-workflow) and update the same note
+# in README.md ("Notes" section).
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "VMI workflow: interactive velocity-map imaging coincidence analysis"
+authors:
+  - family-names: Liu
+    given-names: Tao
+version: 1.0.0
+date-released: "2026-09-01"
+license: MIT
+repository-code: "https://github.com/EXAMPLE/vmi-workflow"
+keywords:
+  - velocity-map imaging
+  - VMI
+  - photoelectron photoion coincidence
+  - Abel inversion
+  - rBasex
+  - spectroscopy
+abstract: "An interactive PySide6 workstation for velocity-map imaging (VMI) photoelectron/photoion coincidence analysis: trigger-based event pairing, ion time-of-flight selection, image-center estimation, denoised polar binning, and rBasex Abel inversion to recover radial speed and angular-anisotropy (beta) distributions."

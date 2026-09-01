@@ -1,0 +1,77 @@
+# Continuous integration for VMI_workflow.
+#
+# Two jobs:
+# 1. ubuntu-latest: the full suite (core numerics + offscreen end-to-end smoke test).
+# 2. windows-latest: the core numerics suite only. Windows CI runners have no
+#    display either; offscreen Qt works there but is historically flakier, so the
+#    Windows job stays lean and exercises the Qt-free numerics contract.
+#
+# Sample data: `tests/sample_data/` is gitignored (large .dat files), so CI
+# regenerates it deterministically (fixed RNG seed) with tests/make_sample_data.py.
+# Both test suites also auto-regenerate it if missing; the explicit step just
+# fails fast if generation breaks.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  tests-ubuntu:
+    name: tests (ubuntu-latest, Python 3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Qt (PySide6) needs these system libraries even for the offscreen platform.
+      # libglib2.0-0 is named libglib2.0-0t64 on newer Ubuntu runners; try both.
+      - name: Install Qt system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libegl1 libxkbcommon0 libdbus-1-3 libfontconfig1
+          sudo apt-get install -y libglib2.0-0 || sudo apt-get install -y libglib2.0-0t64
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyarrow pytest
+
+      - name: Generate deterministic sample data
+        run: python tests/make_sample_data.py
+
+      - name: Core numerics golden tests
+        run: python -m pytest tests/test_core.py -q
+
+      - name: Offscreen end-to-end smoke test
+        run: QT_QPA_PLATFORM=offscreen python -m pytest tests/test_smoke.py -q
+        timeout-minutes: 20
+
+  tests-windows-core:
+    name: tests-core (windows-latest, Python 3.12)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      # Core suite only: Qt-free numerics; sample data is auto-generated if missing.
+      - name: Core numerics golden tests
+        run: python -m pytest tests/test_core.py -q

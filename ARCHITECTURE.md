@@ -1,523 +1,631 @@
-# VMI_workflow 架构文档
+# VMI_workflow Architecture Document
 
-> 生成时间:2026-08-25
-> 范围:本仓库根目录下三个源文件 + 数据目录(数据文件不入库)
-> 阅读对象:后续维护者 / 希望理解系统如何工作的学生
+> Generated: 2026-08-25 (Chinese original); fully translated to English on 2026-09-01 (see §16h)
+> Scope: the three source files in the repository root + data directories (data files are not committed)
+> Audience: future maintainers / students who want to understand how the system works
 
 ---
 
-## 0. 运行环境与依赖
+## 0. Runtime environment and dependencies
 
-| 项 | 值 |
+| Item | Value |
 |---|---|
-| 操作系统 | Windows 11 Pro (x64),AMD Ryzen 7 7840HS |
+| OS | Windows 11 Pro (x64), AMD Ryzen 7 7840HS |
 | Python | 3.11.11 (conda-forge) |
 | numpy / scipy | 2.4.6 / 1.16.0 |
 | PySide6 | 6.7.2 (matplotlib `QT_API=pyside6` + `QtAgg`) |
 | pyabel | 0.9.1 |
 | matplotlib | 3.10.8 |
-| 可选(未用) | pandas 2.3.1, pyarrow 19.0.0(基准测试验证,见 §7.1);numba 不可用(numpy 2.4 不兼容) |
+| Optional (not used directly) | pandas 2.3.1, pyarrow 19.0.0 (verified by benchmark, see §6); numba unusable (incompatible with numpy 2.4) |
 
-数据文件:CSV 文本,每行 4 列 `事件序号, 离子TOF时间, 电子索引, 离子索引`,列值可为 `NaN`(表示该事件该通道缺失)。参考文件 220–260 MB,数千万行。
+Data files: CSV text, 4 columns per row — `event number, ion TOF, electron index, ion index`; column values may be `NaN` (that channel is missing for the event). Reference files are 220–260 MB, tens of millions of rows.
 
 ---
 
-## 1. 代码库全景
+## 1. Codebase overview
 
-| 文件 | 行数(2026-08-31) | 职责 | 依赖 Qt? |
+| File | Lines (2026-09-01) | Responsibility | Qt-dependent? |
 |---|---|---|---|
-| `VMI_workflow.py` | 23,177 | GUI、交互、全部业务编排(`MainWindow` 单类) | 是 |
-| `VMI_workflow_core.py` | 3,139 | 纯 numpy/scipy 科学计算:配对、中心估计、极坐标投影、去噪分箱 | 否 |
-| `VMI_workflow_reconstruction.py` | 325 | pyabel rBasex 调用 + 峰值提取(backward 回退引擎已在 §16 移除) | 否 |
+| `VMI_workflow.py` | 23,797 | GUI, interactions, all workflow orchestration (a single `MainWindow` class) | yes |
+| `VMI_workflow_core.py` | 3,235 | Pure numpy/scipy numerics: pairing, center estimation, polar projection, denoised binning | no |
+| `VMI_workflow_reconstruction.py` | 358 | pyabel rBasex driver + peak extraction (the backward fallback engine was removed in §16) | no |
 
-设计意图(文件头注释):计算核心与 GUI 分离,便于测试与阅读。实际执行:两个计算模块确实无 Qt 依赖,但**绝大多数算法仍直接写在 `MainWindow` 方法里**(背景拟合、TOF 对齐、旋转、校准、画布交互),分离不彻底。
+Design intent (file-header comment): keep the computation core separate from the GUI so it is easier to test and read. Actual state: the two computation modules indeed have no Qt dependency, but **the majority of the algorithms still live directly in `MainWindow` methods** (background fitting, TOF alignment, rotation, calibration, canvas interaction) — the separation is incomplete.
 
-### 1.1 顶层小类
-- `FileDropFrame(QFrame)`(L162):拖放或浏览单文件,`file_dropped` 信号。
-- `_SelectorToggleProxy`(L223):替代 matplotlib selector 的最小代理(仅 `active` 标志),用于离子-TOF ROI 自定义拾取。
+### 1.1 Top-level helper classes
+- `FileDropFrame(QFrame)` (L162 at generation time): drag-drop or browse a single file; emits the `file_dropped` signal.
+- `_SelectorToggleProxy` (L223): minimal stand-in for matplotlib selectors (only an `active` flag), used for the ion-TOF ROI custom picking.
 
-### 1.2 常量(节流/性能护栏)
-L66–86 定义了 ~20 个调优常量:`MAX_SCATTER_POINTS=25_000`(散点图最大点数)、`MAX_ION_COINCIDENCE_POINTS=120_000`、`SCATTER_HEATMAP_THRESHOLD=8_000`、`DRAG_PREVIEW_INTERVAL_MS=16`、`OVERLAY_EDIT_DEBOUNCE_MS=70`、`WHEEL_SCROLL_COALESCE_MS=12` 等。(原 `ION_TOF_BG_POINTWISE_K=28` 对应的 kd-tree 逐点后端曾是死代码,已在 §16 删除。)
+### 1.2 Constants (throttling / performance guardrails)
+L66–86 (at generation time) define ~20 tuning constants: `MAX_SCATTER_POINTS=25_000` (maximum scatter points), `MAX_ION_COINCIDENCE_POINTS=120_000`, `DRAG_PREVIEW_INTERVAL_MS=16`, `OVERLAY_EDIT_DEBOUNCE_MS=70`, `WHEEL_SCROLL_COALESCE_MS=12`, etc. (The former `SCATTER_HEATMAP_THRESHOLD=8_000` was removed in §16b together with `_plot_density_heatmap`; the former `ION_TOF_BG_POINTWISE_K=28` and its kd-tree point-wise backend were dead code, also deleted in §16.)
 
 ---
 
-## 2. UI 结构
+## 2. UI structure
 
 ```
 MainWindow (1380×980)
-├─ 顶部文件栏 file_bar_row:Files btn / Settings[Tab] toggle / Load / Process and Plot / Save Session /
-│  Load Session / Clear / Trigger Mode 下拉
-├─ 状态栏:Status 标签 + QProgressBar(完成时隐藏)
+├─ Top file bar file_bar_row: Files btn / Settings[Tab] toggle / Load / Process and Plot / Save Session /
+│  Load Session / Clear / Trigger Mode dropdown
+├─ Status bar: Status label + QProgressBar (hidden when done)
 ├─ plot_settings_splitter (QSplitter.Vertical)
-│  ├─ plot_panel(绘图区)
+│  ├─ plot_panel (plot area)
 │  │  ├─ NavigationToolbar (matplotlib QtAgg)
-│  │  ├─ plot_scroll (QScrollArea, both scrollbars 常显)
+│  │  ├─ plot_scroll (QScrollArea, both scrollbars always on)
 │  │  │  └─ plot_canvas_host (QStackedLayout StackAll)
-│  │  │     ├─ figure+canvas (27.0×8.6 英寸)
-│  │  │     └─ plot_scroll_preview_label(滚动手势时的实时位图预览蒙层)
-│  │  └─ h_view_slider(水平视图滑块,通常隐藏)
-│  └─ settings_panel(Settings Tray,最小高 140px,启动时隐藏,按 Tab 显示)
-│     └─ control_tabs (QTabWidget,7 个标签)
-│        ├─ File(文件来源 + Workflow 须知)
-│        ├─ Ion Histogram(ROI/分箱/MQ 参考/背景拟合/显示)
-│        ├─ Ion Coincidence(TOF 图参数、TOF 背景模型、TOF 对齐拟合)
-│        ├─ Electron Scatter(中心估计、圆参数、过滤、极坐标 ROI)
-│        ├─ Ion Scatter(离子过滤、旋转、TOF 中心校正)
-│        ├─ Electron Binned Image(中心 bin 大小、θ 剖面、电压)
-│        └─ Reconstruction(rBasex 参数)
-└─ status bar(status_label + progress_bar)
+│  │  │     ├─ figure+canvas (27.0×8.6 inches)
+│  │  │     └─ plot_scroll_preview_label (live bitmap preview mask during scroll gestures)
+│  │  └─ h_view_slider (horizontal view slider, usually hidden)
+│  └─ settings_panel (Settings Tray, min height 140 px, hidden at startup, shown with Tab)
+│     └─ control_tabs (QTabWidget, 7 tabs)
+│        ├─ File (data sources + workflow notes)
+│        ├─ Ion Histogram (ROI / binning / m-q reference / background fit / display)
+│        ├─ Ion Coincidence (TOF map parameters, TOF background model, TOF alignment fit)
+│        ├─ Electron Scatter (center estimation, circle parameters, filters, polar ROI)
+│        ├─ Ion Scatter (ion filters, rotation, TOF center correction)
+│        ├─ Electron Binned Image (centered bin size, θ profile, voltage)
+│        └─ Reconstruction (rBasex parameters)
+└─ status bar (status_label + progress_bar)
 ```
 
-### 2.1 子图网格(2×4 gridspec)
+### 2.1 Subplot grid (2×4 gridspec)
 ```
 [ion_histogram     | electron_scatter | centered_bin      | rBasex recon]
 [ion_tof_xy        | ion_scatter      | theta_profile     | rBasex radial profile]
 ```
-8 个轴对象均注册于 `self.subplot_axes`,被刷新函数与子图保存/复制逻辑索引。(旧版为 2×5,含 backward recon 与 summary/info 两块;这两块面板连同整个 backward 机制已分别于 §15/§16 移除。)
+All 8 axis objects are registered in `self.subplot_axes` and indexed by the refresh functions and the subplot save/copy logic. (The old layout was 2×5, including the backward recon and summary/info panels; those two panels and the entire backward mechanism were removed in §15/§16 respectively.)
 
-### 2.2 交互层
-- 画布全局事件: `mpl_connect` 了 `button_press/motion/button_release/pick/draw` 五个事件,统一进 `_on_canvas_press/move/release/pick`。
-- **滚轮滚动**:全局 `eventFilter`(L2 级)把滚轮事件按控件身份派发到滚动区或画布;画布内滚轮进入**滚动爆发(burst)模式**:`_capture_plot_scroll_preview_pixmap` 抓取当前画布为 QPixmap 铺在顶层蒙层,底层 `plot_scroll` 快速滚动,松手后 `_flush_deferred_plot_scroll_restore` 恢复。这是为了让高分辨率 matplotlib 图滚动不卡顿的巧思。
-- **拖拽预览**:所有画布拖拽(环拖动、离子滤罩拖动、极坐标 ROI、θ 线、rBasex 范围)只更新 `pending_*` 变量,由节流 QTimer(16ms)触发 `_flush_*` 重绘 overlay artists。
-- **Overlay 绘制**:`_draw_circle_overlay`/`_draw_ion_overlay` 等纯 matplotlib artists;快路径 `_present_*_from_background` 用 `restore_region`+`draw_artist` 做 blit,但 **Windows 上全部被 `_use_safe_*_redraw()` 强制关闭**(L8397-+),降级为全画布重绘(`_draw_canvas_without_overlay_draw_event_sync` + 重新捕获背景)。→ 交互流畅性瓶颈之一。
+### 2.2 Interaction layer
+- Canvas global events: `mpl_connect` binds five events — `button_press/motion/button_release/pick/draw` — all funnelled into `_on_canvas_press/move/release/pick`.
+- **Wheel scrolling**: a global `eventFilter` dispatches wheel events by widget identity to the scroll area or the canvas; inside the canvas the wheel enters **scroll-burst mode**: `_capture_plot_scroll_preview_pixmap` grabs the current canvas as a QPixmap laid over a top mask layer while the underlying `plot_scroll` scrolls fast, and on release `_flush_deferred_plot_scroll_restore` restores. A trick that keeps high-resolution matplotlib figures scrolling smoothly.
+- **Drag previews**: all canvas drags (ring drag, ion filter-box drag, polar ROI, θ lines, rBasex range) only update `pending_*` variables; a throttled QTimer (16 ms) triggers the `_flush_*` overlay redraws (a blit fast path since §16f).
+- **Overlay drawing**: `_draw_circle_overlay`/`_draw_ion_overlay` etc. are pure matplotlib artists; the `_present_*_from_background` fast path does `restore_region`+`draw_artist` blitting. Historically **everything was force-disabled on Windows by `_use_safe_*_redraw()`** (L8397+ at generation time), degrading to full-canvas redraws (`_draw_canvas_without_overlay_draw_event_sync` + background recapture) — one of the interaction-smoothness bottlenecks. (Since §14.2/§16f the blit path is the default on all platforms; `_use_safe_*_redraw()` now only gates the non-fast stable path.)
 
 ---
 
-## 3. 数据管线(7 步官方工作流)
+## 3. Data pipeline (the official 7-step workflow)
 
-### Step 1 文件加载与缓存
-`load_cache()`(L7 主程序):`np.loadtxt` 三个文件 → `CacheData(trigger_indices[electron,ion], electron_points[i,t,x,y?], ion_points[...])`。`select_*` 触发配对。注:trigger 文件按 `[ion,electron]` 读入后交换为内部 `[electron,ion]`(见代码注释"Input trigger order switched for test")。
+### Step 1 File loading and caching
+`load_cache()`: reads the three files (`fast_read_csv_float64`, see §13.1) → `CacheData(trigger_indices[electron,ion], electron_points[i,t,x,y?], ion_points[...])`. `select_*` triggers pairing. Note: the trigger file is read as `[ion,electron]` and then swapped to the internal `[electron,ion]` order (see the code comment "Input trigger order switched for test").
 
-- `np.loadtxt(usecols=...)`:注意**它仍会解析整行所有 token**。基准:`np.loadtxt`(200 万行 95.6MB)1.44s;真实 260MB 文件约 3–5 s。三文件串行,期间 UI 阻塞(WaitCursor)。
+- `np.loadtxt(usecols=...)`: note **it still parses every token of the whole line**. Benchmark: `np.loadtxt` (2M rows, 95.6 MB) 1.44 s; a real 260 MB file ~3–5 s. Historically the three files loaded serially and blocked the UI (WaitCursor); since §13.1/§14.2 the read runs on the `_LoadWorker` background thread.
 
-### Step 2 触发(TDC)配对
-`select_increment_pairs` / `select_*_one_pairs` / `select_1e2i` / `select_1e3i`(core.py L41-190)全部骨架向量化:相邻行差分 `Δe, Δi` 比较,取满足 `(Δe,Δi)=(1,1)` 等条件的行;1e/2i 与 1e/3i 展开为 `(e,i-1),(e,i)` 或三倍行。已经**:O(N) `interable,无 Python 循环**——没有明显优化空间。
+### Step 2 Trigger (TDC) pairing
+`select_increment_pairs` / `select_*_one_pairs` / `select_1e2i` / `select_1e3i` (core.py L41-190 at generation time) are all skeleton-vectorized: adjacent-row differences `Δe, Δi` are compared and rows satisfying conditions such as `(Δe,Δi)=(1,1)` are selected; 1e/2i and 1e/3i expand to `(e,i-1),(e,i)` or triple rows. Already O(N) with no Python loops — no obvious optimization headroom.
 
-结果 `paired_lookup_e_idx/paired_lookup_i_idx`` 直接当作索引 lookup electron_points/ion_points 的行,**不物化整表复本**(`matched_electron=empty`),下游按需 `_paired_points(mask)`。
+The resulting `paired_lookup_e_idx`/`paired_lookup_i_idx` are used directly as row indices into `electron_points`/`ion_points` — **no full-table copies are materialized** (`matched_electron` stays empty); downstream materializes on demand via `_paired_points(mask)`.
 
-### Step 3 离子直方图选择
-- bin 度、ROI(coarse x-range)、fine ROI;绘制在 `ax_hist_ion`。
-- `_ion_hist_cache`(key = data_version+bins+coarse ROI+axis 变换 tag+背景 key)缓存 counts/edges;增性失效 `_invalidate_ion_hist_cache`。
-- 额外带 **背景拟合子系统**(§4.6)与 **m/q 轴**(§4.7)。
-- `_selected_mask()`(L6)根据 fine ROI + 峰值 marker 组焊 bool mask,缓存于 `_selected_mask_cache_key`。
+### Step 3 Ion-histogram selection
+- Bin count, ROI (coarse x-range), fine ROI; drawn on `ax_hist_ion`.
+- `_ion_hist_cache` (key = data_version + bins + coarse ROI + axis-transform tag + background key) caches counts/edges; incremental invalidation via `_invalidate_ion_hist_cache`.
+- Additionally carries the **background-fitting subsystem** (§4.6) and the **m/q axis** (§4.5).
+- `_selected_mask()` assembles the bool mask from the fine ROI + peak markers, cached under `_selected_mask_cache_key`.
 
-### Step 4 散射过滤
+### Step 4 Scatter filtering
 `_selected_pairs_after_optional_ion_filter()`:
-1. `_selected_mask` → fine ROI 基准;
-2. 若启用, 应用 TOF 背景 keep mask(bg_keep);
-3. `_paired_points(mask)` 物化 `(x,y,t)` 电子点与离子点;
-4. 可选:离子矩形/密度过滤(`_density_filter_mask`);可选电子密度过滤;返回携带各阶段掩码与 lookup 索引的 dict。
+1. `_selected_mask` → the fine-ROI baseline;
+2. if enabled, apply the TOF background keep mask (bg_keep);
+3. `_paired_points(mask)` materializes the `(x,y,t)` electron points and ion points;
+4. optional: ion rectangle/density filter (`_density_filter_mask`); optional electron density filter; returns a dict carrying the per-stage masks and lookup indices.
 
-**注意**:密度/过滤掩码对 **所有**被选点每轮重算;`_density_filter_mask` 内部 `density_counts_from_bins`(2D bin count,线性) + top-k % 或 bottom-M 剔除。用 `np.digitize` + `np.bincount`, 复杂度 O(n),但每次重算。
+**Note**: density/filter masks are recomputed over **all** selected points on every round; `_density_filter_mask` internally uses `density_counts_from_bins` (2D bin count, linear) + top-k % or bottom-M exclusion. It uses `np.digitize` + `np.bincount`, O(n), but recomputes each time. (Historical: since §16d the selected-pairs derivation is memoized when the filter parameters and data version are unchanged.)
 
-### 5 电子散射中心估计(bundle)
-`estimate_center_once`(L5)→ 一次估计(单次,无迭代循环),中心模式下拉 `center_mode_combo` 决定算法:
-1. `centroid` - 均值;
-2. `geo_median` - `geometric_median`(Weiszfeld 型固定点迭代,最多 120 步);
-3. `edge_fit` - `edge_circle_center`(边缘包络→Kasa 圆拟合);
-4. `polar_outermost` - `polar_outermost_center`(冻结外层壳的扇形模型 + 解析梯度优化);
-5. `quadrant_symmetry` - `quadrant_symmetry_center`(对角象限对称性,raw 点匹配)。
-后续 `_center_curve_metrics` 用 `build_polar_histogram` 计算“直线度”评估候选,接受条件 `_center_metrics_better`(score/sigma/valid 综合)。polar_outermost 还有多探针回退(polar ROI 下的确定性探针)。
+### Step 5 Electron-scatter center estimation (bundle)
+`estimate_center_once` → one-shot estimation (single pass, no iterative loop); the `center_mode_combo` dropdown selects the algorithm
+(after the 2026-09-01 center-estimator pruning only 2 modes remain, default `quadrant_symmetry`, see §16g):
+1. ~~`centroid` - mean~~ (**REMOVED** 2026-09-01);
+2. ~~`geo_median` - `geometric_median` (Weiszfeld fixed-point iteration)~~ (**REMOVED**, function deleted from the core module);
+3. ~~`edge_fit` - `edge_circle_center` (edge envelope -> Kasa circle fit)~~ (**UI mode removed**; function kept as an internal seed helper);
+4. `polar_outermost` - `polar_outermost_center` (frozen outermost-shell fan model + analytic-gradient optimization; still requires a Polar ROI band);
+5. `quadrant_symmetry` - `quadrant_symmetry_center` (diagonal-quadrant symmetry on raw points; **new default**, no prerequisites).
 
-全部在 GUI 线程同步执行,**期间完整 `_refresh_plots`**。
+Downstream, `_center_curve_metrics` uses `build_polar_histogram` to compute a "straightness" score for candidates; the acceptance condition is `_center_metrics_better` (combined score/sigma/valid). `polar_outermost` additionally has a multi-probe fallback (deterministic probes under the polar ROI).
 
-### Step 6 `apply_circle_selection`(核心投影)
-1. 获取 filtered pairs(Step 4);
-2. 环选择: `dist2<=inner²`,可选 `outer_ring_filter` 收集外环噪声点;
-3. 中心化: `centered_signal` = electron−center;
-4. `build_denoised_centered_histogram`(core.py,细节 §4.8): 外环噪声密度均匀化减到内环 bin;`hist_denoised`、`hist_signal`、edges、bin_size 字典返回;
-5. 清除旧的重建/剖面选择状态, `_refresh_after_circle_clear(partial)`。
+Historically all of this ran synchronously on the GUI thread with a full `_refresh_plots` afterwards; since §14.2 the estimation/metrics/probes run on the `_CenterWorker` background thread.
 
-### Step 7 重建
-`run_reconstruction_now`(2026-08-31 现状,backward 已于 §16 移除):
-- 设置 `_get_rbasex_settings`;
-- rBasex 在 **后台线程** `_ReconWorker` 中调 pyabel `rbasex_transform(direction="inverse")`(见 §13.3b),带进度回调 `10–90%`,点击后 UI 立即返回;
-- 完成后由主线程 `_collect_recon_results` 刷新所有面板;重复点击受 `_recon_busy` 门控。
+### Step 6 `apply_circle_selection` (core projection)
+1. Get the filtered pairs (Step 4);
+2. Ring selection: `dist2 <= inner²`; the optional `outer_ring_filter` collects outer-ring noise points;
+3. Centering: `centered_signal` = electron − center;
+4. `build_denoised_centered_histogram` (core.py, details §4.8): the uniformized outer-ring noise density is subtracted from the inner-ring bins; returns a dict with `hist_denoised`, `hist_signal`, edges, bin_size;
+5. Clears the old reconstruction/profile selection state, `_refresh_after_circle_clear(partial)`.
+
+### Step 7 Reconstruction
+`run_reconstruction_now` (state as of 2026-08-31; backward was removed in §16):
+- sets `_get_rbasex_settings`;
+- rBasex runs on the **background thread** `_ReconWorker`, calling pyabel `rbasex_transform(direction="inverse")` (see §13.3b) with a progress callback of 10–90%; the click returns immediately;
+- on completion the main thread's `_collect_recon_results` refreshes all panels; repeated clicks are gated by `_recon_busy`.
 
 ---
 
-## 4. 关键算法实现详解
+## 4. Key algorithms in detail
 
-### 4.1 触发配对(core.py:41–189)
-- `_select_strict_delta_pairs`: 相邻行差分向量化。`valid` 要求两行列都非 NaN,rint 取整后比较。O(N)。
-- 1e2i 展开:对每个匹配行输出 `(e,i-1),(e,i)`,剪除 `i<0`。
-- 优点:纯向量,极快;多个模式统一 `delta_e/delta_i` 参数;等。缺点:相邻行必须是**连续数据行**(丢失跨文件边界的配对行,末行);对数据文件已排序假设,无排序防御;行间差依赖原始 CSV 顺序,若文件由多次采集拼接(如 `merge_trigger`),边界处会产生假配对——文件命名带 `merged_trigger` 暗示实际数据即拼接,此点值得注意。
+### 4.1 Trigger pairing (core.py:41–189)
+- `_select_strict_delta_pairs`: vectorized adjacent-row differences. `valid` requires both rows' columns to be non-NaN; compares after `rint` rounding. O(N).
+- 1e2i expansion: for each matched row output `(e,i-1),(e,i)`, clipping `i<0`.
+- Pros: pure vector ops, extremely fast; unified `delta_e/delta_i` parameters across modes. Cons: adjacent rows must be **contiguous data rows** (pairs across file boundaries and the last row are lost); the data file is assumed sorted with no sort defense; row deltas depend on the raw CSV order — if a file was stitched from multiple acquisitions (cf. `merge_trigger`), fake pairs appear at the stitch boundaries. The `merged_trigger` filename pattern suggests the real data is stitched; worth noting.
 
-### 4.2 重建(reconstruction.py)
-**(a) rBasex**:`abel.rbasex.rbasex_transform(direction="inverse", order=settings["order"], odd=..., reg=..., rmax=...)`,`basis_dir=None`(**每次都重算基集——pyabel 默认缓存于 `abel` 数据目录",实际 `basis_dir=None` 会用默认缓存目录 ~/.abel),`rIbeta()` 取出 `(r,I,β,...)`, `r*=bin_size`,峰值提取:
-`extract_peak_r_beta`:高斯平滑 → 归一化 → `scipy.signal.find_peaks` → 山谷裁剪 → 对每个峰 `np.trapezoid` 积分区间面积。返回 `(r,β,i,area)`。
+### 4.2 Reconstruction (reconstruction.py)
+**(a) rBasex**: `abel.rbasex.rbasex_transform(direction="inverse", order=settings["order"], odd=..., reg=..., rmax=...)`. Originally `basis_dir=None` (**the basis set was recomputed every time — pyabel's default cache lives in the `abel` data directory; since §16d it is explicitly persisted under `~/.cache/vmi_workflow/abel_basis`**), `rIbeta()` extracts `(r,I,β,...)`, `r *= bin_size`; peak extraction:
+`extract_peak_r_beta`: Gaussian smoothing → normalize → `scipy.signal.find_peaks` → valley clipping → per-peak `np.trapezoid` interval area. Returns `(r,β,i,area)`.
 
-**(b) backward 模型(内置回退)——已于 §16 整体移除,以下为历史记录**:`Abel_backward_reconstruction.py` **不存在**,因此**实际执行的是文件内回退引擎**(L56-后面的的三段:phase0/1/2):
-- Phase0 `_init_shared_data`:笛卡尔—极坐标立方插值 `map_coordinates(order=3)`,径向平均轮廓,尾部(80%半径以外)噪声 std;
-- Phase1 `_phase1_radial_analysis`:平滑+FWHM 峰定位 +`find_peaks`,过滤 mask_radius;峰 → (r,σ,amp,SNR);
-- Phase2 `_phase2_angular_analysis`:多半径均值极角谱 → `P2(cosθ)` 最小二乘 `[1,P2]` 拟合 → β=c2/c0(约束 −2..2);
-- `reconstruct_2d_from_params`: 叠加各峰高斯环 `amp·exp(−(r−r0)²/2σ²)·(1+β·P2)`。
-- 注意:**docs 声称的完整 forward-fit 引擎不存在**,该回退是“参数化高斯环拟合”,不是严格 Abel 逆变换;`reg`/`baseline` 等很多设置实际未用。
+**(b) backward model (built-in fallback) — removed entirely in §16; kept here as history**: `Abel_backward_reconstruction.py` **did not exist**, so **what actually ran was the in-file fallback engine** (three phases, L56+ at generation time):
+- Phase0 `_init_shared_data`: Cartesian–polar cubic interpolation `map_coordinates(order=3)`, radially averaged profile, tail (outside 80% radius) noise std;
+- Phase1 `_phase1_radial_analysis`: smoothing + FWHM peak localization + `find_peaks`, filtered by mask_radius; peaks → (r,σ,amp,SNR);
+- Phase2 `_phase2_angular_analysis`: multi-radius mean polar-angle spectra → `P2(cosθ)` least-squares `[1,P2]` fit → β=c2/c0 (constrained to −2..2);
+- `reconstruct_2d_from_params`: superimposes per-peak Gaussian rings `amp·exp(−(r−r0)²/2σ²)·(1+β·P2)`.
+- Note: **the full forward-fit engine claimed by the early docs never existed**; this fallback was a "parametric Gaussian-ring fit", not a true Abel inverse transform; many settings (`reg`/`baseline`, etc.) were actually unused.
 
-### 4.3 中心估计器(core.py)
-| 估计器 | 算法 | 复杂度 | 优点 | 缺点 |
+### 4.3 Center estimators (core.py)
+| Estimator | Algorithm | Complexity | Pros | Cons |
 |---|---|---|---|---|
-| `geometric_median`(L23) | Weiszfeld 迭代 | O(k·n) k≤120 | 抗噪声 | 对均匀环对称数据不敏感,偏质心 |
-| `circle_fit_kasa`(L25) | 代数最小二乘圆 | O(n) | 快 | Kasa 对短弧/噪声有系统偏移(代数偏差)|
-| `edge_circle_center`(L29) | 1°/bin 包络→圆拟合 | O(n+180²) | 快速已有拟合 | **每 bin 只保留最远 1 点,对离群值脆弱**,相角覆盖不完整时劣化 |
-| `quadrant_symmetry_center`(L331) | 方位角配对: 每个角度扇区内部对称残差; `_coarse_search` 网格 + 迭代 | 每次候选都建 `cKDTree` + `query_ball_point` | 对环形分布好 | **每次候选重建 KDTree,O(k·n·query)**;初始化半径依赖 |
-| `polar_outermost_center`(L990) | 冻结“最外层 ring”散射模型, `_scatter_peak_line_loss_grad` 解析梯度 + `_optimize_scatter_peak_line_model` 单调更新 | 每轮 loss 重新计算所有点的 `(dx,dy,rr,θ)` | 收敛稳定 | **跨迭代无缓存,每 loss 重复 O(n) 极坐标** + 模型重建 |
-| `_iterative_outer_roi_edge_circle_center`(L1922) | 窄环形 ROI 的对比图 →平滑圆周路径 →圆拟合→ 迭代 | 每次迭代重做整幅对比图 | 手动 ROI 场景稳 | 对 2D 直方图重建瓶颈({对比图全图}) |
+| ~~`geometric_median`~~ (**DELETED** 2026-09-01, see §16g) | Weiszfeld iteration | O(k·n), k≤120 | noise-robust | insensitive to symmetric uniform-ring data, biased toward the centroid |
+| `circle_fit_kasa` (internal helper, not a UI mode) | algebraic least-squares circle | O(n) | fast | Kasa has a systematic offset for short arcs / noise (algebraic bias) |
+| `edge_circle_center` (internal seed helper, **UI mode removed** 2026-09-01, see §16g) | outer-envelope per angle bin → Kasa circle fit, 3 refinement iterations (**2°/bin, `angle_bins=180` default**) | worst case O(iterations·bins·n) (per-bin `np.where` rescan) | fast, reuses an existing fit | **keeps only the single farthest point per bin — fragile to outliers**; degrades with incomplete angular coverage |
+| `quadrant_symmetry_center` (**default UI mode**, see §16g) | diagonal-quadrant raw-point nearest-neighbour matching (180-degree rotation symmetry), single hoisted KD-tree | shared cKDTree built once + per-candidate queries | good for ring distributions, no prerequisites | depends on the seed radius estimate |
+| `polar_outermost_center` (L990 at generation time) | frozen "outermost ring" scatter model, `_scatter_peak_line_loss_grad` analytic gradient + `_optimize_scatter_peak_line_model` monotone updates | each loss round recomputes every point's `(dx,dy,rr,θ)` | stable convergence | **no cross-iteration caching; each loss repeats O(n) polar-coordinate work** + model rebuild |
+| `_iterative_outer_roi_edge_circle_center` (L1922 at generation time) | narrow annular-ROI contrast map → smoothed circular path → circle fit → iterate | each iteration redoes the full contrast map | stable for manual-ROI scenarios | bottlenecked by the 2D-histogram rebuild (the full contrast map) |
 
-共享前处理:`points[::step]` 采样 ≤ ~ 64k 点再进入估计器(`_scatter_peak_line…`)。
+Shared preprocessing: `points[::step]` subsampling to ≤ ~64k points before entering the estimators (`_scatter_peak_line…`).
 
-### 4.4 极坐标直方图与峰值线
-`build_polar_histogram`(L819):以某点为圆心将 (x,y) 按 `θ=atan2`, `r=hypot` 分 bin(θ 默认 360 列? 由调用者定;r bin 数沿动态),得到二维热图;`_select_polar_peak_line` 逐 θ 列找峰值;`*_loss_grad` 用“峰位水平平直”作为切向约束(straightness)求梯度,梯度把 `∂r/∂center` 传给解析公式。
+### 4.4 Polar histogram and peak line
+`build_polar_histogram` (L819 at generation time): bins (x,y) by `θ=atan2`, `r=hypot` around a given center into a 2D heatmap (θ columns are set by the caller; the r bin count is dynamic); `_select_polar_peak_line` finds the peak per θ column; `*_loss_grad` uses "peak position horizontal straightness" as the tangential constraint (straightness) and differentiates; the gradient feeds `∂r/∂center` into analytic formulas.
 
-### 4.5 m/q 校准
-`_ion_mq_calibration_params`(L 8980):平方律 `m/q = a·t² + b`, `b=0`;参考点 `(m/q_ref, t_ref)` 定 `a = m_ref/t_ref²`,若给 TOF 范围则对 `[t_lo,t_hi]→[m_ref−½, m_ref+½]` 再做最小二乘标定 `a`。整数 m/q bin ↔ 对应 TOF 区间(确定性)。优:物理清晰;弱:拟合器只有一个自由参数,若 TOF 偏移(如 时间零点 delta)则系统误差。
+### 4.5 m/q calibration
+`_ion_mq_calibration_params` (L 8980 at generation time): quadratic law `m/q = a·t² + b`, `b=0`; a reference point `(m/q_ref, t_ref)` fixes `a = m_ref/t_ref²`; given a TOF range, `[t_lo,t_hi]→[m_ref−½, m_ref+½]` is least-squares calibrated for `a`. Integer m/q bins ↔ corresponding TOF intervals (deterministic). Strength: physically clear; weakness: the fit has a single free parameter — any TOF offset (e.g. a time-zero delta) becomes a systematic error.
 
-### 台位 4.6 离子直方图背景拟合(121-13690)
-两条并行路线 + 一个回退:
-1. 包络基线 `_estimate_ion_hist_log_envelope_baseline`(熵): 对数空间滚动分位数(纯 Python 滚动循环 → 慢)→ 可分离平滑 → 加权 isotonic 增回归 → 指数 → 最小累积(`np.minimum.accumulate`) 得 **under-signal 单调基线**。
-2. 自适应组件 `_fit_ion_hist_background_curves_adaptive_raw`(L34):候选 m 幂集合 + 软偏移,权重最小二乘线性组件(`_solve_weighted_nonnegative_components`),目标下打分;再 `_project_nonnegative_components_under_target` 强制非负与 “不越过唯一信号区域”。
-3. 非参数回退 `_build_nonparametric_bg_state`(L46):log-velope smoothing profile。
- 评分:自适应用 under-target SSE;NNLS 搜索用 BIC 选模型(complexity 加入选择)。
+### 4.6 Ion-histogram background fitting (L~121-13690)
+Two parallel routes + one fallback:
+1. Envelope baseline `_estimate_ion_hist_log_envelope_baseline`: log-space rolling quantiles (pure-Python rolling loop → slow) → separable smoothing → weighted isotonic (monotone increasing) regression → exponential → running minimum (`np.minimum.accumulate`) gives the **under-signal monotone baseline**.
+2. Adaptive components `_fit_ion_hist_background_curves_adaptive_raw`: candidate power set + soft offsets, weighted least-squares linear components (`_solve_weighted_nonnegative_components`), scored under the target; then `_project_nonnegative_components_under_target` enforces non-negativity and "do not cross the unique signal region".
+3. Non-parametric fallback `_build_nonparametric_bg_state`: log-envelope smoothing profile.
 
-性能⚠️:`_rolling_quantile`、isotonic 块合并、逐 shape-profile 拟合都是 **Python 循环 + O(n) 每迭代**,有窗口 几万–几十万级数据时可达数百 ms–秒级;且 **每次 `_ensure_ion_hist_background_fit` 仅在 cache key 变更时重算** —— 否则复用,是缓存设计对的。
+Scoring: the adaptive route uses under-target SSE; the NNLS search selects the model by BIC (complexity enters the selection).
 
-### 4.7 Ion TOF 背景模型(1-TO-F 图, visualization)
-(实际代码,非点式 kd-tree):
-- `_fit_ion_tof_background_model_raw`(L~14742):先 平滑 XY 直方图(密度),再 `_fit_radial_floor_profile`(径向地板轮廓),逐点 `score = bg_density/all_density`, `_choose_score_threshold` 用分位数 / 直方图质量自动定阈值, mask 掉低分事件报背景 keep。
-- `_ensure_ion_tof_bg_model` 按 (source key, xy transform key, params) 记忆化。
-- **死代码(已删除,§16)**: `_adaptive_xy_kde_density` 及 `ION_TOF_BG_POINTWISE_K`(K=28) 的逐点 KNN 路径曾定义且无调用者,实际用的是 histogram-density + radial floor 版本(更快、更稳,但也更粗);两已于 §16 移除。
+Performance ⚠️: `_rolling_quantile`, the isotonic block merging and the per-shape-profile fits are **Python loops + O(n) per iteration**; with windows of tens to hundreds of thousands of points this can reach hundreds of ms to seconds. **`_ensure_ion_hist_background_fit` only recomputes when the cache key changes** — otherwise it reuses, which is the correct cache design.
 
-### 4.8 去噪居中分箱(core.py:2946–3018)
+### 4.7 Ion TOF background model (the ion TOF map, visualization)
+(the code that actually runs; not the point-wise kd-tree):
+- `_fit_ion_tof_background_model_raw`: first smooth the XY histogram (density), then `_fit_radial_floor_profile` (radial floor profile); per point `score = bg_density/all_density`; `_choose_score_threshold` picks the threshold automatically from quantiles / histogram mass; low-score events are masked as background keep.
+- `_ensure_ion_tof_bg_model` memoizes by (source key, xy transform key, params).
+- **Dead code (deleted, §16)**: the `_adaptive_xy_kde_density` / `ION_TOF_BG_POINTWISE_K` (K=28) point-wise KNN path was defined with no callers; the histogram-density + radial-floor variant is what actually ran (faster and more stable, but coarser). Both were removed in §16 (the leftover feature-construction helper `_adaptive_xy_bg_features` was finally deleted in §16h).
+
+### 4.8 Denoised centered binning (core.py:2946–3018)
 ```
-信号直方图(signal_hist)  ← centered_signal
-外环密度 = noise_count / (π(outer²−inner²))
+signal histogram (signal_hist)  ← centered_signal
+outer-ring density = noise_count / (π(outer²−inner²))
 expected_per_bin = density × bin_size²
-内环 mask(圆内)全部减 expected_per_bin → clamp ≥0
+inner-ring mask (inside circle) subtracts expected_per_bin → clamp ≥0
 removed_total = Σsignal − Σdenoised
 ```
-- 优点:单次同型减法,极快,数学可解析。
-- 缺点(准确度):**假设背景在内环内均匀**(实际 VMI 背景在 r 方向有径向涨落、心部常偏高);对 Poisson 计数噪声不做双侧校正; `denoised<0→0` 造成截断偏差(负值丢失信息,均值上移)。改进:径向自适应背景或随 r 的 Poisson 校正(见 §10 改进项)。
+- Pros: a single uniform-type subtraction, extremely fast, analytically transparent.
+- Cons (accuracy): **assumes the background is uniform inside the inner ring** (real VMI background fluctuates radially and is often elevated near the center); no two-sided correction of Poisson counting noise; `denoised<0→0` causes truncation bias (negative values discard information, the mean shifts up). Improvements: a radially adaptive background or a Poisson correction as a function of r (see §10 improvement items).
 
-### 4.9 旋转 / 对齐
-- `_apply_ion_rotation`(L8152): 以 `ion_rotation_center` 为基准旋转 `(x,y)` 按 `rotation_deg`;`_transform_ion_xy` 级联:旋转 → TOF 对齐平移 → TOF Z 中心。
-- `_fit_ion_tof_main_line`(L):histogram2d 降采样 → 平滑 → 每列 argmax 脊线 → MAD-稳健加权线性回归(line 拟合);`_fit_ion_tof_box_density_line` 逐 box 密度 top-%。 结果存 `ion_tof_fit_result_by_axis`,应用移动到 `(x,t)` 使直线水平。
-- 两处之间**变换数学在同一文件内被复制 3–4 遍**(`_apply_ion_tof_alignment_to_xy`/_apply_ion_scatter_tof_center_to_xy/-terms/_ion_tof_display_coord_values)——维护风险点。
+### 4.9 Rotation / alignment
+- `_apply_ion_rotation` (L8152 at generation time): rotates `(x,y)` by `rotation_deg` around `ion_rotation_center`; `_transform_ion_xy` cascades: rotation → TOF-alignment shift → TOF Z centering.
+- `_fit_ion_tof_main_line`: histogram2d downsampling → smoothing → per-column argmax ridge → MAD-robust weighted linear regression (line fit); `_fit_ion_tof_box_density_line` per-box density top-%. Results are stored in `ion_tof_fit_result_by_axis`; applying the fit shifts `(x,t)` so the line is horizontal.
+- The **transform math used to be duplicated 3–4 times within the same file** (`_apply_ion_tof_alignment_to_xy`/`_apply_ion_scatter_tof_center_to_xy`/`-terms`/`_ion_tof_display_coord_values`) — a maintenance risk. (Deduplicated in §16c.)
 
 ---
 
-## 5. 缓存与失效机制
+## 5. Caches and invalidation
 
-| 缓存 | 键 | 失效触发 |
+| Cache | Key | Invalidated by |
 |---|---|---|
-| 触发配对 `_pair_cache_*` | (mode, trigger_ref 对象身份) | `process_and_plot` / `clear` |
-| 离子直方图 `_ion_hist_cache` | (data_version, bins, coarse ROI, axis_tag, bg key) | `process_and_plot` 或 controls 改动 |
-| fine-ROI 选中 `_mask_cache` | (data_version, ROI, 峰值 marker, bg key) | ROI/标记变更 |
-| 散射显示 `_current_scatter_display_* | (selection, filters, subsample) | filters/controls 变更 |
-| TOF 背景模型 | (source data, xy transform, params) | `fit_ion_tof_bg_model` 显式重算 |
-| TOF 对齐结果 | (axis, transform) | fit/clear |
-| rBasex | 基集持久化: `basis_dir=~/.cache/vmi_workflow/abel_basis`(进程内全局 + 跨进程磁盘缓存) | — |
-| ion_tof_xy map | (data_version, pair 表 id, paired_count, n, **coarse ROI**, **BG keep 状态**, axis, bins, z-range, 旋转/对齐项)(2026-08-31 修复: 原键不含 ROI/数据指纹) | 数据或选择变化即失效 |
+| trigger pairing `_pair_cache_*` | (mode, trigger_ref object identity) | `process_and_plot` / `clear` |
+| ion histogram `_ion_hist_cache` | (data_version, bins, coarse ROI, axis_tag, bg key) | `process_and_plot` or control changes |
+| fine-ROI selection `_mask_cache` | (data_version, ROI, peak marker, bg key) | ROI/marker changes |
+| scatter display `_current_scatter_display_*` | (selection, filters, subsample) | filter/control changes |
+| TOF background model | (source data, xy transform, params) | explicit recompute via `fit_ion_tof_bg_model` |
+| TOF alignment result | (axis, transform) | fit/clear |
+| rBasex | persisted basis: `basis_dir=~/.cache/vmi_workflow/abel_basis` (in-process global + cross-process disk cache) | — |
+| ion_tof_xy map | (data_version, pair-table id, paired_count, n, **coarse ROI**, **BG-keep state**, axis, bins, z-range, rotation/alignment terms) (fixed 2026-08-31: the key previously lacked the ROI/data fingerprint) | invalidated on any data or selection change |
 
-整体缓存设计成熟(键含版本),但 `ion_tof_xy` 缓存键遗漏数据依赖、`display_data` 每次 `_refresh_*` 重算(offset 重复)、background fit 的 isotonic/rolling 循环没有复用为缓存对象。
+The overall cache design is mature (versioned keys), but the `ion_tof_xy` cache key used to omit data dependencies, `display_data` was recomputed on every `_refresh_*` (duplicate offsets), and the background-fit isotonic/rolling loops are not reused as cached objects. (The first two were addressed in §16d.)
 
 ---
 
-## 6. 性能实测(pandas/pyarrow 对照)
+## 6. Measured performance (pandas/pyarrow comparison)
 
-| 操作(200 万行 95.6MB) | 耗时 |
+| Operation (2M rows, 95.6 MB) | Time |
 |---|---|
-| `np.loadtxt`(现行) | 1.44 s |
+| `np.loadtxt` (then-current) | 1.44 s |
 | `pandas.read_csv(engine="c")` | 1.33 s |
 | `pyarrow.csv.read_csv` | **0.15 s** |
 
-结论:单文件解析差异有限,但三文件× 260MB 的串行加载 + 解析仍是启动冷门;pyarrow 带来 **~10× 读速**。更重要的事实:**GUI 线程内同步阻塞是体验首要问题**, IO 应挪到后台线程。
+Conclusion: per-file parsing differences are limited, but the serial load+parse of three 260 MB files still dominated startup; pyarrow brings a **~10x read speedup**. The more important fact: **synchronous blocking on the GUI thread was the top UX problem**; IO belongs on a background thread. (Addressed in §13.1/§14.2.)
 
-### 性能瓶颈清单(按优先级)
+### Bottleneck list (by priority)
 
-| # | 位置 | 问题 | 影响 |
+| # | Location | Problem | Impact |
 |---|---|---|---|
-| P0-2 ✅已解决(§13.3b 后台线程;§16 backward 移除) | `run_reconstruction` L~18 | 曾为同步 rBasex(基集生成本来就慢)+ backward, 无 worker | 曾卡界面数秒–数十秒 |
-| P0-3 ✅已解决(§14.2) | `_use_safe_*_redraw()` Windows | 曾强制全画布重绘代替 blit;每次拖动都全量 draw + recapture background | 拖动交互卡顿 |
-| P0-4 ✅基本解决(§16) | `_selected_pairs_after_ion_filter` / `display_data` | 每次 `_refresh_*` 重做过滤 + 密度分箱;多处 refresh 重复 40 行 scatter 块 | 过滤参数热更时重绘风暴(现 selected-pairs 派生已记忆化,refresh 尾部已去重) |
-| P0-5 ◐部分解决(§16) | 中心估计器: `quadrant_symmetry` 每候选重建 cKDTree | O(k²·n) 级(现 KDTree 单树提升,逐位一致) | 中心估计耗时秒级(polar_outermost 跨迭代仍无缓存) |
-| P1-1 | `_fit_ion_histogram_background_rules_*` | Python 循环滚动分位数/同调 | 百 ms–秒级 |
-| P1-2 | `build_denoised_centered_histogram` | 每圈重建含 meshgrid;同一次 应用时可接受 | 低 |
-| P1-3 ✅已解决(§16) | `run_rbasex` `basis_dir=None` | 无显式基集缓存管理(依赖 pyabel 内部磁盘缓存) | 首次重建慢(现持久化于 ~/.cache/vmi_workflow/abel_basis) |
-| P1-4 ✅已解决(§16) | `_ion_tof_xy_cache` 键缺数据 | 参数不变时数据变化仍命中旧图(现键含 coarse-ROI/BG-mask 指纹) | 数据不一致 |
+| P0-2 ✅ resolved (§13.3b background thread; §16 backward removal) | `run_reconstruction` L~18 | was synchronous rBasex (basis generation is inherently slow) + backward, no worker | froze the UI for seconds to tens of seconds |
+| P0-3 ✅ resolved (§14.2) | `_use_safe_*_redraw()` Windows | forced full-canvas redraw instead of blit; every drag did a full draw + background recapture | laggy drag interaction |
+| P0-4 ✅ mostly resolved (§16) | `_selected_pairs_after_ion_filter` / `display_data` | re-did filtering + density binning on every `_refresh_*`; several refresh sites duplicated a 40-line scatter block | redraw storm on hot filter updates (selected-pairs derivation now memoized; refresh tails deduplicated) |
+| P0-5 ◐ partially resolved (§16) | center estimators: `quadrant_symmetry` rebuilt a cKDTree per candidate | O(k²·n)-class (now a single hoisted KDTree, bit-identical results) | center estimation took seconds (polar_outermost still has no cross-iteration caching) |
+| P1-1 | `_fit_ion_histogram_background_rules_*` | Python-loop rolling quantiles / isotonic | 100 ms–seconds |
+| P1-2 | `build_denoised_centered_histogram` | rebuilds the meshgrid each run; acceptable for a single apply | low |
+| P1-3 ✅ resolved (§16) | `run_rbasex` `basis_dir=None` | no explicit basis cache management (relied on pyabel's internal disk cache) | first reconstruction slow (now persisted under ~/.cache/vmi_workflow/abel_basis) |
+| P1-4 ✅ resolved (§16) | `_ion_tof_xy_cache` key lacked data | data changes still hit the old map when params were unchanged (the key now carries coarse-ROI/BG-mask fingerprints) | data inconsistency |
 
 ---
 
-## 10. 准确度风险清单
+## 10. Accuracy risk list
 
-1. **去噪模型假设均匀内环噪声**(§4.8): 忽略径向涨落, 可能低估/高估信号峰底部 → 影响 rBasex 输入准确性。
-2. **Kasa 圆拟合存在代数偏差**(core L252-293): 对低信噪、短弧数据中心估计有偏。
-3. **edge_circle_center 每角度仅保留最远点**: 外缘离群点直接污染Kasa。
-4. **(历史,§16 已移除)backward 引擎曾是简化高斯模型**(§4.2b): 返回 β 来自峰值局部角度拟合,全局 β(r) 是 `Σβ·radial/Σradial` 加权,不是真 Abel 重建 → 与 rBasex 结果差异大,尤其多峰重叠/阴影。该引擎连同其 UI/会话键已于 §16 删除,现在重建只走 rBasex。
-5. **m/q 平方律 `b=0`**: 若 TOF 零点慢,系统偏差; 范围校准用最小二乘但无回归误差反馈。
-6. **背景拟合 under-target SSE**: 天然把基线往信号底下压(低估背景) — 信号峰间的谷可能被低估。
-7. **峰值线性.Fringes**: `extract_peak_r_beta` 采用 `intensity[idx]` 作为面积 fallback; 若 `beta_profile` 硬 clip −2..2 会扭曲极各向异性分布。
-8. **离子/电子索引直接索引**: out-of-range 被裁剪,但不警告用户;多数指数成对但 sample 计数可能被丢弃。
-
----
-
-## 9. 可维护性问题
-
-1. **巨型上帝类**: `MainWindow` 巨型单类、~23k 行(2026-08-31)。方法边界清楚但**职责未分离**: 间隙/坐标/拟合/plot/缓存全部在同一类。无障碍重构:按域拆 mixin 或 utils(保持 import 兼容)。
-2. **重复代码**: 1) 变换数学 3–4 份;2) `_refresh_plots` 中 electron/ion 散射绘制块与 `_refresh_scatter_panels_only` 重复 40+ 行;3) 四个配对模式的进度回调闭包几乎相同;4) 两个颜色条删除+创建模式。
-3. **死代码(2026-08-31 修订)**: `_SelectorToggleProxy` **是活代码**(L217 定义,L2540/2547 创建;`.active` 在画布事件处理 L~19063/19088 被 TOF-ROI/TOF-背景拾取消费,clear 时调用 `.clear()`)——本节早先"可能已无使用者"的判断是错的。`_clear_ion_tof_fit_preview_background` 已更名为 `_invalidate_ion_tof_fit_preview_background`(L3549,5 处调用,活代码)。`_adaptive_xy_kde_density`/`ION_TOF_BG_POINTWISE_K` 逐点 KNN 后端已确认死代码并于 §16 删除;`_center_curve_metrics` 中探针逻辑仅少数模式使用(保留)。
-4. **依赖外部文件(已解决,§16)**: `Abel_backward_reconstruction.py` 不存在、模块 try-import 与整个 backward 回退引擎已随 §16 移除。
-5. 常量/硬编码: `sys.platform` 分支、比例常数散落方法中(names 无常量)。
-6. 无单测(`VMI_workflow_core` 设计为易测但仓库中无测试文件——未验证,扫描未发现)。
+1. **The denoise model assumes uniform inner-ring noise** (§4.8): ignores radial fluctuation; may under-/overestimate the bases of signal peaks → affects rBasex input accuracy.
+2. **Kasa circle fit has an algebraic bias** (core L252-293): biased center estimation for low-SNR, short-arc data.
+3. **edge_circle_center keeps only the farthest point per angle**: outer-edge outliers pollute Kasa directly.
+4. **(historical, removed in §16) the backward engine was a simplified Gaussian model** (§4.2b): the returned β came from per-peak local angular fits; the global β(r) was `Σβ·radial/Σradial` weighted, not a true Abel reconstruction → large divergence from rBasex, especially with overlapping/shadowed peaks. The engine, its UI and session keys were deleted in §16; reconstruction now runs rBasex only.
+5. **m/q quadratic law `b=0`**: a TOF zero offset gives a systematic bias; range calibration uses least squares but provides no regression-error feedback.
+6. **Background-fit under-target SSE**: naturally pushes the baseline below the signal (underestimates the background) — valleys between signal peaks may be underestimated.
+7. **Peak-area fringes**: `extract_peak_r_beta` falls back to `intensity[idx]` for the area; a hard clip of `beta_profile` to −2..2 distorts strongly anisotropic distributions.
+8. **Ion/electron indices used directly as indexes**: out-of-range is clipped without warning to the user; most indices are paired but some sample counts may be dropped.
 
 ---
 
-## 11. 改进路线图(保持交互逻辑不变)
+## 9. Maintainability issues
 
-### P0 性能(高杠杆,低风险)
-1. **异步加载 + pyarrow/pandas C 解析**(✅ 已完成 §13.1): 把 `load_cache` 放 `QThread`/`concurrent.futures`; 用 `pyarrow.csv.read_csv`(或 pandas C 引擎)+ 结果转 numpy; 进度条继续,UI不冻结。列选择用 pyarrow `include_columns`。**风险**: 无,纯粹替换读路径;保留 dtype float64。
-2. **异步重建**(✅ 已完成 §13.3b;backward 已于 §16 移除): `run_reconstruction_now` 的 rBasex 与 backward 放入后台线程,完成后回主线程刷新;期间画布不动,状态栏转菊花。**保持行为**: 点击按钮后结果一致。
-3. **Windows 安全 blit 改优化**(✅ 已完成 §14.2): 替代外更稳的路径——用 `canvas.copy_from_bbox` + `restore_region` + `draw_artist` 包裹 `try/except` 自动降级;或把 overlay 绘制延迟到 `timerEvent` 批量合并。**风险**: 中(Win 专属绘图),需要人工验证。
-4. **`display_data` 派生缓存**(◐ 基本完成 §16:selected-pairs 派生已记忆化): 在 `_refresh_*` 前用 `(selection_version, filter params, data_version)` 判断数组是否相同,相同则复用旧 `electron_show/ion_show/颜色数组`,避免重复密度过滤。
-5. **中心估计缓存**(◐ 部分完成 §16:quadrant_symmetry 单树提升,逐位一致): 在 `_scatter_peak_line_model` 冻结点集后预计算 `(r²,θ,cosθ,sinθ)` 常量向量;所有 `loss/grad` 迭代复用;`quadrant_symmetry` 对每个候选用 `KD.query_ball_point` 但 **KDTree 只构建一次**(候选中心集内移动点不变!),直接重大提速。
-6. **`basis_dir` 显式持久缓存**(✅ 已完成 §16): 设 `basis_dir=os.path.join(缓存)`, 首个 rBasex 慢,后续毫秒级。
-7. **`ion_tof_xy` 缓存键加入数据指纹**(✅ 已完成 §16): `hash(self._current_pair_data_version + coarse_mask sum)` 强制失效。
-
-### P1 精度
- - 去噪改径向自适应(annular density per radius)或 Poisson 模型; 保持 API `build_denoised_centered_histogram(signal, noise, inner, outer, bin)` 输出 dict 结构不变。默认 `flat uniform → 可选 'radial'` 校验收(不改默认可避免科学断裂)。
- - 圆拟合 Kasa → Pratt/Taubin(代数恒定)或者 `scipy.optimize` 非线性最小二乘(radius weighting),`circle_fit_kasa` 作为 fallback 保兼容。
- - `edge_circle_center` 每 bin 存 top-N% 分位数点集代替单一最远点。
- - m/q 允许 `b≠0`(挡: 需要 UI 牺牲精度,默认保持)。
-
-### P2 UI 现代化(不碰交互逻辑)
-1. **全局 QSS 主题**: 在 app 启动 `main()` 里 `app.setStyleSheet`(浅色现代化: 圆角、对比度、字体栈 "Segoe UI Variable")替换窗口散落的 inline stylesheet;保留 `QTabWidget/GroupBox` 现有结构规则。
-2. **matplotlib 样式**: `rcParams` 全局主题(轴色、网格线、字体大小、Figure 底色 #fafafa),保持子图/坐标系布局不改。
-3. **面板与状态栏**: 进度条细化(0-100 分段色)、状态提示弱化;图标按钮换文字+icon 不合格?保持。
-4. **绘图速度**: 对已缓存 image 型面板(centered bin、recon、hist) 用 blit/局部图表流畅;text 对象避免每次全部重建。
-5. 滚动预览保留(已是亮点)。
-
-### P3 前端
-- 拆 `MainWindow` 为几大类(交互、布局、核心、绘图), 保持公共方法名/类名不变 → 行为不变, 但可测。
-- 把 public 算法(触发配对、圆心、背景)做成 `VMI_workflow_core` 的纯函数并加单测(np.testing).
-- 移除死代码(2.2 列出的), 注意先 grep 调用点再删。
-- `.vendor_site`(L1) 与 `_prepend_local_vendor_sitepackages` 若无目录则 no-op, 保留。
+1. **Giant God class**: `MainWindow` is a single class of ~23k lines (2026-08-31; ~23.8k after §16f/§16g). Method boundaries are clear but **responsibilities are not separated**: pairing/coordinates/fitting/plots/caching all live in one class. Low-risk refactor: split into domain mixins or utils (keeping import compatibility).
+2. **Duplicated code**: 1) transform math ×3–4; 2) the electron/ion scatter drawing blocks in `_refresh_plots` duplicate `_refresh_scatter_panels_only` by 40+ lines; 3) the four pairing modes' progress-callback closures are nearly identical; 4) the two colorbar delete+create patterns. (Items 1, 3, 4 and the refresh tails were deduplicated in §16c.)
+3. **Dead code (revised 2026-08-31)**: `_SelectorToggleProxy` **is live code** (defined L217, created L2540/2547 at generation time; `.active` is consumed by the TOF-ROI/TOF-background picking in the canvas event handlers L~19063/19088, `.clear()` called on clear) — this section's earlier "may have no users" judgment was wrong. `_clear_ion_tof_fit_preview_background` was renamed `_invalidate_ion_tof_fit_preview_background` (L3549, 5 call sites, live). The `_adaptive_xy_kde_density`/`ION_TOF_BG_POINTWISE_K` point-wise KNN backend was confirmed dead and deleted in §16 (its leftover feature helper `_adaptive_xy_bg_features` in §16h); the probe logic in `_center_curve_metrics` is used only by a few modes (kept).
+4. **External-file dependency (resolved, §16)**: `Abel_backward_reconstruction.py` did not exist; the module try-import and the entire backward fallback engine were removed with §16.
+5. Constants / hard-coding: `sys.platform` branches, scale constants scattered through methods (no named constants).
+6. No unit tests (`VMI_workflow_core` was designed to be testable but the repo had no test files — unverified at the time; since §16e the repo has `tests/test_core.py` + `tests/test_smoke.py`).
 
 ---
 
-以下行为将被视为"交互契约",优化时不得改变:
-1. 七步工作流按钮顺序与功能完全一致(Load→Process→ROI→Fine→Filter→Estimate→Apply+Bin→Recon)。
-2. 所有 `QLineEdit` 文本输入即监听器布局不变(`textChanged` 触发覆绘制/重算)。
-3. 拖拽手势(环、滤罩、θ、rBasex 范围、标记、TOF box)语义不变。
-4. 会话保存/恢复格式兼容(既有 npz + meta JSON)。
-5. 窗口默认尺寸/停靠/标签结构不变。
-6. 科学输出: 峰值 r/β/强度 数值可复现(同一数据+同参数)。
+## 11. Improvement roadmap (interaction logic unchanged)
+
+### P0 performance (high leverage, low risk)
+1. **Async loading + pyarrow/pandas C parser** (✅ done, §13.1): move `load_cache` onto a `QThread`/`concurrent.futures`; use `pyarrow.csv.read_csv` (or the pandas C engine) + convert results to numpy; keep the progress bar, UI does not freeze; column selection via pyarrow `include_columns`. **Risk**: none, a pure read-path replacement; keep dtype float64.
+2. **Async reconstruction** (✅ done §13.3b; backward removed in §16): move rBasex onto a background thread and return to the main thread to refresh; the canvas is untouched meanwhile, spinner in the status bar. **Behaviour kept**: results identical after the click.
+3. **Windows safe-blit rework** (✅ done §14.2): a more robust path — wrap `canvas.copy_from_bbox` + `restore_region` + `draw_artist` in try/except with automatic fallback; or defer overlay drawing into batched `timerEvent` merges. **Risk**: medium (Windows-specific painting), needs manual verification.
+4. **`display_data` derived cache** (◐ mostly done §16: the selected-pairs derivation is memoized): before `_refresh_*`, check `(selection_version, filter params, data_version)`; if unchanged, reuse the old `electron_show/ion_show`/color arrays and skip the repeated density filtering.
+5. **Center-estimation cache** (◐ partially done §16: quadrant_symmetry single-tree hoist, bit-identical): after `_scatter_peak_line_model` freezes the point set, precompute the `(r²,θ,cosθ,sinθ)` constant vectors; all `loss/grad` iterations reuse them; `quadrant_symmetry` uses `KD.query_ball_point` per candidate but the **KDTree is built only once** (the points do not move within the candidate-center set!) — a major direct speedup.
+6. **`basis_dir` explicit persistent cache** (✅ done §16): set `basis_dir` under the cache directory; the first rBasex is slow, afterwards millisecond-level.
+7. **`ion_tof_xy` cache key gains a data fingerprint** (✅ done §16): `hash(data_version + coarse_mask sum)` forces invalidation.
+
+### P1 accuracy
+- Denoising → radially adaptive (annular density per radius) or a Poisson model; keep the API `build_denoised_centered_histogram(signal, noise, inner, outer, bin)` output dict structure unchanged. Default `flat uniform`, an optional `'radial'` mode behind a switch (not changing the default avoids a scientific break).
+- Circle fit Kasa → Pratt/Taubin (algebraically unbiased) or `scipy.optimize` nonlinear least squares (radius weighting), with `circle_fit_kasa` kept as a compatible fallback.
+- `edge_circle_center`: keep a top-N% quantile point set per bin instead of the single farthest point.
+- m/q: allow `b≠0` (trade-off: needs UI; keep the default).
+
+### P2 UI modernization (touch no interaction logic)
+1. **Global QSS theme**: `app.setStyleSheet` in `main()` (light, modern: rounded corners, contrast, a "Segoe UI Variable" font stack) replacing the scattered inline styles; keep the existing `QTabWidget`/GroupBox structure rules.
+2. **matplotlib styling**: a global `rcParams` theme (axis colors, gridlines, font sizes, figure background #fafafa), subplot/axes layout untouched.
+3. **Panels and status bar**: finer progress bar (0-100 segmented colors), softened status hints; icon buttons stay text-based.
+4. **Plotting speed**: blit/partial redraws for the already-cached image-type panels (centered bin, recon, hist); avoid rebuilding all text objects every time.
+5. Keep the scroll preview (already a highlight).
+
+### P3 frontend
+- Split `MainWindow` into several large classes (interactions, layout, core, plotting), keeping public method/class names unchanged → behaviour unchanged but testable.
+- Turn the public algorithms (trigger pairing, circle centers, background) into pure functions of `VMI_workflow_core` with unit tests (np.testing).
+- Remove dead code (listed in §9.3), grepping call sites before each deletion.
+- `.vendor_site` (L1) and `_prepend_local_vendor_sitepackages` stay as no-ops when the directory is absent.
 
 ---
 
-## 13. 本次已实施的改动清单(2026-08-25)
+## 12. Interaction contract
 
-> 遵循 §12 契约:未改动任何交互逻辑、未改动任何科学计算数值路径。
-
-### 13.1 高速数据加载(性能)
-- `VMI_workflow_core.py`:新增 `fast_read_csv_float64(path, *, n_columns, use_columns)`。
-  - 首选 **pyarrow C++ CSV 解析器**(SIMD,解析 260MB 文件 ~10× 快于 `np.loadtxt`);
-  - `NaN` 文本正确解析为 float64 NaN(真实数据含 `NaN`);
-  - 解析异常自动回退(原 `np.loadtxt` 完全同语义),无 pyarrow 环境不破坏功能;
-  - 列选择按 `use_columns` 输出顺序,兼容 trigger 文件 4 列取 (2,3)、点文件 3 列取 (0,1,2)。
-- `VMI_workflow.py::load_cache` 改用 `fast_read_csv_float64`,进度条分段更新不变。
-- 实测(真实参考文件 3 个,共 ~24M 行):trigger 8.6M 行由 `np.loadtxt` 1.53 s → 0.65 s;三文件读取部分合计约 1.4 s。
-- 回退路径兼容(若 pyarrow 不可用则 `np.loadtxt` 原样)。
-
-### 13.2 界面现代化(QSS + matplotlib 主题)
-- `main()` 增加全局 `app.setStyleSheet` 浅色现代主题:圆角按钮/输入框、聚焦高亮、扁平面板、
-  Segoe UI Variable 字体栈、复选框圆角指示器、滚动条现代化、ToolTip 深色。
-  作用域限定在通用控件类型,保留既有 `QTabWidget/GroupBox/SettingsPanel` 内联样式优先级。
-- `MainWindow.__init__` 尾新增 `matplotlib.rcParams.update`(浅色画布、浅灰网格、清晰的刻度与标签色),
-  不触碰任何轴布局/几何参数。
-- 可视化验证:窗口背景 `${#f7f8fa}` 生效;全部子图 placeholder 正常渲染。
-
-### 13.3b 后台线程重建(性能)
-- `run_reconstruction_now` 重写为**后台线程执行**:
-  - 新增 `_ReconWorker(QObject)` 辅助类:纯 numpy/pyabel 计算,**不接触任何控件**,
-    进度/结果通过内存字段发布,由主线程定时轮询(--`_recon_progress_timer`, 120ms);
-  - 新增 `_collect_recon_results` 主线程收结果并刷新面板;线程经 `quit()+wait(1500)`+`deleteLater`
-    优雅回收,不依赖易丢的 `finished` 信号;
-  - 运行时点击`Start Reconstruction`后**立即返回**(UI 不冻结),后台算完回主线程刷新,
-    结果与原同步路径**逐位一致**;
-  - 重复点击受 `_recon_busy` 门控,连续运行稳定。
-- 实测(参考数据 + 145×145 直方图):点击即返回(0.01s),1.7s 完成;rBasex 2 峰、backward 1 峰,
-  无 Python 警告。
+The following will be treated as the "interaction contract"; optimizations must not change:
+1. The seven-step workflow button order and functions exactly (Load→Process→ROI→Fine→Filter→Estimate→Apply+Bin→Recon).
+2. All `QLineEdit` text inputs remain live listeners with unchanged wiring (`textChanged` triggers overlay redraw/recompute).
+3. Drag gestures (ring, filter box, θ, rBasex range, markers, TOF box) keep their semantics.
+4. Session save/restore format stays compatible (the existing npz + meta JSON).
+5. Window default size/docking/tab structure unchanged.
+6. Scientific output: peak r/β/intensity values reproducible (same data + same parameters).
 
 ---
 
-## 14. 全 app 交互 30–60Hz 优化(2026-08-25)
+## 13. Changes implemented in this round (2026-08-25)
 
-> 目标:所有交互动画/刷新/等待达到 30Hz 以上(用户认可 30Hz 即可),**不改变任何交互方式、不损失准确性/清晰度**。
+> Follows the §12 contract: no interaction logic changed, no scientific-numerics path changed.
 
-### 14.1 根因(实测)
-- 拖动 overlay 时,Windows `_use_safe_*_redraw()` 恒 True → 每次拖动都**整幅 canvas.draw() + 重新截取背景**,实测 **183–408ms/帧**(≈5fps)。
-- `_draw_axes_immediate` / `_draw_axes_preview` 在 Windows 上强制整幅 `canvas.draw()`(注释:"QtAgg partial blits crash")→ 所有局部刷新也全幅重绘。
-- 686 万行配对数据,散点/投影物化与全量重绘让"操作后刷新"达数秒。
+### 13.1 High-speed data loading (performance)
+- `VMI_workflow_core.py`: new `fast_read_csv_float64(path, *, n_columns, use_columns)`.
+  - Prefers the **pyarrow C++ CSV parser** (SIMD; parses a 260 MB file ~10x faster than `np.loadtxt`);
+  - `NaN` text parses correctly to float64 NaN (real data contains `NaN`);
+  - automatic fallback on parse errors (exactly the original `np.loadtxt` semantics); functionality intact without pyarrow;
+  - column selection follows the `use_columns` output order, compatible with trigger files (4 columns, take (2,3)) and point files (3 columns, take (0,1,2)).
+- `VMI_workflow.py::load_cache` switched to `fast_read_csv_float64`; the segmented progress-bar updates are unchanged.
+- Measured (three real reference files, ~24M rows total): the 8.6M-row trigger went from `np.loadtxt` 1.53 s → 0.65 s; the read portion of all three files totals ~1.4 s.
+- Fallback path compatible (`np.loadtxt` as before when pyarrow is unavailable).
 
-### 14.2 改动
-1. **删除 Windows 全幅分支**:`_draw_axes_immediate`、`_draw_axes_preview` 不再按平台降级,统一走 `ax.draw(renderer) + canvas.blit(bbox)` 局部路径(自带 try/except 全幅兜底)。
-2. **Overlay 拖动 60Hz**:
-   - 新增 `_present_circle_overlay_from_background`(镜像 ion 版):`restore_region + draw_artist + blit`,拖动不再全幅重绘。
-   - `_update_circle_overlay_only` / `_update_ion_overlay_only` 的 fast_drag 分支改为:背景缺失才截取(`_capture_scatter_blit_backgrounds`),否则直接贴局部。
-   - `_ensure_scatter_overlay_backgrounds` 拖动中复用背景缓存,不再每次重截。
-   - `_flush_ion_rotation_preview` 改单轴局部重绘。
-   - ion TOF fit 预览已自带局部 blit(启用)。
-3. **大点云自动转热图**:`_plot_density_scatter` 在 `count > SCATTER_HEATMAP_THRESHOLD(8000)` 时改走 `_plot_density_heatmap`(image 渲染,61fps 级),低点保留点迹 scatter(清晰度不降)。热图路径是代码里已存在但从未接线的孤儿,现接上。
-   - **`load_cache` → 新增 `_LoadWorker(QObject)`**:三个大文件读取/校验在后台线程,进度条轮询,读完成回主线程安装 cache。UI 全程响应。
-   - **`estimate_center_once` → 新增 `_CenterWorker(QObject)`**:几何中心估计/metrics/确定性探针在后台线程;主线程只保留输入准备(选区物化,带进度)与结果写回画布。与原逻辑输出逐位一致(纯计算,无 Qt)。
+### 13.2 UI modernization (QSS + matplotlib theme)
+- `main()` gained a global `app.setStyleSheet` light modern theme: rounded buttons/inputs, focus highlight, flat panels, a Segoe UI Variable font stack, rounded checkbox indicators, modernized scrollbars, dark ToolTips.
+  Scoped to generic control types; the existing `QTabWidget/GroupBox/SettingsPanel` inline styles keep priority.
+- The end of `MainWindow.__init__` gained a `matplotlib.rcParams.update` (light canvas, light-grey grid, clear tick/label colors), touching no axes layout/geometry parameters.
+- Visual verification: the window background `#f7f8fa` applies; all subplot placeholders render correctly.
 
-### 14.4 用户回归修复(2026-08-25 第二轮)
-用户报告两个我引入的回归,已全部修复并验证:
-1. **electron/ion scatter 背景变黑、点迹看不清**:我加的"大点云自动转热图"把点迹换成深色密度图。已撤销该分支,恢复原始 PathCollection 点迹渲染(白底彩色密度点)。验证:两轴 images=0、PathCollections=2。
-2. **拖动 filter 出现两个圆心/旧圆残影**:fast-blit `restore_region+draw_artist` 在真机画布会贴旧 overlay 像素。已将 circle/ion 的 fast_drag 改为**整轴 `_draw_axes_immediate` 局部重绘**(失败自动全量兜底),彻底消除残影。验证:拖动 30 帧 circle center marker 恒 1、ion rect 恒 1。
-5. **Tab 后子图重新缩放(Tab 卡顿真因)**:面板高度变化会带着 viewport 拉伸画布,matplotlib 因此对所有子图重布局重排。已改为 **canvas 尺寸稳定**(viewport 不再 resize 画布;仅显式窗口模式变化时 `_configure_plot_canvas_size` 重新设目标)。验证:Tab 前后画布 2214×705 不变、8 轴位置逐轴一致、呼出仅 22ms。
-6. **electron/ion scatter 的 filter 环被数据点覆盖**:环/滤罩创建时未设 zorder,低于点云 zorder=2。已为 inner/outer 环 z=10、圆心 marker z=11、ion 滤罩 z=10、滤罩中心 z=11。验证:全部 >2,显示在数据上层。
+### 13.3b Background-thread reconstruction (performance)
+- `run_reconstruction_now` rewritten to **execute on a background thread**:
+  - new `_ReconWorker(QObject)` helper: pure numpy/pyabel computation, **touches no widgets**; progress/results published via in-memory fields and polled by the main thread (`_recon_progress_timer`, 120 ms);
+  - new `_collect_recon_results` collects the results on the main thread and refreshes the panels; threads are gracefully reclaimed via `quit()+wait(1500)`+`deleteLater`, not relying on the lossy `finished` signal;
+  - clicking `Start Reconstruction` now **returns immediately** (UI not frozen); when the background finishes the main thread refreshes, and the results are **bit-identical** to the old synchronous path;
+  - repeated clicks are gated by `_recon_busy`; stable across consecutive runs.
+- Measured (reference data + 145×145 histogram): click returns in 0.01 s, completes in 1.7 s; rBasex 2 peaks, backward 1 peak, no Python warnings.
 
-### 15. 布局调整: 移除 Backward Recon 与 Summary 面板
-- 按用户要求,`ax_reserved_bottom`(Backward Recon)与 `ax_info`(Summary)面板已移除。
-- gridspec 从 2×5 改为 **2×4**:
+---
+
+## 14. App-wide 30–60 Hz interaction optimization (2026-08-25)
+
+> Goal: all interaction animations/refreshes/waits at 30 Hz or above (the user accepted 30 Hz), **without changing any interaction style and without losing accuracy/clarity**.
+
+### 14.1 Root causes (measured)
+- When dragging overlays, Windows `_use_safe_*_redraw()` was always True → every drag did a **full canvas.draw() + background recapture**, measured **183–408 ms/frame (≈5 fps)**.
+- `_draw_axes_immediate` / `_draw_axes_preview` forced a full `canvas.draw()` on Windows (comment: "QtAgg partial blits crash") → all partial refreshes also repainted fully.
+- With 6.86M paired rows, scatter/projection materialization plus full repaints made "refresh after operation" take seconds.
+
+### 14.2 Changes
+1. **Deleted the Windows full-repaint branch**: `_draw_axes_immediate` / `_draw_axes_preview` no longer degrade by platform; both use the partial `ax.draw(renderer) + canvas.blit(bbox)` path (with its own try/except full-repaint fallback).
+2. **Overlay dragging at 60 Hz**:
+   - new `_present_circle_overlay_from_background` (mirroring the ion version): `restore_region + draw_artist + blit`; dragging no longer repaints fully.
+   - the fast_drag branches of `_update_circle_overlay_only` / `_update_ion_overlay_only` now capture the background only when missing (`_capture_scatter_blit_backgrounds`), otherwise paste the partial update directly.
+   - `_ensure_scatter_overlay_backgrounds` reuses the cached background during a drag instead of recapturing every time.
+   - `_flush_ion_rotation_preview` switched to a single-axis partial redraw.
+   - the ion TOF fit preview already had partial blitting (enabled).
+3. **Large point clouds auto-switch to heatmap**: `_plot_density_scatter` switched to `_plot_density_heatmap` (image rendering, 61 fps-class) when `count > SCATTER_HEATMAP_THRESHOLD (8000)`; low counts kept the point scatter (no clarity loss). The heatmap path existed in the code but was never wired up; it was wired here. (This branch was reverted in §14.4 and finally deleted in §16b.)
+   - **`load_cache` → new `_LoadWorker(QObject)`**: the three large file reads/validation run on a background thread with progress polling; the cache is installed on the main thread when reading completes. UI responsive throughout.
+   - **`estimate_center_once` → new `_CenterWorker(QObject)`**: geometric center estimation/metrics/deterministic probes on a background thread; the main thread keeps only input preparation (selection materialization, with progress) and writing results back to the canvas. Bit-identical output to the original logic (pure computation, no Qt).
+
+### 14.4 User-reported regression fixes (2026-08-25, second round)
+The user reported two regressions introduced by this round; all fixed and verified:
+1. **electron/ion scatter backgrounds turned black, points hard to see**: the "large point clouds auto-switch to heatmap" change had replaced the point scatter with a dark density map. That branch was reverted, restoring the original PathCollection point rendering (colored density points on a white background). Verified: images=0, PathCollections=2 on both axes.
+2. **Dragging the filter showed two circle centers / old-ring ghosts**: fast-blit `restore_region+draw_artist` pasted stale overlay pixels on a real canvas. The circle/ion fast_drag was switched to **whole-axis `_draw_axes_immediate` partial redraw** (automatic full-repaint fallback on failure), eliminating the ghosts. Verified: over a 30-frame drag the circle center marker stayed at exactly 1 and the ion rect at exactly 1.
+5. **Subplots rescale after toggling the Tab (the real cause of Tab lag)**: the panel height change stretched the canvas via the viewport, forcing matplotlib to re-layout all subplots. Fixed by **keeping the canvas size stable** (the viewport no longer resizes the canvas; `_configure_plot_canvas_size` re-targets only on explicit window-mode changes). Verified: canvas 2214×705 unchanged across Tab toggles, all 8 axes positionally identical, reveal takes only 22 ms.
+6. **The electron/ion scatter filter rings were covered by data points**: rings/filters were created without zorder, below the point cloud's zorder=2. Now inner/outer rings z=10, circle-center marker z=11, ion filter z=10, filter center z=11. Verified: all >2, drawn above the data.
+
+## 15. Layout adjustment: removal of the Backward Recon and Summary panels
+- As requested by the user, the `ax_reserved_bottom` (Backward Recon) and `ax_info` (Summary) panels were removed.
+- gridspec changed from 2×5 to **2×4**:
   ```
   row0: [ion hist | e scatter | centered bin | rBasex recon]
   row1: [ion-tof xy | i scatter | theta profile | rBasex radial profile]
   ```
-- **rBasex radial profile 移到原 Backward Recon 位置(row1,col3)**,原 [0,4] 位置取消。
-- `ax_reserved_bottom`/`ax_info` 置为 None,所有下游引用带 None 守卫(`_plot_reconstruction_panel`/`_plot_info_panel` 及绘制/标记/占位逻辑),删除 `subplot_axes` 中 `summary`/`backward_reconstruction` 键。
-- 验证:figure 恰 8 轴 2×4,radial profile 位于右下(0.80, 0.08),全套流程 + 会话引用无警告。
+- **The rBasex radial profile moved to the old Backward Recon position (row1, col3)**; the former [0,4] slot is gone.
+- `ax_reserved_bottom`/`ax_info` set to None; all downstream references carry None guards (`_plot_reconstruction_panel`/`_plot_info_panel` and the drawing/marker/placeholder logic); the `summary`/`backward_reconstruction` keys were removed from `subplot_axes`.
+- Verified: the figure has exactly 8 axes in 2×4, the radial profile sits bottom-right (0.80, 0.08); the full workflow + session roundtrip run without warnings.
 
-### 13.4 后续建议(部分已在本轮实施,见 §11/§16)
-- ~~把 rBasex/backward 重建与中心估计移入后台线程~~(✅ 已完成 §13.3b/§14.2;backward 已于 §16 移除);
-- ~~Windows 安全 blit 改局部重绘~~(✅ 已完成 §14.2);
-- ~~`_selected_pairs_after_optional_ion_filter` 派生缓存~~(✅ 已完成 §16 记忆化);
-- Kasa→Pratt/Taubin 圆拟合、径向自适应去噪(需您确认科学结果,未实施);
-- 拆 `MainWindow` 巨型类、补单测(单测已落地:`tests/test_core.py` + `tests/test_smoke.py`,见 §16e)。
+### 13.4 Follow-up suggestions (partially implemented in the rounds above; see §11/§16)
+- ~~move rBasex/backward reconstruction and center estimation to background threads~~ (✅ done §13.3b/§14.2; backward removed in §16);
+- ~~Windows safe-blit → partial redraw~~ (✅ done §14.2);
+- ~~`_selected_pairs_after_optional_ion_filter` derived cache~~ (✅ done §16 memoization);
+- Kasa→Pratt/Taubin circle fit, radially adaptive denoising (require scientific confirmation, not implemented);
+- split the `MainWindow` giant class, add unit tests (unit tests are in place: `tests/test_core.py` + `tests/test_smoke.py`, see §16e).
 
-以下行为将被视为“交互契约”,优化时不得改变:
-1. 七步工作流按钮顺序与功能完全一致(Load→Process→ROI→Fine→Filter→Estimate→Apply+Bin→Recon)。
-2. 所有 `QLineEdit` 文本输入即监听器布局不变(`textChanged` 触发覆绘制/重算)。
-3. 拖拽手势(环、滤罩、θ、rBasex 范围、标记、TOF box)语义不变。
-4. 会话保存/恢复格式兼容(既有 npz + meta JSON)。
-5. 窗口默认尺寸/停靠/标签结构不变。
-6. 科学输出: 峰值 r/β/强度 数值可复现(同一数据+同参数)。
+The following will again be treated as the "interaction contract"; optimizations must not change:
+1. The seven-step workflow button order and functions exactly (Load→Process→ROI→Fine→Filter→Estimate→Apply+Bin→Recon).
+2. All `QLineEdit` text inputs remain live listeners with unchanged wiring (`textChanged` triggers overlay redraw/recompute).
+3. Drag gestures (ring, filter box, θ, rBasex range, markers, TOF box) keep their semantics.
+4. Session save/restore format stays compatible (the existing npz + meta JSON).
+5. Window default size/docking/tab structure unchanged.
+6. Scientific output: peak r/β/intensity values reproducible (same data + same parameters).
 
 ---
 
-## 16. 发布加固(Release hardening,2026-08-31)
+## 16. Release hardening (2026-08-31)
 
-> 本轮目标:面向 GitHub 公开发布做回归修复、死代码清理、去重、性能收尾与仓库整理。
-> 全程遵守上方"交互契约";科学数值路径经 `tests/golden_core.json` / `tests/golden_smoke.json` 逐位锁定。
+> This round's goal: regression fixes, dead-code removal, deduplication, performance wrap-up and repository clean-up for the public GitHub release.
+> The interaction contract above was honoured throughout; the scientific-numerics paths are locked bit-exactly by `tests/golden_core.json` / `tests/golden_smoke.json`.
 
-### 16a. 回归修复
-- **`estimate_center_once` 的 `NameError: source_label`**: polar-ROI 路径与 ring-empty 回退路径引用了未定义的 `source_label`(只定义了 `source_prefix`)。两处崩溃路径已修复,并由 `tests/test_smoke.py::run_regression_checks` 的 `check_polar_outermost_center` / `check_ring_empty_center_fallback` 覆盖。
-- **启动期 `__init__` 调用恢复**: 占位面板渲染(`_draw_placeholder`)、trigger 模式下拉标签(`_update_trigger_mode_combo_labels`,启动时带 "[events: n/a]" 后缀)、TOF 控件同步,均恢复为启动即调用(`check_startup_placeholders` 锁定)。
-- **空选区散点分支恢复**: 离子滤罩选 0 事件时,electron scatter 显示 "No selected points" 标注并清除颜色条,同时保留灰底 context 点(`check_empty_selection_scatter` 锁定)。
-- **状态栏文案对齐**: 与 classic 版本的状态文字表述对齐。
+### 16a. Regression fixes
+- **`NameError: source_label` in `estimate_center_once`**: the polar-ROI path and the ring-empty fallback path referenced the undefined `source_label` (only `source_prefix` was defined). Both crash paths were fixed and are covered by `tests/test_smoke.py::run_regression_checks` (`check_polar_outermost_center` / `check_ring_empty_center_fallback`).
+- **Startup `__init__` calls restored**: placeholder panel rendering (`_draw_placeholder`), the trigger-mode combo labels (`_update_trigger_mode_combo_labels`, with the "[events: n/a]" suffix at startup) and TOF control syncing are all called at startup again (locked by `check_startup_placeholders`).
+- **Empty-selection scatter branch restored**: when the ion filter selects 0 events, the electron scatter shows a "No selected points" annotation and clears the colorbar while keeping the grey context points (locked by `check_empty_selection_scatter`).
+- **Status-bar wording aligned** with the classic version's status texts.
 
-### 16b. 移除
-- **整个 backward-recon 机制**(§4.2b): UI 控件、`_get_backward_settings`、内置 phase0/1/2 回退引擎、compute 路径与会话键全部删除;三个主文件中已无任何 "backward" 引用。会话恢复对**遗留会话**(含 backward 键)保持宽容——未知键被忽略,不报错。重建现在只有 rBasex 一条路径。
-- **summary/backward 僵尸脚手架**: §15 移除两块面板后残留的绘制/占位分支(`_plot_info_panel` 相关逻辑等)清理干净。
-- **死 KDE 后端**: `_adaptive_xy_kde_density` 与 `ION_TOF_BG_POINTWISE_K` 的逐点 KNN 路径(§4.7、§9.3)。
-- **孤儿 blit 辅助函数**: 无调用者的 `*_from_background`/背景截取残件。
-- **`_plot_density_heatmap`**: §14.2 曾接线、§14.4 又撤销的"大点云转热图"路径最终删除(散点保持 PathCollection 点迹)。
+### 16b. Removals
+- **The entire backward-recon mechanism** (§4.2b): UI controls, `_get_backward_settings`, the built-in phase0/1/2 fallback engine, the compute path and session keys all deleted; no "backward" references remain in the three main files. Session restore stays tolerant of **legacy sessions** (containing backward keys) — unknown keys are ignored without error. Reconstruction now has exactly one path: rBasex.
+- **summary/backward zombie scaffolding**: leftover drawing/placeholder branches from before §15 (`_plot_info_panel`-related logic etc.) cleaned out.
+- **Dead KDE backend**: the `_adaptive_xy_kde_density` / `ION_TOF_BG_POINTWISE_K` point-wise KNN path (§4.7, §9.3).
+- **Orphan blit helpers**: caller-less `*_from_background`/background-capture remnants.
+- **`_plot_density_heatmap`**: the "large point cloud → heatmap" path wired in §14.2 and reverted in §14.4 was deleted for good (scatter keeps PathCollection points).
 
-### 16c. 去重(行为不变)
-- **TOF 变换助手**: `_apply_ion_tof_alignment_to_xy` / `_apply_ion_scatter_tof_center_to_xy` / `-terms` / `_ion_tof_display_coord_values` 的重复变换数学(§4.9 指出的 3–4 份拷贝)收敛到共享助手;`check_ion_tof_alignment` 以 9 位小数锁定变换输出。
-- **配对进度工厂**: 四个配对模式几乎相同的进度回调闭包统一为工厂函数。
-- **颜色条助手**: 两处"删除+重建 colorbar"模式合并为共享助手。
-- **refresh 尾部助手**: electron/ion 散点刷新的重复尾部(§6 P0-4 的 40+ 行重复)抽成公共尾部函数。
+### 16c. Deduplication (no behaviour change)
+- **TOF transform helpers**: the duplicated transform math of `_apply_ion_tof_alignment_to_xy` / `_apply_ion_scatter_tof_center_to_xy` / `-terms` / `_ion_tof_display_coord_values` (the 3–4 copies flagged in §4.9) converged into shared helpers; `check_ion_tof_alignment` locks the transform output to 9 decimals.
+- **Pairing progress factory**: the four pairing modes' near-identical progress-callback closures unified into a factory function.
+- **Colorbar helper**: the two "delete + recreate colorbar" patterns merged into a shared helper.
+- **Refresh-tail helper**: the duplicated electron/ion scatter refresh tails (the 40+ duplicated lines of §6 P0-4) extracted into a common tail function.
 
-### 16d. 性能
-- **`ion_tof_xy` 缓存键修复**(§6 P1-4): 键加入 coarse-ROI 与 BG-keep mask 指纹;同点数不同选区不再命中旧图(`check_ion_tof_xy_cache_invalidation` 锁定)。
-- **selected-pairs 派生记忆化**(§6 P0-4): 过滤参数与数据版本不变时复用已物化的配对点,不再每轮 `_refresh_*` 重算。
-- **rBasex 基集持久化**(§6 P1-3): `basis_dir=~/.cache/vmi_workflow/abel_basis`(进程内 + 跨进程磁盘缓存,`VMI_workflow_reconstruction.py::_rbasex_basis_dir`);首次重建慢,之后毫秒级(`tests/bench_rbasex_basis.py` 验证)。
-- **`quadrant_symmetry` 单树提升**(§6 P0-5 部分): 候选搜索的 cKDTree 只构建一次(点集不变),结果与提升前**逐位一致**(`tests/bench_core.py` A/B 对照,锁值测试覆盖)。
+### 16d. Performance
+- **`ion_tof_xy` cache-key fix** (§6 P1-4): the key now includes coarse-ROI and BG-keep mask fingerprints; the same point counts with different selections no longer hit the old map (locked by `check_ion_tof_xy_cache_invalidation`).
+- **Selected-pairs derivation memoization** (§6 P0-4): when filter parameters and the data version are unchanged, the materialized paired points are reused instead of recomputed on every `_refresh_*`.
+- **rBasex basis persistence** (§6 P1-3): `basis_dir=~/.cache/vmi_workflow/abel_basis` (in-process + cross-process disk cache, `VMI_workflow_reconstruction.py::_rbasex_basis_dir`); the first reconstruction is slow, afterwards millisecond-level (verified by `tests/bench_rbasex_basis.py`).
+- **`quadrant_symmetry` single-tree hoist** (§6 P0-5 partial): the candidate search's cKDTree is built only once (the point set does not change); results are **bit-identical** to the pre-hoist code (`tests/bench_core.py` A/B comparison; the lock tests cover it).
 
-### 16e. 仓库与打包
-- **独立 git 仓库**: 在项目文件夹根 `git init`(父目录的个人仓库不受影响;无 remote、不推送)。
-- **测试基线**: `tests/test_core.py`(数值 goldens)+ `tests/test_smoke.py`(离屏端到端,含 §16a 回归扩展与 TOF 对齐/缓存失效检查);样例数据由 `tests/make_sample_data.py` 确定性再生;详见 `tests/README.md`。
-- **打包文件**: `README.md`(英文,含截图)、`LICENSE`(MIT)、`requirements.txt`(numpy>=2.2 / scipy>=1.16 / matplotlib>=3.10 / PySide6>=6.7 / pyabel>=0.9,可选 pyarrow>=15)、`docs/screenshot_main.png`(离屏驱动完整 7 步工作流后 `canvas.grab()` 抓取的真实主题画面)、`.gitignore`(排除 `*.dat`/`*.npz`/`workflow_outputs/`/`Refence data/`/`tests/sample_data/` 等)。
-- **真实数据终验**: ~700MB 参考三件套异步加载 → 1e+1i 配对 → 边缘拟合定心 → 环选分箱 → rBasex 完成 → 会话保存/恢复,全部通过(数字见发布记录,不入库)。
+### 16e. Repository and packaging
+- **Standalone git repo**: `git init` at the project folder root (the parent directory's personal repo is unaffected; no remote, not pushed).
+- **Test baseline**: `tests/test_core.py` (numerics goldens) + `tests/test_smoke.py` (offscreen end-to-end, including the §16a regression extensions and TOF-alignment/cache-invalidation checks); sample data regenerated deterministically by `tests/make_sample_data.py`; see `tests/README.md`.
+- **Packaging files**: `README.md` (English, with screenshot), `LICENSE` (MIT), `requirements.txt` (numpy>=2.2 / scipy>=1.16 / matplotlib>=3.10 / PySide6>=6.7 / pyabel>=0.9, optional pyarrow>=15), `docs/screenshot_main.png` (real themed window captured via `canvas.grab()` after driving the full 7-step workflow offscreen), `.gitignore` (excluding `*.dat`/`*.npz`/`workflow_outputs/`/`Refence data/`/`tests/sample_data/` etc.).
+- **Real-data final verification**: ~700 MB reference triplet async load → 1e+1i pairing → edge-fit centering → ring selection + binning → rBasex → session save/restore, all passing (numbers in the release notes, not committed).
 
-### 16f. 拖拽交互 60Hz blit 路径(2026-09-01)
+### 16f. Drag-interaction 60 Hz blit path (2026-09-01)
 
-> 用户报告 electron 圆环过滤圈与 ion 过滤框拖动"太卡"。基准脚本 `tests/bench_drag.py`
-> 证实:整轴重绘路径下 electron 圆环拖动 **91.8ms/帧(11fps)**、ion 滤框 **70.9ms/帧(14fps)**、
-> 极坐标 ROI **235ms/帧(4fps)**——每次预览帧都在重栅格化 2.5 万点散点。
-> 本节将所有拖拽 overlay 迁移到 ion-TOF fit 预览同款的
-> **动画艺术家 blit 协议**(`restore_region` + `draw_artist` + `blit`),
-> 交互语义、命中判定、松手最终状态**完全不变**;科学数值路径零改动(goldens 逐位锁定)。
+> The user reported that dragging the electron circle filter ring and the ion filter box was "too laggy". The benchmark script `tests/bench_drag.py`
+> confirmed: on the whole-axis redraw path, electron ring dragging ran at **91.8 ms/frame (11 fps)**, the ion filter box at **70.9 ms/frame (14 fps)**,
+> and the polar ROI at **235 ms/frame (4 fps)** — every preview frame re-rasterized the 25k-point scatter.
+> This section migrated all draggable overlays to the same
+> **animated-artist blit protocol** as the ion-TOF fit preview (`restore_region` + `draw_artist` + `blit`).
+> Interaction semantics, hit testing and the final released state are **completely unchanged**; the scientific-numerics path is untouched (goldens locked bit-exactly).
 
-#### 16f.1 机制(复制 TOF-fit 预览的成功纪律,并修复其两个潜在缺陷)
+#### 16f.1 Mechanism (copies the TOF-fit preview's successful discipline, and fixes two of its latent defects)
 
-1. **会话化动画艺术家**(`_begin/_end_scatter_overlay_blit_sessions`,
-   `_begin_ion_rotation_blit_session`):拖拽按下时把被拖轴的 overlay 家族
-   `set_animated(True)`(electron: 内/外环+圆心标记或极坐标 ROI 三件套;
-   ion: 滤框+中心点;rotation: 方向线)。动画艺术家被一切常规绘制跳过,
-   因此**会话期间捕获的背景不可能烤入旧 overlay 像素**——这正是 §14.4 旧残影的根源。
-   松手(`_on_canvas_release`)最先结束全部会话(反动画、弃背景、清降级表),
-   所有松手提交路径照旧走常规刷新(`_draw_axes_immediate` / 全量刷新)。
-2. **干净背景单次捕获**(`_capture_scatter_overlay_blit_background`):
-   每次拖拽只做一次"单轴 `ax.draw(renderer)`(动画艺术家被跳过)+ `copy_from_bbox(ax.bbox)`",
-   把 70–250ms 的重栅格化从每帧成本变成每次拖拽一次性成本。
-   任何中途失效(`_invalidate_blit_background`)都会在下帧自动重捕获。
-3. **逐帧呈现**(`_present_scatter_overlay_blit` / `_present_ion_rotation_blit` /
-   `_present_rbasex_range_blit`):`restore_region(bg)` → 按 zorder `draw_artist` 各 overlay
-   → 重绘覆盖层之上的 `ax.texts`(`_axes_above_texts`,保持 `[raw]/[copy]` 按钮与
-   半透明标注的正确压序,且捕获时将其隐藏避免双重合成)→ `blit(ax.bbox)`。
-   rotation 呈现额外按序重绘滤框/中心点并 `draw_artist(ax.title)`
-   (预览角度后缀),捕获区域 = 轴域 ∪ 标题基线/最长后缀外接框。
-4. **逐帧 try/except 兜底**:任一 blit 异常 → 该交互会话永久降级回
-   `_draw_axes_immediate` 整轴重绘(§14.4 的安全路径,保持存活),仅向 stdout 记录一次。
-   非 fast(键入/刷新)路径仍走稳定路径;`_use_safe_*_redraw()` 现在只守门
-   非 fast 稳定路径,不再封锁拖拽 blit(全平台默认启用 blit 拖拽)。
-5. **键入去抖路径提速**(§14.4 后最快的稳定路径):`_update_circle_overlay_only` /
-   `_update_ion_overlay_only` 的非 fast 分支从"整幅 canvas.draw"改为
-   单轴 `_draw_axes_immediate(..., include_tight=True)`(其内部自带全幅兜底),
-   背景缓存直接弃用,下次拖拽会话重新捕获。
-6. **修复两个既有潜在缺陷**:
-   - `_ensure_ion_tof_fit_preview_background` 原来从共享缓冲直接拷贝,
-     会把上一帧静止锚点烤进背景(检测器捕获到 44px 双重合成);
-     现改为单轴重绘捕获。
-   - `_capture_theta_line_blit_background` 原"快路径"从共享缓冲拷贝——
-     缓冲里恒有上一次 present 画上的引导线(拖 θ 时出现旧角度残线),
-     而"慢路径"的 hide+`canvas.draw()` 会经 draw_event 钩子递归。
-     现改为两块图像面板各自单轴重绘捕获(无递归、保证无引导线)。
+1. **Session-scoped animated artists** (`_begin/_end_scatter_overlay_blit_sessions`,
+   `_begin_ion_rotation_blit_session`): on drag press, the dragged axis's overlay family is
+   `set_animated(True)` (electron: inner/outer rings + center marker, or the polar-ROI trio;
+   ion: filter box + center point; rotation: direction line). Animated artists are skipped by all regular drawing,
+   so **the background captured during a session cannot have stale overlay pixels baked in** — the root cause of the §14.4 ghosting.
+   On release (`_on_canvas_release`) all sessions end first (un-animate, discard backgrounds, clear the fallback table);
+   all release-commit paths keep using the regular refresh (`_draw_axes_immediate` / full refresh).
+2. **Clean single background capture** (`_capture_scatter_overlay_blit_background`):
+   each drag does exactly one "single-axis `ax.draw(renderer)` (animated artists skipped) + `copy_from_bbox(ax.bbox)`",
+   turning the 70–250 ms re-rasterization from a per-frame cost into a one-time per-drag cost.
+   Any mid-drag invalidation (`_invalidate_blit_background`) automatically recaptures on the next frame.
+3. **Per-frame presentation** (`_present_scatter_overlay_blit` / `_present_ion_rotation_blit` /
+   `_present_rbasex_range_blit`): `restore_region(bg)` → `draw_artist` each overlay in zorder
+   → redraw the `ax.texts` above the overlay (`_axes_above_texts`, preserving the correct stacking of the `[raw]/[copy]` buttons and
+   translucent annotations; these texts are hidden during capture to avoid double compositing) → `blit(ax.bbox)`.
+   The rotation presentation additionally redraws the filter box/center point in order and `draw_artist(ax.title)`
+   (the preview-angle suffix); the capture region = axes bbox ∪ title baseline/longest-suffix bounding box.
+4. **Per-frame try/except fallback**: any blit exception → that interaction session permanently degrades to
+   the `_draw_axes_immediate` whole-axis redraw (the §14.4 safe path, kept alive), logged once to stdout.
+   Non-fast (typing/refresh) paths still use the stable path; `_use_safe_*_redraw()` now only gates
+   the non-fast stable path and no longer blocks drag blitting (drag blitting enabled by default on all platforms).
+5. **Faster typing-debounce path** (the fastest stable path since §14.4): the non-fast branches of `_update_circle_overlay_only` /
+   `_update_ion_overlay_only` changed from "full canvas.draw" to a single-axis
+   `_draw_axes_immediate(..., include_tight=True)` (which carries its own full-repaint fallback);
+   the background cache is discarded outright and recaptured at the next drag session.
+6. **Two pre-existing latent defects fixed**:
+   - `_ensure_ion_tof_fit_preview_background` used to copy directly from the shared buffer,
+     baking the previous frame's stationary anchor into the background (the ghost detector caught a 44 px double composite);
+     it now recaptures with a single-axis redraw.
+   - `_capture_theta_line_blit_background`'s former "fast path" copied from the shared buffer —
+     the buffer always contained the guide line drawn by the previous present (a stale-angle residue when dragging θ),
+     while the "slow path"'s hide+`canvas.draw()` recursed through the draw_event hook.
+     Both image panels now capture with their own single-axis redraw (no recursion, guaranteed guide-line-free).
 
-#### 16f.2 幽灵检测器(`tests/bench_drag.py`,防回归警卫)
+#### 16f.2 Ghost detector (`tests/bench_drag.py`, regression guard)
 
-基准复现 test_smoke 全流程(载入→配对→fine ROI→环选→rBasex,滤框先于环选启用、
-rBasex 最后运行,否则启用滤框会清空重建结果),随后对每个可拖 overlay 用真实
-`MouseEvent` 走 `_on_canvas_press/_move/_release`,按 16ms 节流节奏逐帧计时的
-`_flush_*`。每会话在远端终点执行**幽灵检测**:把画布 RGBA 缓冲(拖拽结果)与
-一次强制干净 `canvas.draw()` 参考渲染(临时反动画 overlay 使其入画)逐像素比较——
-轴域内部(收缩 5px)必须**逐位相等**(EXACT/EXACT-INTERIOR);边距文字的
-重合成差(旧路径固有的"文字逐帧加深"伪影)仅记录不计入。旧代码下该检测器
-确实捕获到 θ 引导线旧角残影(4×GHOST)与 TOF fit 锚点双重合成(2×GHOST),
-新代码全部 EXACT-INTERIOR——检测器对历史两类残影均有杀伤力。
+The benchmark reproduces the full test_smoke workflow (load → pair → fine ROI → ring selection → rBasex; the filter box is enabled before ring
+selection and rBasex runs last, otherwise enabling the filter clears the reconstruction), then drives every draggable overlay through the real
+`MouseEvent` handlers `_on_canvas_press/_move/_release`, timed frame by frame at the 16 ms throttle cadence via `_flush_*`. At the far endpoint of
+each session it runs a **ghost check**: the canvas RGBA buffer (the drag result) is compared pixel-by-pixel against a forced clean `canvas.draw()`
+reference render (rendered with the overlays temporarily un-animated so they composite in) —
+the axes interior (shrunk 5 px) must be **bit-exactly equal** (EXACT/EXACT-INTERIOR); re-compositing differences in the margin text (the old path's
+inherent "text darkening frame by frame" artifact) are logged but not counted. On the old code the detector indeed caught the θ guide-line stale-angle
+residue (4×GHOST) and the TOF fit anchor double composite (2×GHOST); on the new code everything is EXACT-INTERIOR — the detector has real killing
+power against both historical ghost classes.
 
-#### 16f.3 前后对比(200 帧×2 会话,offscreen,样例数据全流程)
+#### 16f.3 Before/after comparison (200 frames × 2 sessions, offscreen, full workflow on sample data)
 
-| 交互 | 前 mean/p95/max ms(帧率) | 后 mean/p95/max ms(帧率) |
+| Interaction | Before mean/p95/max ms (fps) | After mean/p95/max ms (fps) |
 |---|---|---|
-| electron 圆环/圆心拖动 | 91.8 / 107.9 / 127.3(11fps) | **4.4 / 4.6 / 84.6(230fps)** |
-| ion 滤框/中心拖动 | 70.9 / 116.3 / 148.5(14fps) | **3.8 / 4.3 / 99.1(262fps)** |
-| θ 参考线拖动(centered) | 1.5 / 2.2 / 2.8(685fps)† | 5.0 / 6.7 / 9.1(202fps)† |
-| θ 参考线拖动(rbasex) | 1.7 / 2.3 / 2.7(608fps)† | 7.4 / 9.0 / 10.8(135fps)† |
-| rBasex 范围手柄拖动 | 40.7 / 48.4 / 53.4(25fps) | **6.9 / 8.9 / 10.2(145fps)** |
-| ion TOF fit 框拖动 | 3.3 / 4.6 / 6.7(301fps) | 5.2 / 6.7 / 30.0(191fps) |
-| ion TOF BG 范围悬停 | 0.7 / 1.0 / 1.3(1444fps) | 0.6 / 1.1 / 1.3(1622fps) |
-| ion 旋转预览拖动 | 91.6 / 111.0 / 147.7(11fps) | **5.2 / 5.9 / 85.6(192fps)** |
-| 极坐标 ROI 拖动 | 235.1 / 268.3 / 329.7(4fps) | **5.0 / 6.5 / 29.0(202fps)** |
-| ion 直方图 fine-ROI 提交(松手一次) | 943.2 | 516.0 |
-| 键入去抖 70ms:圆参数重绘 | 667.2(中位) | **80.6(中位)** |
-| 键入去抖 70ms:滤框参数重绘 | 675.0(中位) | **74.6(中位)** |
+| electron ring/center drag | 91.8 / 107.9 / 127.3 (11 fps) | **4.4 / 4.6 / 84.6 (230 fps)** |
+| ion filter box/center drag | 70.9 / 116.3 / 148.5 (14 fps) | **3.8 / 4.3 / 99.1 (262 fps)** |
+| θ guide-line drag (centered) | 1.5 / 2.2 / 2.8 (685 fps)† | 5.0 / 6.7 / 9.1 (202 fps)† |
+| θ guide-line drag (rbasex) | 1.7 / 2.3 / 2.7 (608 fps)† | 7.4 / 9.0 / 10.8 (135 fps)† |
+| rBasex range-handle drag | 40.7 / 48.4 / 53.4 (25 fps) | **6.9 / 8.9 / 10.2 (145 fps)** |
+| ion TOF fit box drag | 3.3 / 4.6 / 6.7 (301 fps) | 5.2 / 6.7 / 30.0 (191 fps) |
+| ion TOF BG range hover | 0.7 / 1.0 / 1.3 (1444 fps) | 0.6 / 1.1 / 1.3 (1622 fps) |
+| ion rotation preview drag | 91.6 / 111.0 / 147.7 (11 fps) | **5.2 / 5.9 / 85.6 (192 fps)** |
+| polar ROI drag | 235.1 / 268.3 / 329.7 (4 fps) | **5.0 / 6.5 / 29.0 (202 fps)** |
+| ion histogram fine-ROI commit (one release) | 943.2 | 516.0 |
+| typing debounce 70 ms: circle-parameter redraw | 667.2 (median) | **80.6 (median)** |
+| typing debounce 70 ms: filter-box redraw | 675.0 (median) | **74.6 (median)** |
 
-† θ 引导线每帧额外重绘其上的半透明标注/按钮以保持精确压序,单帧成本 1.5→5–7.5ms,
-仍为 135–200fps;这是把既有"背景烤入旧引导线"残影修成逐位精确的代价。
-所有拖拽 p95 ≤ 9ms(≥110fps),达成 60Hz 目标;"ion 直方图峰值标记"为 Ctrl+点击设定、
-无拖拽;fine-ROI span 拖拽视觉由 matplotlib SpanSelector(useblit)内部处理,
-表中行为应用侧去抖提交成本。注:offscreen 测量不含 Qt 上屏开销
-(`blit` 的局部上屏在真机为小块纹理上传,远小于整幅重绘)。
+† The θ guide line redraws the translucent annotations/buttons above it every frame to keep exact stacking; the per-frame cost went 1.5→5–7.5 ms,
+still 135–200 fps. That is the price of fixing the pre-existing "background with baked-in guide line" ghost into bit-exact output.
+All drag p95 ≤ 9 ms (≥110 fps), meeting the 60 Hz target; the "ion histogram peak marker" is a Ctrl+click action with no drag;
+the fine-ROI span drag visuals are handled internally by matplotlib's SpanSelector (useblit); the table's entry is the app-side debounced commit cost.
+Note: the offscreen measurements exclude Qt on-screen upload overhead (the `blit` partial upload is a small texture upload on real hardware, far
+smaller than a full repaint).
+
+### 16g. Center-estimator pruning (2026-09-01)
+
+> Decision: the Electron Scatter `Center estimator` dropdown offered five
+> modes; only two kept, user-approved estimators remain. All repo text in
+> this section is English; the rest of the document was translated to
+> English in §16h.
+
+#### What was removed / kept
+
+- **Kept modes** (`center_mode_combo`, in this order):
+  1. `quadrant_symmetry` — `VMI_workflow_core.quadrant_symmetry_center`
+     (**new default**; raw-point diagonal-quadrant symmetry matching,
+     robust for ring distributions, no prerequisites);
+  2. `polar_outermost` — `polar_outermost_center` (unchanged; still
+     requires a valid Polar ROI band `[r min, r max]`).
+- **Removed UI modes**: `edge_fit` ("Edge circle fit (recommended)"),
+  `centroid` ("Centroid (mean)"), `geo_median` ("Geometric median").
+- **Core function deletions (orphan audit before each deletion)**:
+  - `geometric_median` — deleted (only caller was the GUI mode dispatch);
+  - `circle_fit_kasa` — **kept**: still used by `edge_circle_center` and
+    `_fit_circle_from_outer_edge_profile` (both on kept paths);
+  - `edge_circle_center` — **kept as an internal helper** (UI mode removed):
+    `quadrant_symmetry_center` uses it as its seed / no-scipy fallback, and
+    `_scatter_peak_line_center` / `_iterative_outer_roi_edge_circle_center`
+    (both behind `polar_outermost_center`) use it as seed and re-anchor.
+- **GUI removals**: the dead `MainWindow._estimate_center` method (no
+  callers left since the `_CenterWorker` refactor; it still referenced the
+  removed estimators), the `centroid`/`geo_median` branches of
+  `_CenterWorker._estimate_center_pure`, and the `centroid`/`geo_median`/
+  `edge_fit` branches of the ring-empty fallback ladder in
+  `estimate_center_once` (the default mode now takes the same
+  "(fallback: full set)" branch for `>= 24` candidates).
+- `polar_peak_center` and the `polar_peak`-related internals are untouched.
+
+#### Straightness-gate semantics (first estimate)
+
+The straightness acceptance gate (`_center_metrics_better`) still guards
+re-estimates exactly as before. For the **first** estimate
+(`self.circle_centroid is None`, i.e. no previously applied center) the
+gate is bypassed: the pending center is the user's manual guess, and the
+default `quadrant_symmetry` estimator optimizes quadrant symmetry rather
+than the dominant-peak straightness metric — on two-ring data that metric
+is noisy (the "dominant" polar peak flips between rings), and without the
+bypass the first click of "Estimate Center Once" could keep the rough
+manual center (`_CenterWorker` gained a `gate_on_metrics` flag).
+`check_polar_outermost_center` keeps its pre-seeded center, so the polar
+path is still gate-exercised and its behaviour is unchanged.
+
+#### Legacy session restore mapping
+
+Sessions saved before the pruning persist the mode STRING in
+`combo_boxes.center_mode_combo.data`. `_restore_ui_state` now tolerantly
+remaps every value that is not one of the kept modes (`edge_fit`,
+`centroid`, `geo_median`, the historic `polar_peak`, or missing data) to
+the new default `quadrant_symmetry`; `polar_outermost` restores as itself.
+Restoring an old session therefore never crashes and never falls back to a
+stale combo index. (Before this change the mapping was the inverse:
+historic `quadrant_symmetry`/`polar_peak` strings were mapped to
+`edge_fit`.)
+
+#### Golden re-baseline (intentional shifts)
+
+`estimate_center_once` writes the estimated center back into the
+`circle_cx/cy_edit` widgets and `apply_circle_selection` reads them, so
+every golden value downstream of the ring center shifted when the default
+mode changed:
+
+| Quantity | 2026-08-31 (edge_fit default) | 2026-09-01 (quadrant_symmetry default) |
+|---|---|---|
+| center estimate | (126.634982, 124.088852), 1.963 px error | (128.679982, 125.321352), 0.703 px error |
+| ring inner / outer counts | 21388 / 386 | 21421 / 343 |
+| denoised histogram sum | 21301.769706 (removed 86.230294) | 21344.284303 (removed 76.715697) |
+| rBasex peaks | r=63.0 / r=111.0 | r=61.0 (beta=-0.893267, i=2601.926298) / r=112.0 (beta=0.199947, i=1161.280871) |
+
+Values upstream of the center estimation (pair counts 25658, fine-ROI
+selected mask 21871, session-roundtrip restored count 21871) are
+bit-identical. `golden_core.json` lost its `centers` section (golden cases
+of the pruned estimators); the lock tests for the two kept estimators are
+unchanged and still pass bit-exactly.
+
+### 16h. Open-source preparation (2026-09-01)
+
+> Final compliance pass before publishing. No interaction logic changed;
+> numerics untouched except for dead-code deletion verified caller-free.
+
+- **Documentation**: `docs/user-guide.md` (step-by-step walkthrough with
+  screenshots under `docs/img/`) and `docs/science.md` (algorithms and
+  physics reference), both linked from `README.md`.
+- **CI**: `.github/workflows/ci.yml` — an ubuntu-latest job (Python 3.12,
+  Qt system libraries via apt, deterministic sample-data generation, then
+  the core and offscreen smoke suites under pytest, 20 min timeout) and a
+  lean windows-latest job running the core suite only (no display on
+  Windows CI runners either; kept core-only to avoid flaky offscreen Qt).
+- **Community files**: `CONTRIBUTING.md` (dev setup, test commands, style
+  and goldens discipline), `CODE_OF_CONDUCT.md` (Contributor Covenant
+  v2.1), `CITATION.cff` (repository URL is an explicit placeholder —
+  update it after the GitHub repo is created), `.gitattributes`
+  (`* text=auto`, `*.png binary`).
+- **Full English translation**: this document was translated from Chinese
+  to English (§0–§16g above); a repo-wide grep confirms zero CJK
+  characters remain in any tracked text file.
+- **Lint pass**: pyflakes-level only (`ruff check --select F,E9`) —
+  removed two unused imports (`matplotlib.widgets.RectangleSelector`,
+  `PySide6.QtCore.QRect`) and the dead `_adaptive_xy_bg_features` helper
+  (last leftover of the KDE backend removed in §16b; zero callers).
+  Four unused-local (F841) findings and one benign quoted-annotation
+  (F821) finding in working code were investigated and intentionally left
+  untouched. Both test suites re-run green afterwards.

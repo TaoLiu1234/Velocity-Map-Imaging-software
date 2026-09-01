@@ -17,8 +17,11 @@ restored.
 - **Seven-step guided workflow** matching the UI tabs: load data, process and
   plot, ion-histogram ROI and background, coincidence filters and TOF
   alignment, center estimation, ring selection and binning, reconstruction.
-- **Five center estimators** — centroid, geometric median, edge-circle fit
-  (default), polar outermost-ring fit, and quadrant-symmetry search.
+- **Two center estimators** — quadrant-symmetry search (default; matches
+  diagonal quadrants of the raw scatter points, robust for ring
+  distributions, works without any ROI prerequisite) and polar
+  outermost-ring fit (straightens the outermost ring inside a user-drawn
+  Polar ROI band).
 - **Ion-histogram background fitting** — automatic baseline estimation so a
   fine TOF ROI selects signal, not background.
 - **Denoised polar binning** — the outer-ring background density is subtracted
@@ -72,6 +75,9 @@ installed, ~200-300 MB files load in seconds on a background thread.
 
 ## Workflow guide
 
+See **[docs/user-guide.md](docs/user-guide.md)** for a full walkthrough with
+screenshots. The short version:
+
 1. **Load** — drop or browse the three `.dat` files, then press `Load`.
 2. **Process and Plot** — pick a trigger mode (default `1e+1i` coincidence);
    events are paired and the ion histogram, coincidence map and scatter
@@ -80,8 +86,9 @@ installed, ~200-300 MB files load in seconds on a background thread.
    peak; the automatic background fit can be enabled to refine the selection.
 4. **Ion Coincidence** — inspect the ion TOF vs position map, fit the TOF
    line and apply "align to 0" to straighten the ion distribution.
-5. **Electron Scatter** — estimate the image center with one of the five
-   estimators, then set the ring inner/outer radii.
+5. **Electron Scatter** — estimate the image center with the quadrant
+   symmetry (default) or polar outermost-ring estimator, then set the ring
+   inner/outer radii.
 6. **Apply ring selection and bin** — builds the centered, denoised electron
    histogram (outer-ring noise subtracted) and the theta profile.
 7. **Reconstruction** — run the rBasex Abel inversion; peaks are reported as
@@ -113,6 +120,7 @@ VMI_workflow.py                 GUI: main window, interactions, workflow orchest
 VMI_workflow_core.py            Pure numpy/scipy numerics (pairing, centers, binning)
 VMI_workflow_reconstruction.py  PyAbel rBasex driver + peak extraction
 tests/                          Regression suite, sample-data generator, benchmarks
+docs/                           User guide (docs/user-guide.md), science reference (docs/science.md) and app screenshots
 ARCHITECTURE.md                 Deep-dive documentation: architecture, algorithms, cache design
 ```
 
@@ -123,6 +131,9 @@ ARCHITECTURE.md                 Deep-dive documentation: architecture, algorithm
 - Session metadata embeds the absolute paths of the loaded input files, so a
   shared session file reveals the local directory names it was created from.
   Harmless, but worth knowing when passing sessions around.
+- `CITATION.cff` currently carries a placeholder repository URL
+  (`https://github.com/EXAMPLE/vmi-workflow`); update it (and this note) after
+  the public repository is created.
 
 ## License
 
