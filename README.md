@@ -132,7 +132,7 @@ ARCHITECTURE.md                 Deep-dive documentation: architecture, algorithm
   shared session file reveals the local directory names it was created from.
   Harmless, but worth knowing when passing sessions around.
 - `CITATION.cff` currently carries a placeholder repository URL
-  (`https://github.com/EXAMPLE/vmi-workflow`); update it (and this note) after
+  (`https://github.com/TaoLiu1234/Velocity-Map-Imaging-software`); update it (and this note) after
   the public repository is created.
 
 ## License

@@ -1,7 +1,5 @@
-# TODO(owner): after creating the public GitHub repository, replace the
-# placeholder `repository-code` URL below with the real repository URL
-# (e.g. https://github.com/<your-org>/vmi-workflow) and update the same note
-# in README.md ("Notes" section).
+# repository-code points at the published GitHub repository; the README
+# "Notes" section mirrors this citation information.
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 title: "VMI workflow: interactive velocity-map imaging coincidence analysis"
@@ -11,7 +9,7 @@ authors:
 version: 1.0.0
 date-released: "2026-09-01"
 license: MIT
-repository-code: "https://github.com/EXAMPLE/vmi-workflow"
+repository-code: "https://github.com/TaoLiu1234/Velocity-Map-Imaging-software"
 keywords:
   - velocity-map imaging
   - VMI
