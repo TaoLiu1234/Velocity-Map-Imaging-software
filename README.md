@@ -135,6 +135,30 @@ ARCHITECTURE.md                 Deep-dive documentation: architecture, algorithm
   (`https://github.com/TaoLiu1234/Velocity-Map-Imaging-software`); update it (and this note) after
   the public repository is created.
 
+## How to cite
+
+If you use this software in your research, please cite it via the
+[CITATION.cff](CITATION.cff) file (GitHub shows a "Cite this repository"
+button from it), and the underlying master's thesis:
+
+> Liu, Tao (2026). *Study of hydrated argon and carbon dioxide cluster
+> using Velocity Map Imaging.* Master's thesis (two years), Lund University.
+> https://lup.lub.lu.se/student-papers/search/publication/9246159
+
+BibTeX:
+
+```bibtex
+@mastersthesis{liu2026vmi,
+  author  = {Liu, Tao},
+  title   = {Study of hydrated argon and carbon dioxide cluster using
+             Velocity Map Imaging},
+  school  = {Lund University},
+  year    = {2026},
+  type    = {Master's thesis (Two Years)},
+  url     = {https://lup.lub.lu.se/student-papers/search/publication/9246159}
+}
+```
+
 ## License
 
 [MIT](LICENSE)
