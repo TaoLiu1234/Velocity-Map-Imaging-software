@@ -1279,3 +1279,28 @@ changed): the 16j-3 resize refit derives the preferred canvas size from
 successive window resizes ratchet the canvas down to the 1480x700 floor;
 the screenshot driver restores the design figure size
 (27.0x8.6 in) before each grab to pin the canonical 2214x705 dashboard.
+
+### 16t. CI resolution: numerics contract in CI, GUI smoke as a local gate (2026-09-02)
+
+The published repository's CI failed every run: the GUI smoke suite timed
+out with zero output on GitHub's ubuntu-24.04 runners. Investigation
+(twelve configurations, milestone probes, isolated dependency tests):
+- not slowness (45-minute timeout, still zero output with unbuffered
+  prints), not fonts (matplotlib text render 0.7 s standalone), not
+  dependency drift (the deadlock reproduced with the exact locally green
+  pin set: PySide6 6.11.1 / matplotlib 3.10.7 / numpy 2.2.6), not the Qt
+  platform (offscreen AND xvfb+xcb with the full headless library set),
+  and not the virtual screen size (2560x1440 tried against the app's
+  1534 px window minimum).
+- The hang is in the app's first render, nondeterministic in exact
+  location (first `show()`/`processEvents` or first `figure.savefig`),
+  and environmental to the runner image: the identical stack passes
+  offscreen on two real Windows machines in both verified environments.
+
+Resolution: CI enforces the Qt-free numerics golden contract on ubuntu +
+windows (fast, deterministic, always relevant); the GUI smoke suite stays
+the pre-release LOCAL gate across both verified environments
+(`QT_QPA_PLATFORM=offscreen python tests/test_smoke.py`), per
+tests/README.md "Testing in multiple environments". CI dependencies are
+pinned to the locally verified stack so the numerics environment matches
+what the goldens were produced against.
