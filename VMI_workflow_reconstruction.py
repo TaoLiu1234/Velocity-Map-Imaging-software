@@ -39,6 +39,18 @@ Core steps:
 - `display_percentile`:
   Suggested percentile for image display scaling in GUI.
 
+Non-rBasex methods (16r) additionally accept a per-method
+`method_params` dict, whitelisted per method by
+`sanitize_abel_method_params` and forwarded to the pyabel transform
+function via `abel.Transform(..., transform_options=...)`:
+- basex: `sigma` (float, default 1.0), `reg` (float, default 0.0),
+  `correction` (bool, default True).
+- daun: `reg` (float, default 0.0), `degree` (int 0-3, default 0).
+- linbasex: `smoothing` (float, default 0), `rcond` (float, default
+  0.0005), `threshold` (float, default 0.2), `legendre_orders`
+  (list of int, default [0, 2]).
+All other methods take no user-facing parameters.
+
 Dependencies:
 - `pyabel` (for rBasex).
 """
@@ -343,6 +355,76 @@ def normalize_abel_method(method) -> str:
     return key if key in _METHOD_KEYS else "rbasex"
 
 
+# 16r: per-method parameter whitelist forwarded to the pyabel transform
+# functions via ``abel.Transform(..., transform_options=...)``. Keys not
+# listed for a method are dropped; methods without an entry get no options.
+_METHOD_PARAM_KEYS: dict[str, tuple[str, ...]] = {
+    "basex": ("sigma", "reg", "correction"),
+    "daun": ("reg", "degree"),
+    "linbasex": ("smoothing", "rcond", "threshold", "legendre_orders"),
+}
+
+
+def sanitize_abel_method_params(method: str, method_params: dict | None) -> dict:
+    """Coerce GUI method parameters into a safe per-method whitelist dict.
+
+    Returns the ``transform_options`` dict for ``abel.Transform``:
+    - unknown keys are dropped (per-method whitelist above);
+    - values are coerced/validated (``float``/``int`` casts, finite checks,
+      range clamps);
+    - any invalid value is dropped entirely so the pyabel default applies;
+    - methods without parameters (or rbasex, which keeps its dedicated path)
+      always return ``{}``.
+    Never raises.
+    """
+    method_key = normalize_abel_method(method)
+    if method_key not in _METHOD_PARAM_KEYS or not isinstance(method_params, dict):
+        return {}
+
+    out: dict = {}
+
+    def _finite_float(name: str, min_value: float | None = None) -> None:
+        try:
+            value = float(method_params[name])
+        except Exception:
+            return
+        if not np.isfinite(value):
+            return
+        if min_value is not None and value < min_value:
+            return
+        out[name] = value
+
+    if method_key == "basex":
+        _finite_float("sigma", 0.0)
+        _finite_float("reg", 0.0)
+        if "correction" in method_params:
+            out["correction"] = bool(method_params["correction"])
+    elif method_key == "daun":
+        _finite_float("reg", 0.0)
+        if "degree" in method_params:
+            try:
+                degree = int(method_params["degree"])
+            except Exception:
+                degree = -1
+            if 0 <= degree <= 3:
+                out["degree"] = degree
+    elif method_key == "linbasex":
+        _finite_float("smoothing", 0.0)
+        _finite_float("rcond", 0.0)
+        _finite_float("threshold", 0.0)
+        if "legendre_orders" in method_params:
+            try:
+                raw_orders = method_params["legendre_orders"]
+                if isinstance(raw_orders, (int, float)):
+                    raw_orders = [raw_orders]
+                orders = [int(value) for value in raw_orders][:4]
+            except Exception:
+                orders = []
+            if orders and all(0 <= order <= 6 for order in orders):
+                out["legendre_orders"] = orders
+    return out
+
+
 def abel_method_label(method) -> str:
     """Return the human-readable label for a registered method key."""
     key = normalize_abel_method(method)
@@ -359,6 +441,7 @@ def run_abel_method_reconstruction(
     bin_size: float,
     method: str,
     settings: dict,
+    method_params: dict | None = None,
 ) -> dict:
     """Run a generic pyabel inverse transform (any non-rBasex method).
 
@@ -368,12 +451,19 @@ def run_abel_method_reconstruction(
     by angular integration of the inverted image over all angles (mean per
     integer pixel radius). Peak finding reuses the same extractor and peak
     settings as the rBasex path.
+
+    ``method_params`` is a per-method parameter dict (16r); it is filtered
+    through the per-method whitelist (``sanitize_abel_method_params``) and
+    forwarded to the pyabel transform function via ``transform_options``.
     """
+    method_key = normalize_abel_method(method)
+    transform_options = sanitize_abel_method_params(method_key, method_params)
     try:
         recon_img = abel.Transform(
             hist_image,
             direction="inverse",
-            method=normalize_abel_method(method),
+            method=method_key,
+            transform_options=transform_options,
         ).transform
         recon_img = np.asarray(recon_img, dtype=np.float64)
 
@@ -437,6 +527,7 @@ def run_reconstructions_from_centered_data(
     rbasex_settings: dict,
     progress_callback: Callable[[float, str], None] | None = None,
     method: str = "rbasex",
+    method_params: dict | None = None,
 ) -> dict | None:
     """Run the reconstruction from a centered histogram dict.
 
@@ -450,6 +541,10 @@ def run_reconstructions_from_centered_data(
     - `method`:
       Registered Abel method key (see `ABEL_METHODS`); anything unregistered
       falls back to rBasex.
+    - `method_params`:
+      Optional per-method parameter dict for non-rBasex methods (16r). It is
+      whitelisted/coerced per method and forwarded to the pyabel transform
+      via ``transform_options``; the rBasex path ignores it.
 
     Important orientation note:
     - `numpy.histogram2d` stores data as (x_bin, y_bin).
@@ -486,7 +581,7 @@ def run_reconstructions_from_centered_data(
     else:
         emit_progress(0.9, f"Running {label} reconstruction...")
         result = run_abel_method_reconstruction(
-            recon_input, xedges, yedges, bin_size_eff, method_key, rbasex_settings
+            recon_input, xedges, yedges, bin_size_eff, method_key, rbasex_settings, method_params=method_params
         )
     emit_progress(1.0, "Reconstruction algorithms finished.")
     return result

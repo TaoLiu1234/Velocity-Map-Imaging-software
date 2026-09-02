@@ -37,6 +37,7 @@ Code split (3 main modules):
 - VMI_workflow_reconstruction.py: rBasex reconstruction utilities.
 """
 
+import ast
 import contextlib
 import json
 import os
@@ -81,6 +82,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStackedLayout,
+    QStackedWidget,
     QSplitter,
     QSlider,
     QTabWidget,
@@ -135,6 +137,15 @@ INTERACTION_DRAG_THRESHOLD_PX = 5
 ION_FINE_ROI_DEBOUNCE_MS = 130
 DEFAULT_CENTER_BIN_SIZE = 0.5
 SESSION_OUTPUT_DIRNAME = "workflow_outputs"
+# 16r: default parameters per non-rBasex Abel method (the pyabel function
+# defaults). Used as GUI fallbacks, for tolerant session restore merging, and
+# to validate saved session values. rBasex defaults live in the rBasex page
+# widgets and are read via _get_rbasex_settings (unchanged numeric path).
+RECON_METHOD_PARAM_DEFAULTS: dict[str, dict] = {
+    "basex": {"sigma": 1.0, "reg": 0.0, "correction": True},
+    "daun": {"reg": 0.0, "degree": 0},
+    "linbasex": {"smoothing": 0.0, "rcond": 0.0005, "threshold": 0.2, "legendre_orders": [0, 2]},
+}
 WHEEL_SCROLL_COALESCE_MS = 12
 PLOT_SCROLL_PREVIEW_IDLE_MS = 320
 PLOT_SCROLL_PREVIEW_MOUSE_RESTORE_GRACE_MS = 60
@@ -657,11 +668,18 @@ class _ReconWorker(QObject):
     thread reads back on a Qt timer.
     """
 
-    def __init__(self, centered_hist_data: dict | None, rbasex_settings: dict, method: str = "rbasex") -> None:
+    def __init__(
+        self,
+        centered_hist_data: dict | None,
+        rbasex_settings: dict,
+        method: str = "rbasex",
+        method_params: dict | None = None,
+    ) -> None:
         super().__init__()
         self._centered_hist_data = centered_hist_data
         self._rbasex_settings = rbasex_settings
         self._method = normalize_abel_method(method)
+        self._method_params = dict(method_params) if isinstance(method_params, dict) else {}
         self._progress: tuple[float, str] = (0.0, "preparing")
         self._result: dict | None = None
         self._error: str = ""
@@ -705,6 +723,7 @@ class _ReconWorker(QObject):
                 self._rbasex_settings,
                 progress_callback=_cb,
                 method=self._method,
+                method_params=self._method_params,
             )
         except Exception as exc:  # pragma: no cover - defensive
             self._error = str(exc)
@@ -1616,177 +1635,267 @@ class MainWindow(QMainWindow):
         self.v_detector_edit.setReadOnly(True)
         self.v_detector_edit.setMaximumWidth(90)
 
-        # Step 6 controls: split reconstruction parameters into two boxed panels.
-        rbasex_param_group = QGroupBox("rBasex Model Parameters")
-        rbasex_param_group.setToolTip(
-            "Order/Odd/Reg/rmax are used by the rBasex method only.\n"
-            "Peak smooth sigma/height/prominence/Max peaks/Min-dist frac and\n"
-            "Display percentile apply to every inversion method."
+        # Step 6 controls: reconstruction settings split into four focused
+        # boxed groups — Run, Peak Finding & Display (all methods),
+        # Method Parameters (one stacked page per method), and the
+        # Recovered Radial Profile axes & display controls.
+        self.recon_peak_group = QGroupBox("Peak Finding & Display — all methods")
+        self.recon_peak_group.setToolTip(
+            "Peak finding and image display clipping used by EVERY inversion\n"
+            "method (rBasex and all non-rBasex methods alike)."
         )
-        rbasex_param_grid = QGridLayout(rbasex_param_group)
-        rbasex_param_grid.setHorizontalSpacing(10)
+        recon_peak_grid = QGridLayout(self.recon_peak_group)
+        recon_peak_grid.setHorizontalSpacing(10)
 
-        rbasex_param_grid.addWidget(QLabel("Peak smooth sigma"), 0, 0)
+        recon_peak_grid.addWidget(QLabel("Peak smooth sigma"), 0, 0)
         self.rbasex_peak_smooth_sigma_edit = QLineEdit("0")
         self.rbasex_peak_smooth_sigma_edit.setMaximumWidth(100)
-        rbasex_param_grid.addWidget(self.rbasex_peak_smooth_sigma_edit, 0, 1)
+        recon_peak_grid.addWidget(self.rbasex_peak_smooth_sigma_edit, 0, 1)
 
-        rbasex_param_grid.addWidget(QLabel("Peak height"), 0, 2)
+        recon_peak_grid.addWidget(QLabel("Peak height"), 0, 2)
         self.rbasex_peak_height_edit = QLineEdit("0.12")
         self.rbasex_peak_height_edit.setMaximumWidth(100)
-        rbasex_param_grid.addWidget(self.rbasex_peak_height_edit, 0, 3)
+        recon_peak_grid.addWidget(self.rbasex_peak_height_edit, 0, 3)
 
-        rbasex_param_grid.addWidget(QLabel("Peak prominence"), 0, 4)
+        recon_peak_grid.addWidget(QLabel("Peak prominence"), 0, 4)
         self.rbasex_peak_prominence_edit = QLineEdit("0.08")
         self.rbasex_peak_prominence_edit.setMaximumWidth(100)
-        rbasex_param_grid.addWidget(self.rbasex_peak_prominence_edit, 0, 5)
+        recon_peak_grid.addWidget(self.rbasex_peak_prominence_edit, 0, 5)
 
-        rbasex_param_grid.addWidget(QLabel("Max peaks"), 0, 6)
+        recon_peak_grid.addWidget(QLabel("Max peaks"), 0, 6)
         self.rbasex_max_peaks_edit = QLineEdit("5")
         self.rbasex_max_peaks_edit.setMaximumWidth(100)
-        rbasex_param_grid.addWidget(self.rbasex_max_peaks_edit, 0, 7)
+        recon_peak_grid.addWidget(self.rbasex_max_peaks_edit, 0, 7)
 
-        rbasex_param_grid.addWidget(QLabel("Min-dist frac"), 1, 0)
+        recon_peak_grid.addWidget(QLabel("Min-dist frac"), 1, 0)
         self.rbasex_peak_min_dist_frac_edit = QLineEdit("0.06")
         self.rbasex_peak_min_dist_frac_edit.setMaximumWidth(100)
-        rbasex_param_grid.addWidget(self.rbasex_peak_min_dist_frac_edit, 1, 1)
+        recon_peak_grid.addWidget(self.rbasex_peak_min_dist_frac_edit, 1, 1)
 
-        rbasex_param_grid.addWidget(QLabel("Display percentile"), 1, 2)
+        recon_peak_grid.addWidget(QLabel("Display percentile"), 1, 2)
         self.rbasex_display_percentile_edit = QLineEdit("99.7")
         self.rbasex_display_percentile_edit.setMaximumWidth(100)
-        rbasex_param_grid.addWidget(self.rbasex_display_percentile_edit, 1, 3)
+        recon_peak_grid.addWidget(self.rbasex_display_percentile_edit, 1, 3)
 
-        rbasex_param_grid.addWidget(QLabel("Order"), 1, 4)
-        self.rbasex_order_edit = QLineEdit("2")
-        self.rbasex_order_edit.setMaximumWidth(100)
-        rbasex_param_grid.addWidget(self.rbasex_order_edit, 1, 5)
+        # Method Parameters: one stacked page per registered Abel method
+        # (built in ABEL_METHODS order so combo index == stack index).
+        self.method_params_group = QGroupBox("Method Parameters")
+        self.method_params_group.setToolTip(
+            "Parameters of the selected inversion method; the page swaps\n"
+            "automatically with the Inversion method dropdown.\n"
+            "rBasex: Order/Odd/Reg/rmax. BASEX: Sigma/Reg/Correction.\n"
+            "Daun: Reg/Degree. Lin-Basex: Smoothing/Rcond/Threshold/Legendre orders."
+        )
+        method_params_layout = QVBoxLayout(self.method_params_group)
+        method_params_layout.setContentsMargins(8, 8, 8, 8)
+        self.recon_method_stack = QStackedWidget()
+        method_params_layout.addWidget(self.recon_method_stack)
+        self._recon_method_pages: dict[str, QWidget] = {}
+        recon_method_page_grids: list[QGridLayout] = []
 
-        rbasex_param_grid.addWidget(QLabel("Reg (blank=None)"), 1, 6)
-        self.rbasex_reg_edit = QLineEdit("")
-        self.rbasex_reg_edit.setPlaceholderText("e.g. 200")
-        self.rbasex_reg_edit.setMaximumWidth(100)
-        rbasex_param_grid.addWidget(self.rbasex_reg_edit, 1, 7)
+        for method_key, _method_label in ABEL_METHODS:
+            page = QWidget()
+            page.setObjectName(f"recon_method_page_{method_key}")
+            method_grid = QGridLayout(page)
+            method_grid.setHorizontalSpacing(10)
+            self.recon_method_stack.addWidget(page)
+            self._recon_method_pages[method_key] = page
+            recon_method_page_grids.append(method_grid)
+            if method_key == "rbasex":
+                # rBasex keeps its existing widgets (names/signals unchanged);
+                # the numeric path reads them via _get_rbasex_settings.
+                method_grid.addWidget(QLabel("Order"), 0, 0)
+                self.rbasex_order_edit = QLineEdit("2")
+                self.rbasex_order_edit.setMaximumWidth(100)
+                method_grid.addWidget(self.rbasex_order_edit, 0, 1)
 
-        rbasex_param_grid.addWidget(QLabel("rmax (MIN/MAX/int)"), 2, 0)
-        self.rbasex_rmax_edit = QLineEdit("MIN")
-        self.rbasex_rmax_edit.setMaximumWidth(100)
-        rbasex_param_grid.addWidget(self.rbasex_rmax_edit, 2, 1)
+                method_grid.addWidget(QLabel("Reg (blank=None)"), 0, 2)
+                self.rbasex_reg_edit = QLineEdit("")
+                self.rbasex_reg_edit.setPlaceholderText("e.g. 200")
+                self.rbasex_reg_edit.setMaximumWidth(100)
+                method_grid.addWidget(self.rbasex_reg_edit, 0, 3)
 
-        self.rbasex_odd_checkbox = QCheckBox("Odd terms")
-        self.rbasex_odd_checkbox.setChecked(False)
-        rbasex_param_grid.addWidget(self.rbasex_odd_checkbox, 2, 2, 1, 2)
+                method_grid.addWidget(QLabel("rmax (MIN/MAX/int)"), 0, 4)
+                self.rbasex_rmax_edit = QLineEdit("MIN")
+                self.rbasex_rmax_edit.setMaximumWidth(100)
+                method_grid.addWidget(self.rbasex_rmax_edit, 0, 5)
 
-        rbasex_param_grid.addWidget(QLabel("Profile theta (deg)"), 2, 4)
+                self.rbasex_odd_checkbox = QCheckBox("Odd terms")
+                self.rbasex_odd_checkbox.setChecked(False)
+                method_grid.addWidget(self.rbasex_odd_checkbox, 0, 6)
+            elif method_key == "basex":
+                method_grid.addWidget(QLabel("Sigma"), 0, 0)
+                self.basex_sigma_edit = QLineEdit("1.0")
+                self.basex_sigma_edit.setMaximumWidth(100)
+                method_grid.addWidget(self.basex_sigma_edit, 0, 1)
+
+                method_grid.addWidget(QLabel("Reg"), 0, 2)
+                self.basex_reg_edit = QLineEdit("0.0")
+                self.basex_reg_edit.setMaximumWidth(100)
+                method_grid.addWidget(self.basex_reg_edit, 0, 3)
+
+                self.basex_correction_checkbox = QCheckBox("Correction")
+                self.basex_correction_checkbox.setChecked(True)
+                method_grid.addWidget(self.basex_correction_checkbox, 0, 4)
+            elif method_key == "daun":
+                method_grid.addWidget(QLabel("Reg"), 0, 0)
+                self.daun_reg_edit = QLineEdit("0.0")
+                self.daun_reg_edit.setMaximumWidth(100)
+                method_grid.addWidget(self.daun_reg_edit, 0, 1)
+
+                method_grid.addWidget(QLabel("Degree"), 0, 2)
+                self.daun_degree_combo = QComboBox()
+                for degree_value in (0, 1, 2):
+                    self.daun_degree_combo.addItem(str(degree_value), degree_value)
+                self.daun_degree_combo.setCurrentIndex(0)
+                method_grid.addWidget(self.daun_degree_combo, 0, 3)
+            elif method_key == "linbasex":
+                method_grid.addWidget(QLabel("Smoothing"), 0, 0)
+                self.linbasex_smoothing_edit = QLineEdit("0")
+                self.linbasex_smoothing_edit.setMaximumWidth(100)
+                method_grid.addWidget(self.linbasex_smoothing_edit, 0, 1)
+
+                method_grid.addWidget(QLabel("Rcond"), 0, 2)
+                self.linbasex_rcond_edit = QLineEdit("0.0005")
+                self.linbasex_rcond_edit.setMaximumWidth(100)
+                method_grid.addWidget(self.linbasex_rcond_edit, 0, 3)
+
+                method_grid.addWidget(QLabel("Threshold"), 0, 4)
+                self.linbasex_threshold_edit = QLineEdit("0.2")
+                self.linbasex_threshold_edit.setMaximumWidth(100)
+                method_grid.addWidget(self.linbasex_threshold_edit, 0, 5)
+
+                method_grid.addWidget(QLabel("Legendre orders"), 0, 6)
+                self.linbasex_legendre_edit = QLineEdit("[0, 2]")
+                self.linbasex_legendre_edit.setMaximumWidth(100)
+                method_grid.addWidget(self.linbasex_legendre_edit, 0, 7)
+            else:
+                method_grid.addWidget(
+                    QLabel("This method has no additional parameters."), 0, 0
+                )
+
+        # Recovered Radial Profile — Axes & Display: all profile-panel display
+        # controls moved out of the former rBasex Model Parameters box.
+        self.recon_profile_axes_group = QGroupBox("Recovered Radial Profile — Axes & Display")
+        self.recon_profile_axes_group.setToolTip(
+            "X/Y-axis and display controls for the Recovered Profile panel\n"
+            "(bottom row, 4th). These affect the profile display only."
+        )
+        recon_profile_axes_grid = QGridLayout(self.recon_profile_axes_group)
+        recon_profile_axes_grid.setHorizontalSpacing(10)
+
+        recon_profile_axes_grid.addWidget(QLabel("Profile theta (deg)"), 0, 0)
         self.rbasex_profile_theta_edit = QLineEdit("0")
         self.rbasex_profile_theta_edit.setMaximumWidth(100)
         self.rbasex_profile_theta_edit.returnPressed.connect(self._on_rbasex_profile_controls_changed)
-        rbasex_param_grid.addWidget(self.rbasex_profile_theta_edit, 2, 5)
+        recon_profile_axes_grid.addWidget(self.rbasex_profile_theta_edit, 0, 1)
 
-        rbasex_param_grid.addWidget(QLabel("Profile dTheta"), 2, 6)
+        recon_profile_axes_grid.addWidget(QLabel("Profile dTheta"), 0, 2)
         self.rbasex_profile_width_edit = QLineEdit("1")
         self.rbasex_profile_width_edit.setMaximumWidth(100)
         self.rbasex_profile_width_edit.returnPressed.connect(self._on_rbasex_profile_controls_changed)
-        rbasex_param_grid.addWidget(self.rbasex_profile_width_edit, 2, 7)
+        recon_profile_axes_grid.addWidget(self.rbasex_profile_width_edit, 0, 3)
 
         self.rbasex_profile_apply_btn = QPushButton("Update rBasex Profile")
         self.rbasex_profile_apply_btn.clicked.connect(self._on_rbasex_profile_controls_changed)
-        rbasex_param_grid.addWidget(self.rbasex_profile_apply_btn, 3, 6, 1, 2)
-        rbasex_param_grid.addWidget(QLabel("Profile r tags"), 3, 0)
+        recon_profile_axes_grid.addWidget(self.rbasex_profile_apply_btn, 0, 5)
+
+        recon_profile_axes_grid.addWidget(QLabel("Profile r tags"), 1, 0)
         self.rbasex_profile_marker_edit = QLineEdit("")
         self.rbasex_profile_marker_edit.setPlaceholderText("Ctrl+click or type: 10, 15.5")
         self.rbasex_profile_marker_edit.returnPressed.connect(self._on_rbasex_profile_marker_text_applied)
-        rbasex_param_grid.addWidget(self.rbasex_profile_marker_edit, 3, 1, 1, 4)
+        recon_profile_axes_grid.addWidget(self.rbasex_profile_marker_edit, 1, 1, 1, 3)
         self.rbasex_profile_clear_btn = QPushButton("Clear r Tags")
         self.rbasex_profile_clear_btn.clicked.connect(lambda: self._clear_profile_markers("rbasex"))
-        rbasex_param_grid.addWidget(self.rbasex_profile_clear_btn, 3, 5)
+        recon_profile_axes_grid.addWidget(self.rbasex_profile_clear_btn, 1, 4)
 
-        rbasex_param_grid.addWidget(QLabel("X axis"), 4, 0)
+        recon_profile_axes_grid.addWidget(QLabel("X axis"), 2, 0)
         self.rbasex_profile_xmode_combo = QComboBox()
         self.rbasex_profile_xmode_combo.addItem("Radial Position (mm)", "r")
         self.rbasex_profile_xmode_combo.addItem("Kinetic Energy (eV)", "ke")
         self.rbasex_profile_xmode_combo.addItem("Binding Energy (eV)", "be")
         self.rbasex_profile_xmode_combo.addItem("Both (top KE / bottom BE)", "both")
         self.rbasex_profile_xmode_combo.currentIndexChanged.connect(self._on_rbasex_profile_xmode_changed)
-        rbasex_param_grid.addWidget(self.rbasex_profile_xmode_combo, 4, 1)
+        recon_profile_axes_grid.addWidget(self.rbasex_profile_xmode_combo, 2, 1)
         self.rbasex_profile_dual_axis_swap_checkbox = QCheckBox("Swap top/bottom")
         self.rbasex_profile_dual_axis_swap_checkbox.setChecked(False)
         self.rbasex_profile_dual_axis_swap_checkbox.setEnabled(False)
         self.rbasex_profile_dual_axis_swap_checkbox.toggled.connect(self._on_rbasex_profile_dual_axis_swap_toggled)
-        rbasex_param_grid.addWidget(self.rbasex_profile_dual_axis_swap_checkbox, 4, 10, 1, 2)
+        recon_profile_axes_grid.addWidget(self.rbasex_profile_dual_axis_swap_checkbox, 2, 10, 1, 2)
         self._update_rbasex_profile_dual_axis_swap_affordance()
 
-        rbasex_param_grid.addWidget(QLabel("Energy c"), 4, 2)
+        recon_profile_axes_grid.addWidget(QLabel("Energy c"), 2, 2)
         self.rbasex_profile_ke_c_edit = QLineEdit("1.0")
         self.rbasex_profile_ke_c_edit.setMaximumWidth(100)
         self.rbasex_profile_ke_c_edit.editingFinished.connect(self._on_rbasex_profile_ke_formula_changed)
-        rbasex_param_grid.addWidget(self.rbasex_profile_ke_c_edit, 4, 3)
+        recon_profile_axes_grid.addWidget(self.rbasex_profile_ke_c_edit, 2, 3)
 
-        rbasex_param_grid.addWidget(QLabel("Energy b"), 4, 4)
+        recon_profile_axes_grid.addWidget(QLabel("Energy b"), 2, 4)
         self.rbasex_profile_ke_b_edit = QLineEdit("0.0")
         self.rbasex_profile_ke_b_edit.setMaximumWidth(100)
         self.rbasex_profile_ke_b_edit.editingFinished.connect(self._on_rbasex_profile_ke_formula_changed)
-        rbasex_param_grid.addWidget(self.rbasex_profile_ke_b_edit, 4, 5)
+        recon_profile_axes_grid.addWidget(self.rbasex_profile_ke_b_edit, 2, 5)
 
-        rbasex_param_grid.addWidget(QLabel("Photon hv"), 4, 6)
+        recon_profile_axes_grid.addWidget(QLabel("Photon hv"), 2, 6)
         self.rbasex_profile_hv_edit = QLineEdit("")
         self.rbasex_profile_hv_edit.setPlaceholderText("e.g. 21.218")
         self.rbasex_profile_hv_edit.setMaximumWidth(100)
         self.rbasex_profile_hv_edit.editingFinished.connect(self._on_rbasex_profile_ke_formula_changed)
-        rbasex_param_grid.addWidget(self.rbasex_profile_hv_edit, 4, 7)
+        recon_profile_axes_grid.addWidget(self.rbasex_profile_hv_edit, 2, 7)
 
         self.rbasex_profile_ke_convert_btn = QPushButton("Apply X Axis")
         self.rbasex_profile_ke_convert_btn.clicked.connect(self._on_rbasex_profile_convert_clicked)
-        rbasex_param_grid.addWidget(self.rbasex_profile_ke_convert_btn, 4, 8)
+        recon_profile_axes_grid.addWidget(self.rbasex_profile_ke_convert_btn, 2, 8)
 
         self.rbasex_profile_normmax_checkbox = QCheckBox("Normalize max")
         self.rbasex_profile_normmax_checkbox.setChecked(False)
         self.rbasex_profile_normmax_checkbox.toggled.connect(self._on_rbasex_profile_normalize_toggled)
-        rbasex_param_grid.addWidget(self.rbasex_profile_normmax_checkbox, 4, 9)
+        recon_profile_axes_grid.addWidget(self.rbasex_profile_normmax_checkbox, 2, 9)
 
-        rbasex_param_grid.addWidget(QLabel("Profile x min"), 5, 0)
+        recon_profile_axes_grid.addWidget(QLabel("Profile x min"), 3, 0)
         self.rbasex_profile_xmin_edit = QLineEdit("")
         self.rbasex_profile_xmin_edit.setPlaceholderText("auto")
         self.rbasex_profile_xmin_edit.setMaximumWidth(100)
         self.rbasex_profile_xmin_edit.returnPressed.connect(self._on_rbasex_profile_xrange_changed)
-        rbasex_param_grid.addWidget(self.rbasex_profile_xmin_edit, 5, 1)
+        recon_profile_axes_grid.addWidget(self.rbasex_profile_xmin_edit, 3, 1)
 
-        rbasex_param_grid.addWidget(QLabel("Profile x max"), 5, 2)
+        recon_profile_axes_grid.addWidget(QLabel("Profile x max"), 3, 2)
         self.rbasex_profile_xmax_edit = QLineEdit("")
         self.rbasex_profile_xmax_edit.setPlaceholderText("auto")
         self.rbasex_profile_xmax_edit.setMaximumWidth(100)
         self.rbasex_profile_xmax_edit.returnPressed.connect(self._on_rbasex_profile_xrange_changed)
-        rbasex_param_grid.addWidget(self.rbasex_profile_xmax_edit, 5, 3)
+        recon_profile_axes_grid.addWidget(self.rbasex_profile_xmax_edit, 3, 3)
 
         self.rbasex_profile_xrange_apply_btn = QPushButton("Apply X Range")
         self.rbasex_profile_xrange_apply_btn.clicked.connect(self._on_rbasex_profile_xrange_changed)
-        rbasex_param_grid.addWidget(self.rbasex_profile_xrange_apply_btn, 5, 4, 1, 2)
+        recon_profile_axes_grid.addWidget(self.rbasex_profile_xrange_apply_btn, 3, 4, 1, 2)
 
-        rbasex_param_grid.addWidget(QLabel("Top space x"), 6, 0)
+        recon_profile_axes_grid.addWidget(QLabel("Top space x"), 4, 0)
         self.rbasex_profile_top_space_edit = QLineEdit("1.1")
         self.rbasex_profile_top_space_edit.setPlaceholderText(">= 1.0")
         self.rbasex_profile_top_space_edit.setMaximumWidth(100)
         self.rbasex_profile_top_space_edit.returnPressed.connect(self._on_rbasex_profile_top_space_changed)
-        rbasex_param_grid.addWidget(self.rbasex_profile_top_space_edit, 6, 1)
+        recon_profile_axes_grid.addWidget(self.rbasex_profile_top_space_edit, 4, 1)
         self.rbasex_profile_top_space_apply_btn = QPushButton("Apply Top Space")
         self.rbasex_profile_top_space_apply_btn.clicked.connect(self._on_rbasex_profile_top_space_changed)
-        rbasex_param_grid.addWidget(self.rbasex_profile_top_space_apply_btn, 6, 2, 1, 6)
+        recon_profile_axes_grid.addWidget(self.rbasex_profile_top_space_apply_btn, 4, 2, 1, 2)
         self.rbasex_profile_range_pick_btn = QPushButton("Pick Range on Plot")
         self.rbasex_profile_range_pick_btn.setCheckable(True)
         self.rbasex_profile_range_pick_btn.setToolTip(
             "Turn on range picking, then drag on the rBasex radial profile to integrate one displayed x-range."
         )
         self.rbasex_profile_range_pick_btn.toggled.connect(self._on_rbasex_profile_range_pick_toggled)
-        rbasex_param_grid.addWidget(self.rbasex_profile_range_pick_btn, 7, 0, 1, 2)
+        recon_profile_axes_grid.addWidget(self.rbasex_profile_range_pick_btn, 4, 5, 1, 2)
         self.rbasex_profile_range_label = QLabel(
             "Use 'Pick Range on Plot', then drag on the radial profile; selection snaps to displayed bins."
         )
         self.rbasex_profile_range_label.setWordWrap(True)
         self.rbasex_profile_range_label.setMinimumWidth(0)
         self.rbasex_profile_range_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        rbasex_param_grid.addWidget(self.rbasex_profile_range_label, 7, 2, 1, 4)
+        recon_profile_axes_grid.addWidget(self.rbasex_profile_range_label, 4, 7, 1, 3)
         self.rbasex_profile_range_clear_btn = QPushButton("Clear Range")
         self.rbasex_profile_range_clear_btn.clicked.connect(self._clear_rbasex_profile_range_selection)
-        rbasex_param_grid.addWidget(self.rbasex_profile_range_clear_btn, 7, 6, 1, 2)
+        recon_profile_axes_grid.addWidget(self.rbasex_profile_range_clear_btn, 4, 10, 1, 2)
 
 
         def make_grid_section(title: str) -> tuple[QGroupBox, QGridLayout]:
@@ -2042,14 +2151,17 @@ class MainWindow(QMainWindow):
             "pyAbel inverse-Abel method used for the reconstruction.\n"
             "rBasex is the default and the only method that recovers the\n"
             "anisotropy beta(r); other methods report beta=n/a.\n"
-            "Order/Odd/Reg/rmax are rBasex-specific; the Peak-* and Display\n"
-            "percentile settings apply to every method."
+            "The Method Parameters box swaps with this selection; the\n"
+            "Peak-* and Display percentile settings apply to every method."
         )
         reconstruction_layout.addWidget(self.recon_method_combo)
         reconstruction_layout.addWidget(self.reconstruct_btn)
         reconstruction_layout.addWidget(
             QLabel("Prepare the centered image in Electron Binned Image, then run the inversion here.")
         )
+        # 16r: the Method Parameters page must always match the selected method.
+        self.recon_method_combo.currentIndexChanged.connect(self._on_recon_method_combo_changed)
+        self._on_recon_method_combo_changed()
 
         for layout in (
             ion_hist_controls_layout,
@@ -2067,7 +2179,9 @@ class MainWindow(QMainWindow):
             projection_params_layout,
             projection_display_layout,
             projection_voltage_layout,
-            rbasex_param_grid,
+            recon_peak_grid,
+            recon_profile_axes_grid,
+            *recon_method_page_grids,
         ):
             compact_grid_pairs(layout)
 
@@ -2169,8 +2283,10 @@ class MainWindow(QMainWindow):
         self.control_tabs.addTab(
             self._build_control_tab_scroll_area(
                 reconstruction_group,
-                rbasex_param_group,
-                drives="rBasex Reconstruction image (top row, 4th) + rBasex Recovered Profile (bottom row, 4th)",
+                self.recon_peak_group,
+                self.method_params_group,
+                self.recon_profile_axes_group,
+                drives="rBasex/selected-method Reconstruction image (top row, 4th) + Recovered Profile (bottom row, 4th)",
             ),
             "Reconstruction",
         )
@@ -11680,6 +11796,9 @@ class MainWindow(QMainWindow):
             was = widget.blockSignals(True)
             widget.setCurrentIndex(idx)
             widget.blockSignals(was)
+        # 16r: the combo restore above is signal-blocked, so sync the
+        # Method Parameters stack explicitly.
+        self._on_recon_method_combo_changed()
         self._update_rbasex_profile_dual_axis_swap_affordance()
 
     @staticmethod
@@ -12827,6 +12946,7 @@ class MainWindow(QMainWindow):
                 "reconstruction": {
                     "rbasex": self._result_metadata_without_image(self.rbasex_recon_result),
                     "method": normalize_abel_method(self.recon_method_combo.currentData()),
+                    "method_params": self._jsonify_value(self._get_method_params()),
                 },
                 "artifacts": {
                     "data_npz": data_npz_name,
@@ -13017,6 +13137,9 @@ class MainWindow(QMainWindow):
                     self.drop_frames[role].clear_path()
 
             self._restore_ui_state(metadata.get("ui_state", {}))
+            # 16r: method-specific parameters saved with the session; merged
+            # tolerantly with per-method defaults (legacy sessions: no key, no-op).
+            self._restore_method_params(recon_meta)
             self._sync_runtime_state_from_controls()
 
             selection = metadata.get("selection", {})
@@ -19030,6 +19153,157 @@ class MainWindow(QMainWindow):
             "display_percentile": self._parse_float_edit(self.rbasex_display_percentile_edit, 99.7, 50.0, 100.0),
         }
 
+    def _on_recon_method_combo_changed(self) -> None:
+        """16r: show the Method Parameters page of the selected Abel method."""
+        stack = getattr(self, "recon_method_stack", None)
+        pages = getattr(self, "_recon_method_pages", None)
+        if stack is None or not isinstance(pages, dict):
+            return
+        page = pages.get(normalize_abel_method(self.recon_method_combo.currentData()))
+        if page is not None and stack.currentWidget() is not page:
+            stack.setCurrentWidget(page)
+
+    def _parse_legendre_orders_edit(self, edit: QLineEdit | None) -> list[int]:
+        """Tolerantly parse the Lin-Basex Legendre orders text (never raises).
+
+        Accepts e.g. ``[0, 2]``, ``0, 2`` or a single integer; anything
+        unparseable (or empty) falls back to the pyabel default ``[0, 2]``.
+        """
+        default = list(RECON_METHOD_PARAM_DEFAULTS["linbasex"]["legendre_orders"])
+        text = edit.text().strip() if edit is not None else ""
+        if not text:
+            return default
+        if "(" in text or "[" not in text:
+            text = f"[{text.strip('[]() ')}]"
+        try:
+            parsed = ast.literal_eval(text)
+        except Exception:
+            return default
+        if isinstance(parsed, (int, float)):
+            parsed = [parsed]
+        if not isinstance(parsed, (list, tuple)):
+            return default
+        orders: list[int] = []
+        for value in parsed:
+            try:
+                orders.append(int(value))
+            except Exception:
+                return default
+        orders = [order for order in orders if 0 <= order <= 6][:4]
+        return orders if orders else default
+
+    def _get_method_params(self, method=None) -> dict:
+        """Collect the parameters of the current non-rBasex method page (16r).
+
+        Returns a per-method dict read from the Method Parameters stacked page
+        matching ``method`` (default: the selected combo method). Parsing is
+        tolerant: invalid text falls back to the method's default and this
+        never raises. The rBasex page parameters are intentionally NOT
+        returned here — they are read by `_get_rbasex_settings`, whose
+        numerics must stay bit-identical.
+        """
+        method_key = normalize_abel_method(
+            method if method is not None else self.recon_method_combo.currentData()
+        )
+        if method_key == "basex":
+            return {
+                "sigma": self._parse_float_edit(self.basex_sigma_edit, 1.0, 0.0, 100.0),
+                "reg": self._parse_float_edit(self.basex_reg_edit, 0.0, 0.0, 1000000.0),
+                "correction": bool(self.basex_correction_checkbox.isChecked()),
+            }
+        if method_key == "daun":
+            degree = self.daun_degree_combo.currentData()
+            try:
+                degree = int(degree)
+            except Exception:
+                degree = 0
+            if degree not in (0, 1, 2):
+                degree = 0
+            return {
+                "reg": self._parse_float_edit(self.daun_reg_edit, 0.0, 0.0, 1000000.0),
+                "degree": degree,
+            }
+        if method_key == "linbasex":
+            return {
+                "smoothing": self._parse_float_edit(self.linbasex_smoothing_edit, 0.0, 0.0, 1000.0),
+                "rcond": self._parse_float_edit(self.linbasex_rcond_edit, 0.0005, 0.0, 1.0),
+                "threshold": self._parse_float_edit(self.linbasex_threshold_edit, 0.2, 0.0, 1.0),
+                "legendre_orders": self._parse_legendre_orders_edit(self.linbasex_legendre_edit),
+            }
+        return {}
+
+    def _restore_method_params(self, recon_meta: dict) -> None:
+        """16r: tolerantly apply saved method parameters to the stack pages.
+
+        Merges the saved ``reconstruction.method_params`` (belonging to the
+        saved method) with the per-method defaults for missing keys, then
+        writes the values back into the page widgets. Legacy sessions without
+        the key are a no-op — the generic line-edit/check-box UI state restore
+        already covers those widgets.
+        """
+        if not isinstance(recon_meta, dict):
+            return
+        saved = recon_meta.get("method_params")
+        if not isinstance(saved, dict) or not saved:
+            return
+        method_key = normalize_abel_method(recon_meta.get("method"))
+        defaults = RECON_METHOD_PARAM_DEFAULTS.get(method_key)
+        if not defaults:
+            return
+        merged = dict(defaults)
+        for key, value in saved.items():
+            if key in defaults:
+                merged[key] = value
+
+        def _fmt_text(value, fallback) -> str:
+            try:
+                return f"{float(value):g}"
+            except Exception:
+                return f"{float(fallback):g}"
+
+        with contextlib.suppress(Exception):
+            if method_key == "basex":
+                self._set_line_edit_text_silent(
+                    self.basex_sigma_edit, _fmt_text(merged.get("sigma"), defaults["sigma"])
+                )
+                self._set_line_edit_text_silent(
+                    self.basex_reg_edit, _fmt_text(merged.get("reg"), defaults["reg"])
+                )
+                was = self.basex_correction_checkbox.blockSignals(True)
+                self.basex_correction_checkbox.setChecked(bool(merged.get("correction", defaults["correction"])))
+                self.basex_correction_checkbox.blockSignals(was)
+            elif method_key == "daun":
+                self._set_line_edit_text_silent(
+                    self.daun_reg_edit, _fmt_text(merged.get("reg"), defaults["reg"])
+                )
+                try:
+                    degree = int(merged.get("degree", defaults["degree"]))
+                except Exception:
+                    degree = int(defaults["degree"])
+                idx = self.daun_degree_combo.findData(degree)
+                if idx >= 0:
+                    was = self.daun_degree_combo.blockSignals(True)
+                    self.daun_degree_combo.setCurrentIndex(idx)
+                    self.daun_degree_combo.blockSignals(was)
+            elif method_key == "linbasex":
+                self._set_line_edit_text_silent(
+                    self.linbasex_smoothing_edit, _fmt_text(merged.get("smoothing"), defaults["smoothing"])
+                )
+                self._set_line_edit_text_silent(
+                    self.linbasex_rcond_edit, _fmt_text(merged.get("rcond"), defaults["rcond"])
+                )
+                self._set_line_edit_text_silent(
+                    self.linbasex_threshold_edit, _fmt_text(merged.get("threshold"), defaults["threshold"])
+                )
+                try:
+                    orders = [int(v) for v in merged.get("legendre_orders", defaults["legendre_orders"])]
+                except Exception:
+                    orders = list(defaults["legendre_orders"])
+                self._set_line_edit_text_silent(
+                    self.linbasex_legendre_edit, f"[{', '.join(str(v) for v in orders)}]"
+                )
+
+
     def _current_center_mode(self) -> str:
         """Return selected center estimator key (default: quadrant_symmetry)."""
         mode = self.center_mode_combo.currentData()
@@ -19618,6 +19892,9 @@ class MainWindow(QMainWindow):
             return
         centered_hist_snapshot = self._copy_centered_hist_data(self.centered_hist_data)
         recon_method = normalize_abel_method(self.recon_method_combo.currentData())
+        # 16r: method-specific parameters of the selected page (rBasex keeps
+        # its dedicated settings path; this dict is empty for it).
+        method_params = self._get_method_params(recon_method)
 
         self._recon_busy = True
         self._recon_started_at = time.monotonic()
@@ -19626,7 +19903,7 @@ class MainWindow(QMainWindow):
         # result.
         with contextlib.suppress(Exception):
             self.recon_method_combo.setEnabled(False)
-        worker = _ReconWorker(centered_hist_snapshot, rbasex_settings, method=recon_method)
+        worker = _ReconWorker(centered_hist_snapshot, rbasex_settings, method=recon_method, method_params=method_params)
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)

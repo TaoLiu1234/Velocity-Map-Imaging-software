@@ -1133,3 +1133,99 @@ Note: the 16p unconditional pump suspension for the collection/finalize slots
 is deliberately kept (the 90%/100% `_progress_update` pumps still sit inside
 them); 16q removes the synchronous-immediate-paint class itself, which 16p
 could not cover.
+
+### 16r. Method-specific parameter sections (2026-09-01)
+
+> User request: reorganize the Reconstruction tab so the parameter sections
+> SWAP with the selected pyAbel inversion method, and the "Recovered radial
+> profile" X/Y-axis display settings become a section separate from the
+> model parameters.
+
+The tab went from 2 groups ("Abel Reconstruction — Run" + the former
+"rBasex Model Parameters", which packed EVERYTHING) to 4 groups, all built
+in `MainWindow.__init__` and wrapped by the same
+`_build_control_tab_scroll_area(...)` call (drives text updated to
+"rBasex/selected-method Reconstruction image (top row, 4th) + Recovered
+Profile (bottom row, 4th)"):
+
+1. **Abel Reconstruction — Run** — unchanged (method combo + Start button +
+   hint). `recon_method_combo.currentIndexChanged` is now additionally wired
+   to `_on_recon_method_combo_changed`, which shows the matching page of the
+   new `self.recon_method_stack` (`QStackedWidget`).
+2. **Peak Finding & Display — all methods** (`self.recon_peak_group`): the
+   five peak-finding edits (`rbasex_peak_smooth_sigma_edit`,
+   `rbasex_peak_height_edit`, `rbasex_peak_prominence_edit`,
+   `rbasex_max_peaks_edit`, `rbasex_peak_min_dist_frac_edit`) plus
+   `rbasex_display_percentile_edit`, moved with identical widget names,
+   defaults and signals — they apply to every method.
+3. **Method Parameters** (`self.method_params_group`): one stacked page per
+   registered method, built in `ABEL_METHODS` order (combo index == stack
+   index; pages also keyed `self._recon_method_pages[method_key]` with
+   objectName `recon_method_page_<key>`). The rbasex page keeps the existing
+   four controls (Order / Odd terms / Reg / rmax — same names and signals);
+   new pages: basex = Sigma ("1.0") + Reg ("0.0") + Correction checkbox
+   (checked, `basex_correction_checkbox`); daun = Reg ("0.0") + Degree
+   combo 0/1/2 (`daun_degree_combo`); linbasex = Smoothing ("0") + Rcond
+   ("0.0005") + Threshold ("0.2") + Legendre orders ("[0, 2]"); the five
+   parameter-less methods (direct, hansenlaw, onion_bordas, three_point,
+   two_point) get a "This method has no additional parameters." hint label.
+   The stacked widget naturally preserves each page's edit values across
+   method switches. `_restore_ui_state` re-syncs the stack after its
+   signal-blocked combo restore.
+4. **Recovered Radial Profile — Axes & Display**
+   (`self.recon_profile_axes_group`): ALL `rbasex_profile_*` display
+   controls moved out of the old model-parameters box (Profile theta /
+   dTheta / Update button, Profile r tags + Clear r Tags, X axis mode +
+   Swap top/bottom, Energy c/b/hv + Apply X Axis, Normalize max, x min/max
+   + Apply X Range, Top space x + Apply Top Space, Pick Range on Plot +
+   range label + Clear Range) — relaid out row-wise, names and signal
+   connections unchanged; they drive the bottom-right Recovered Profile
+   panel only.
+
+Backend plumbing (non-rBasex paths only; the rBasex numeric path is
+deliberately untouched so the goldens stay byte-identical):
+
+- `_get_method_params(method=None)` reads the CURRENT method page into a
+  per-method dict — basex `{"sigma", "reg", "correction"}`, daun
+  `{"reg", "degree"}`, linbasex `{"smoothing", "rcond", "threshold",
+  "legendre_orders"}` (others `{}`) — with tolerant parsing (invalid text
+  falls back to the pyabel defaults via `_parse_float_edit` /
+  `_parse_legendre_orders_edit`, never raises). `_get_rbasex_settings` is
+  unchanged.
+- `run_reconstruction_now` snapshots `method_params` for the selected
+  method and passes it to `_ReconWorker(..., method_params=...)`, which
+  forwards it to `run_reconstructions_from_centered_data(...,
+  method_params=...)` and on to `run_abel_method_reconstruction`.
+- `VMI_workflow_reconstruction.sanitize_abel_method_params(method, params)`
+  filters the dict through a per-method whitelist
+  (`_METHOD_PARAM_KEYS`: basex sigma/reg/correction; daun reg/degree;
+  linbasex smoothing/rcond/threshold/legendre_orders), coerces/validates
+  every value (float/int casts, finiteness, ranges; daun degree 0-3,
+  legendre orders ints 0-6, max 4 entries) and DROPS unknown or invalid
+  keys so the pyabel default applies; it never raises. The sanitized dict
+  is forwarded as `abel.Transform(..., transform_options=...)` (pyabel's
+  quadrant dispatch resolves `basex.basex_transform` / `daun.daun_transform`
+  etc. at call time, and linbasex runs `linbasex_transform_full` with the
+  same option names — the whitelist matches those signatures exactly).
+- Sessions: `save_session_output` persists
+  `reconstruction.method_params` (jsonified params of the saved method);
+  `_load_session_output_from_metadata_path` calls the new
+  `_restore_method_params(recon_meta)`, which merges the saved values with
+  `RECON_METHOD_PARAM_DEFAULTS` for missing keys and writes them back into
+  the page widgets (signal-blocked). Legacy sessions without the key are a
+  no-op (the generic line-edit/check-box UI-state restore already covers
+  those widgets).
+
+Regression coverage: `check_method_param_sections` in `tests/test_smoke.py`
+(registered in `run_regression_checks`) locks (a) stacked-page swap
+(rbasex vs basex visible page + Order edit on the rbasex page + Sigma edit
+on the basex page) and per-page value persistence across switches; (b) the
+three sections being separate `QGroupBox`es in the Reconstruction tab with
+the right widgets contained in exactly one section each; (c) BASEX
+sigma=1.7/reg=120 plumbing — a delegating capture wrapper around
+`abel.basex.basex_transform` must receive sigma=1.7/reg=120/correction=True
+and the run must produce a valid result (peaks, image, beta n/a); (d) Daun
+degree=1 plumbing the same way; (e) session save/restore roundtrip of
+`method_params` into a fresh window's widgets plus the tolerant merge
+(partial keys fall back to defaults; legacy-shaped metadata is a no-op).
+All suites green in BOTH envs; goldens byte-unchanged.

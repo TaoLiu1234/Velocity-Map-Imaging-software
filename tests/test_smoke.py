@@ -25,7 +25,12 @@ deterministic synthetic triplet from ``tests/make_sample_data.py``:
      ``check_ion_tof_alignment`` extension (2026-08-31) additionally drives
      the ion-TOF fit + "Apply Align to 0" + ion-scatter temp-centering
      workflow and locks the transformed coordinate outputs (rounded to 9
-     decimals) against hardcoded values in this file.
+     decimals) against hardcoded values in this file. The
+     ``check_method_param_sections`` extension (2026-09-01, 16r) locks the
+     four-group Reconstruction tab: per-method parameter pages that swap with
+     the method combo, the separate peak-finding / profile-axes groups, the
+     BASEX/Daun parameter plumbing into ``abel.Transform(transform_options)``
+     and the ``reconstruction.method_params`` session roundtrip.
 
 Golden workflow:
 - ``python tests/test_smoke.py --update-golden`` writes
@@ -2120,6 +2125,260 @@ def check_blit_geometry_change_guard(app, MainWindow, windows: list) -> None:
             win._invalidate_blit_background()
 
 
+def check_method_param_sections(app, MainWindow, windows: list) -> None:
+    """16r: Reconstruction tab sections swap with the selected Abel method.
+
+    Locks in the four-group tab layout (Run / "Peak Finding & Display — all
+    methods" / "Method Parameters" / "Recovered Radial Profile — Axes &
+    Display"): (a) the Method Parameters QStackedWidget page follows the
+    Inversion method combo and keeps per-method edit values across switches;
+    (b) the peak-finding, method-model and profile-axes controls live in
+    three separate group boxes; (c)+(d) BASEX and Daun parameters are plumbed
+    through ``_ReconWorker`` -> ``run_reconstructions_from_centered_data`` ->
+    ``abel.Transform(transform_options=...)`` (captured with delegating
+    wrappers around ``abel.basex.basex_transform`` / ``abel.daun.daun_transform``)
+    while producing a valid result; (e) sessions persist
+    ``reconstruction.method_params`` and restore tolerantly into a fresh
+    window (missing keys merge with per-method defaults, legacy sessions are
+    a no-op). The rBasex numeric path is untouched (its own golden workflow).
+    """
+    import numpy as np
+    import abel
+
+    import VMI_workflow_reconstruction as vwr
+
+    step = "method_param_sections"
+    win = _make_binned_window(step, app, MainWindow, windows)
+
+    # ------------------------------------------------------------------
+    # (b) three separate sections in the Reconstruction tab
+    # ------------------------------------------------------------------
+    peak_group = getattr(win, "recon_peak_group", None)
+    model_group = getattr(win, "method_params_group", None)
+    axes_group = getattr(win, "recon_profile_axes_group", None)
+    for group, title in (
+        (peak_group, "Peak Finding & Display — all methods"),
+        (model_group, "Method Parameters"),
+        (axes_group, "Recovered Radial Profile — Axes & Display"),
+    ):
+        if group is None or group.title() != title:
+            raise _fail(step, f"expected group box {title!r}, got {group}")
+    if len({id(peak_group), id(model_group), id(axes_group)}) != 3:
+        raise _fail(step, "the three parameter sections must be distinct group boxes")
+
+    for widget, group, what in (
+        (win.rbasex_peak_smooth_sigma_edit, peak_group, "peak smooth sigma"),
+        (win.rbasex_peak_height_edit, peak_group, "peak height"),
+        (win.rbasex_peak_prominence_edit, peak_group, "peak prominence"),
+        (win.rbasex_max_peaks_edit, peak_group, "max peaks"),
+        (win.rbasex_peak_min_dist_frac_edit, peak_group, "min-dist frac"),
+        (win.rbasex_display_percentile_edit, peak_group, "display percentile"),
+    ):
+        if not group.isAncestorOf(widget):
+            raise _fail(step, f"{what} must live in the Peak Finding & Display group")
+    for widget, what in (
+        (win.rbasex_order_edit, "rBasex Order"),
+        (win.basex_sigma_edit, "BASEX Sigma"),
+        (win.daun_degree_combo, "Daun Degree"),
+        (win.linbasex_rcond_edit, "Lin-Basex Rcond"),
+    ):
+        if not model_group.isAncestorOf(widget):
+            raise _fail(step, f"{what} must live in the Method Parameters group")
+        if peak_group.isAncestorOf(widget) or axes_group.isAncestorOf(widget):
+            raise _fail(step, f"{what} leaked into another parameter section")
+    for widget, what in (
+        (win.rbasex_profile_xrange_apply_btn, "Apply X Range"),
+        (win.rbasex_profile_theta_edit, "profile theta"),
+        (win.rbasex_profile_ke_convert_btn, "profile KE convert"),
+        (win.rbasex_profile_range_clear_btn, "profile range clear"),
+    ):
+        if not axes_group.isAncestorOf(widget):
+            raise _fail(step, f"{what} must live in the Recovered Radial Profile group")
+        if peak_group.isAncestorOf(widget) or model_group.isAncestorOf(widget):
+            raise _fail(step, f"{what} leaked into another parameter section")
+    if peak_group.isAncestorOf(win.rbasex_order_edit) or axes_group.isAncestorOf(win.rbasex_order_edit):
+        raise _fail(step, "rBasex Order must live only in the Method Parameters group")
+
+    # ------------------------------------------------------------------
+    # (a) the stacked page follows the method combo; values persist
+    # ------------------------------------------------------------------
+    stack = win.recon_method_stack
+    pages = win._recon_method_pages
+    if stack.count() != len(vwr.ABEL_METHODS):
+        raise _fail(step, f"stack pages {stack.count()} != registered methods {len(vwr.ABEL_METHODS)}")
+    if stack.currentWidget() is not pages["rbasex"]:
+        raise _fail(step, "default method rbasex must show the rbasex parameter page")
+    if not pages["rbasex"].isAncestorOf(win.rbasex_order_edit):
+        raise _fail(step, "rbasex page must contain the Order edit")
+    if pages["rbasex"].isAncestorOf(win.basex_sigma_edit):
+        raise _fail(step, "rbasex page must not contain the BASEX Sigma edit")
+
+    basex_idx = win.recon_method_combo.findData("basex")
+    win.recon_method_combo.setCurrentIndex(basex_idx)
+    app.processEvents()
+    if stack.currentWidget() is not pages["basex"]:
+        raise _fail(step, "selecting BASEX must show the basex parameter page")
+    if not stack.currentWidget().isAncestorOf(win.basex_sigma_edit):
+        raise _fail(step, "basex page must contain the BASEX Sigma edit")
+
+    win.basex_sigma_edit.setText("1.7")
+    win.basex_reg_edit.setText("120")
+    win.recon_method_combo.setCurrentIndex(win.recon_method_combo.findData("daun"))
+    app.processEvents()
+    if stack.currentWidget() is not pages["daun"]:
+        raise _fail(step, "selecting Daun must show the daun parameter page")
+    win.recon_method_combo.setCurrentIndex(basex_idx)
+    app.processEvents()
+    if win.basex_sigma_edit.text() != "1.7" or win.basex_reg_edit.text() != "120":
+        raise _fail(step, "per-method edits must keep their values across method switches")
+
+    # ------------------------------------------------------------------
+    # (c) BASEX sigma/reg/correction reach abel.basex.basex_transform
+    # ------------------------------------------------------------------
+    if win.rbasex_recon_result is not None:
+        raise _fail(step, "fresh window must start without a reconstruction result")
+    captured: dict = {}
+    real_basex = abel.basex.basex_transform
+
+    def capturing_basex(data, **kwargs):
+        captured.update(kwargs)
+        return real_basex(data, **kwargs)
+
+    abel.basex.basex_transform = capturing_basex
+    try:
+        win.run_reconstruction_now()
+        wait_until(
+            app,
+            lambda: getattr(win, "rbasex_recon_result", None) is not None
+            and not getattr(win, "_recon_busy", False)
+            and not getattr(win, "_recon_finalize_pending", False),
+            RECON_TIMEOUT_S,
+            step,
+            "BASEX reconstruction",
+        )
+        app.processEvents()
+    finally:
+        abel.basex.basex_transform = real_basex
+    result = win.rbasex_recon_result or {}
+    if result.get("error"):
+        raise _fail(step, f"BASEX reconstruction failed: {result.get('error')}")
+    if not captured:
+        raise _fail(step, "basex_transform was never invoked (capture wrapper missed)")
+    if abs(float(captured.get("sigma", -1.0)) - 1.7) > 1e-9:
+        raise _fail(step, f"BASEX sigma not plumbed (captured {captured.get('sigma')!r})")
+    if abs(float(captured.get("reg", -1.0)) - 120.0) > 1e-9:
+        raise _fail(step, f"BASEX reg not plumbed (captured {captured.get('reg')!r})")
+    if captured.get("correction") is not True:
+        raise _fail(step, f"BASEX correction not plumbed (captured {captured.get('correction')!r})")
+    hist = win.centered_hist_data["hist_denoised"]
+    if result.get("image") is None or result["image"].shape != np.asarray(hist).T.shape:
+        raise _fail(step, "BASEX result image missing or wrong shape")
+    if not result.get("peaks"):
+        raise _fail(step, "BASEX result carries no peaks")
+    if result.get("beta_available", True):
+        raise _fail(step, "BASEX result must mark beta as unavailable")
+
+    # ------------------------------------------------------------------
+    # (d) Daun degree reaches abel.daun.daun_transform
+    # ------------------------------------------------------------------
+    win.recon_method_combo.setCurrentIndex(win.recon_method_combo.findData("daun"))
+    app.processEvents()
+    win.daun_degree_combo.setCurrentIndex(1)  # degree = 1
+    app.processEvents()
+    captured_daun: dict = {}
+    real_daun = abel.daun.daun_transform
+
+    def capturing_daun(data, **kwargs):
+        captured_daun.update(kwargs)
+        return real_daun(data, **kwargs)
+
+    abel.daun.daun_transform = capturing_daun
+    try:
+        win.run_reconstruction_now()
+
+        def daun_done() -> bool:
+            res_now = getattr(win, "rbasex_recon_result", None)
+            return (
+                res_now is not None
+                and not getattr(win, "_recon_busy", False)
+                and not getattr(win, "_recon_finalize_pending", False)
+                and str(res_now.get("method")) == "daun"
+            )
+
+        wait_until(
+            app,
+            daun_done,
+            RECON_TIMEOUT_S,
+            step,
+            "Daun reconstruction",
+        )
+        app.processEvents()
+    finally:
+        abel.daun.daun_transform = real_daun
+    result_daun = win.rbasex_recon_result or {}
+    if result_daun.get("error"):
+        raise _fail(step, f"Daun reconstruction failed: {result_daun.get('error')}")
+    if not captured_daun:
+        raise _fail(step, "daun_transform was never invoked (capture wrapper missed)")
+    if int(captured_daun.get("degree", -1)) != 1:
+        raise _fail(step, f"Daun degree not plumbed (captured {captured_daun.get('degree')!r})")
+    if not result_daun.get("peaks"):
+        raise _fail(step, "Daun result carries no peaks")
+
+    # ------------------------------------------------------------------
+    # (e) session save/restore keeps reconstruction.method_params
+    # ------------------------------------------------------------------
+    win.recon_method_combo.setCurrentIndex(basex_idx)
+    app.processEvents()
+    win.basex_sigma_edit.setText("2.5")
+    from VMI_workflow import SESSION_OUTPUT_DIRNAME
+
+    win.save_session_output()
+    app.processEvents()
+    base_dir = Path(os.getcwd()) / SESSION_OUTPUT_DIRNAME
+    session_dirs = sorted(p for p in base_dir.iterdir() if p.is_dir()) if base_dir.is_dir() else []
+    if not session_dirs:
+        raise _fail(step, "save_session_output created no session directory")
+    meta_path = session_dirs[-1] / "session_metadata.json"
+    if not meta_path.is_file():
+        raise _fail(step, f"session metadata missing: {meta_path}")
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    saved_params = (meta.get("reconstruction") or {}).get("method_params")
+    if not isinstance(saved_params, dict):
+        raise _fail(step, "metadata reconstruction.method_params missing after save")
+    if abs(float(saved_params.get("sigma", -1.0)) - 2.5) > 1e-9:
+        raise _fail(step, f"saved method_params sigma wrong: {saved_params!r}")
+    if (meta.get("reconstruction") or {}).get("method") != "basex":
+        raise _fail(step, "saved reconstruction.method must match the selected method")
+
+    win3 = MainWindow()
+    windows.append(win3)
+    if not win3._load_session_output_from_metadata_path(str(meta_path)):
+        raise _fail(step, "session restore returned False for the method_params roundtrip")
+    app.processEvents()
+    if win3.basex_sigma_edit.text() != "2.5":
+        raise _fail(
+            step,
+            f"restored BASEX sigma text {win3.basex_sigma_edit.text()!r} != '2.5'",
+        )
+    if win3.recon_method_stack.currentWidget() is not win3._recon_method_pages["basex"]:
+        raise _fail(step, "restored window must show the basex parameter page")
+
+    # Tolerant restore: missing keys merge with the per-method defaults and a
+    # metadata dict without method_params (legacy session) is a no-op.
+    win3._restore_method_params({"method": "basex"})
+    if win3.basex_sigma_edit.text() != "2.5":
+        raise _fail(step, "legacy-shaped metadata must not touch the widgets")
+    win3._restore_method_params({"method": "basex", "method_params": {"sigma": 3.5}})
+    if win3.basex_sigma_edit.text() != "3.5":
+        raise _fail(step, "partial method_params must merge with the saved value")
+    if win3.basex_reg_edit.text() != "0":
+        raise _fail(step, f"missing method_params key must fall back to the default (reg={win3.basex_reg_edit.text()!r})")
+    print("Method parameter sections OK: stacked pages swap with the method, "
+          "BASEX/Daun params plumbed to pyabel, profile-axes group split out, "
+          "method_params session roundtrip")
+
+
 def contextlib_suppress():
     import contextlib
 
@@ -2144,6 +2403,7 @@ def run_regression_checks(app, MainWindow, windows: list) -> None:
     check_recon_collect_no_pump(app, MainWindow, windows)
     check_recon_finalize_no_repaint(app, MainWindow, windows)
     check_blit_geometry_change_guard(app, MainWindow, windows)
+    check_method_param_sections(app, MainWindow, windows)
 
 
 def main(argv: list[str] | None = None) -> int:

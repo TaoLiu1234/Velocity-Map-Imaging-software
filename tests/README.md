@@ -182,6 +182,31 @@ baseline.
    resume after). Note the async completion is two-stage: drive it with
    `win.rbasex_recon_result is not None and not win._recon_busy and not
    win._recon_finalize_pending`.
+6. **Reorganization (2026-09-01, ARCHITECTURE.md 16r): the Reconstruction
+   tab is four groups and the parameter sections swap with the selected
+   Abel method.** "Peak Finding & Display — all methods" (`win.recon_peak_group`)
+   holds the five peak edits + Display percentile; "Method Parameters"
+   (`win.method_params_group`) is a `QStackedWidget`
+   (`win.recon_method_stack`, pages keyed in `win._recon_method_pages`) with
+   one page per `ABEL_METHODS` entry (rbasex: Order/Odd/Reg/rmax; basex:
+   `basex_sigma_edit`/`basex_reg_edit`/`basex_correction_checkbox`; daun:
+   `daun_reg_edit`/`daun_degree_combo`; linbasex:
+   `linbasex_smoothing_edit`/`linbasex_rcond_edit`/`linbasex_threshold_edit`/
+   `linbasex_legendre_edit`; the rest a no-parameters hint);
+   "Recovered Radial Profile — Axes & Display" (`win.recon_profile_axes_group`)
+   holds every `rbasex_profile_*` display control. Non-rBasex runs pass
+   `method_params` (from `_get_method_params`) through `_ReconWorker` →
+   `run_reconstructions_from_centered_data` →
+   `run_abel_method_reconstruction`, where `sanitize_abel_method_params`
+   whitelists/coerces them into `abel.Transform(transform_options=...)`.
+   Sessions persist `reconstruction.method_params`; restore merges with
+   per-method defaults (`RECON_METHOD_PARAM_DEFAULTS`) and is a no-op for
+   legacy sessions. The rBasex numeric path is untouched (goldens
+   byte-unchanged). Locked by `check_method_param_sections` (stacked-page
+   swap + value persistence, section containment, BASEX sigma/reg captured
+   by a delegating wrapper around `abel.basex.basex_transform`, Daun degree
+   captured at `abel.daun.daun_transform`, and the `method_params` session
+   roundtrip into a fresh window).
 
 ## Notes for later agents: driving the app offscreen
 

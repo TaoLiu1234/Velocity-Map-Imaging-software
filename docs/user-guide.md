@@ -308,23 +308,38 @@ The **Ion Scatter** tab limits which ion events define the coincidences.
 
   ![Centered bin map and radial profile populated](img/step4_ring_selection.png)
 
-- **Reconstruction parameters.** On the **Reconstruction** tab, the
-  **rBasex Model Parameters** box controls the pyAbel rBasex
-  inversion: **Order** (basis expansion order, default 2), **Odd terms**
-  (include odd beta orders; off by default), **Reg** (regularization,
-  blank = None, e.g. 200 for noisy data), **rmax** (`MIN`, `MAX` or an
-  integer radius in bins). Peak finding uses **Peak smooth sigma**,
-  **Peak height** (0.12), **Peak prominence** (0.08), **Max peaks** (5),
-  **Min-dist frac** (0.06); **Display percentile** (99.7) sets the image
-  display clipping.
+- **Reconstruction parameters.** The **Reconstruction** tab holds four
+  boxed groups:
+  - **Abel Reconstruction — Run**: the **Inversion method** dropdown and
+    **Start Reconstruction**.
+  - **Peak Finding & Display — all methods**: peak finding and display
+    clipping used by EVERY inversion method — **Peak smooth sigma**,
+    **Peak height** (0.12), **Peak prominence** (0.08), **Max peaks** (5),
+    **Min-dist frac** (0.06) and **Display percentile** (99.7, image
+    display clipping).
+  - **Method Parameters**: the parameters of the selected method; the box
+    content swaps automatically with the Inversion method dropdown.
+  - **Recovered Radial Profile — Axes & Display**: the X/Y-axis and display
+    controls of the bottom-right **Recovered Profile** panel (see below).
 - **Choosing a method.** The **Inversion method** dropdown (Abel
   Reconstruction — Run box) selects the pyAbel inverse-Abel algorithm:
   **rBasex** (default; the only method that recovers the anisotropy
   beta(r)), **BASEX**, **Daun**, **Direct integration**, **Hansen-Law**,
   **Lin-Basex**, **Onion-Bordas**, **Three-point (Dasch)** and **Two-point**.
-  Order/Odd/Reg/rmax apply to rBasex only; the Peak-* and Display percentile
-  settings apply to every method. Non-rBasex methods compute I(r) by angular
-  integration of the inverted image and report **beta=n/a**.
+  The **Method Parameters** box swaps with that selection:
+  - **rBasex**: **Order** (basis expansion order, default 2), **Odd terms**
+    (include odd beta orders; off by default), **Reg** (regularization,
+    blank = None, e.g. 200 for noisy data) and **rmax** (`MIN`, `MAX` or an
+    integer radius in bins).
+  - **BASEX**: **Sigma** (1.0), **Reg** (0.0) and **Correction** (on).
+  - **Daun**: **Reg** (0.0) and **Degree** (0 / 1 / 2).
+  - **Lin-Basex**: **Smoothing** (0), **Rcond** (0.0005), **Threshold**
+    (0.2) and **Legendre orders** (`[0, 2]`).
+  - Direct integration, Hansen-Law, Onion-Bordas, Three-point and Two-point
+    take no additional parameters.
+  Non-rBasex methods compute I(r) by angular integration of the inverted
+  image and report **beta=n/a**. Each method keeps its own parameter values
+  while you switch back and forth.
 - **Run it.** Press **Start Reconstruction** on the **Reconstruction** tab.
   The inversion runs asynchronously with a
   progress bar; the UI stays responsive. The **rBasex Recon** panel shows
@@ -442,7 +457,7 @@ absolute path or expect the restore to ask for the files.
 | Center estimate looks wrong | set a sensible manual center first (the estimator uses it as the starting guess), keep the inner radius just beyond the outermost ring, and try the **Polar outermost ring line** method with a clean Polar ROI band. |
 | Scatter panels only show 25,000 points | that is the intentional display cap for responsiveness (`Plotted 25000/25658`); all computations use the full selection. |
 | Histogram background fit follows the signal peaks | switch **BG fit mode** to **1 curve**, or choose a fixed **BG law** and a **TOF domain** fit so the baseline cannot climb into the peaks. |
-| Reconstruction results change between runs | ensure the centered image did not change (any change to fine ROI, filters, center, radii, bin size invalidates it) and that **Order/Odd/Reg/rmax** are as intended; r and beta values are reproducible for identical inputs. |
+| Reconstruction results change between runs | ensure the centered image did not change (any change to fine ROI, filters, center, radii, bin size invalidates it) and that the **Method Parameters** of the selected method (rBasex: **Order/Odd/Reg/rmax**) are as intended; r and beta values are reproducible for identical inputs. |
 
 ---
 
