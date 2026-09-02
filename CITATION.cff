@@ -19,6 +19,25 @@ references:
     publisher: "Lund University"
     url: "https://lup.lub.lu.se/student-papers/search/publication/9246159"
     notes: "Master's thesis (two years); the work this software was developed for."
+  - type: article
+    title: "PyAbel: A Python package for Abel transforms"
+    authors:
+      - family-names: Hickstein
+        given-names: Daniel D.
+      - family-names: Gibson
+        given-names: Stephen T.
+      - family-names: Yurchak
+        given-names: Roman
+      - family-names: Das
+        given-names: Dyutiman D.
+      - family-names: Ryazanov
+        given-names: Mikhail
+    year: 2019
+    journal: "Review of Scientific Instruments"
+    volume: 90
+    pages: "065115"
+    doi: "10.1063/1.5092635"
+    notes: "The Abel-transform library this software is built on."
 repository-code: "https://github.com/TaoLiu1234/Velocity-Map-Imaging-software"
 keywords:
   - velocity-map imaging

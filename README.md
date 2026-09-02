@@ -145,6 +145,10 @@ button from it), and the underlying master's thesis:
 > using Velocity Map Imaging.* Master's thesis (two years), Lund University.
 > https://lup.lub.lu.se/student-papers/search/publication/9246159
 
+This software builds on [PyAbel](https://github.com/PyAbel/PyAbel) for the
+Abel inversions; if PyAbel was important to your analysis, also cite
+Hickstein et al., *Rev. Sci. Instrum.* **90**, 065115 (2019).
+
 BibTeX:
 
 ```bibtex
