@@ -5,110 +5,29 @@ on:
     branches: [main]
 
 jobs:
-  probe:
-    name: matplotlib text-render hang isolation
+  pinned-smoke:
+    name: full smoke with PySide6 pinned to 6.11.1 (offscreen)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install system libraries
+      - name: Install Qt system libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1 libegl1 libxkbcommon0 libdbus-1-3 libfontconfig1 fonts-dejavu-core xvfb
-          sudo apt-get install -y libxcb-cursor0 libxcb-xinerama0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xkb1
+          sudo apt-get install -y libgl1 libegl1 libxkbcommon0 libdbus-1-3 libfontconfig1 fonts-dejavu-core
           sudo apt-get install -y libglib2.0-0 || sudo apt-get install -y libglib2.0-0t64
-      - name: Install Python dependencies
+      - name: Install Python dependencies (PySide6 pinned to the locally tested version)
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyarrow
-      - name: "A - pure matplotlib text render (no app, no Qt)"
-        timeout-minutes: 2
-        continue-on-error: true
-        run: |
-          cat > /tmp/a.py << 'PYEOF'
-          import time, matplotlib
-          matplotlib.use("Agg")
-          print("mpl", matplotlib.__version__, flush=True)
-          t0 = time.time()
-          import matplotlib.figure
-          f = matplotlib.figure.Figure(figsize=(6, 4))
-          f.text(0.1, 0.1, "hello title")
-          ax = f.add_subplot(111)
-          ax.set_title("panel title")
-          f.savefig("/tmp/a.png", dpi=72)
-          print(f"A-OK text render {time.time()-t0:.1f}s", flush=True)
-          PYEOF
-          python -u /tmp/a.py
-      - name: "B - font cache prebuild timing"
-        timeout-minutes: 3
-        continue-on-error: true
-        run: |
-          cat > /tmp/b.py << 'PYEOF'
-          import time
-          t0 = time.time()
-          import matplotlib.font_manager as fm
-          print(f"B fonts known: {len(fm.fontManager.ttflist)} in {time.time()-t0:.1f}s", flush=True)
-          t0 = time.time()
-          f = fm.findfont("DejaVu Sans")
-          print(f"B findfont -> {f} in {time.time()-t0:.1f}s", flush=True)
-          PYEOF
-          python -u /tmp/b.py
-      - name: "C - offscreen app probe after cache prebuild"
-        timeout-minutes: 4
-        continue-on-error: true
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: |
-          python -u -c "import matplotlib.font_manager; print('cache prebuilt', flush=True)"
-          cat > /tmp/c.py << 'PYEOF'
-          import time
-          def m(t): print(f"C {t} t={time.time():.0f}", flush=True)
-          from PySide6 import QtWidgets
-          app = QtWidgets.QApplication([])
-          m("qapp")
-          import VMI_workflow as vw
-          win = vw.MainWindow()
-          m("constructed")
-          win.figure.savefig("/tmp/fig.png", dpi=50)
-          m("savefig-ok")
-          win.show()
-          app.processEvents()
-          m("shown")
-          PYEOF
-          python -u /tmp/c.py
-      - name: "D - xvfb app probe (script file, xcb)"
-        timeout-minutes: 5
-        continue-on-error: true
-        run: |
-          cat > /tmp/d.py << 'PYEOF'
-          import time
-          def m(t): print(f"D {t} t={time.time():.0f}", flush=True)
-          from PySide6 import QtWidgets
-          app = QtWidgets.QApplication([])
-          m("qapp")
-          import VMI_workflow as vw
-          win = vw.MainWindow()
-          m("constructed")
-          win.show()
-          app.processEvents()
-          m("shown")
-          import os, sys, subprocess
-          subprocess.run([sys.executable, "tests/make_sample_data.py"], check=True)
-          S = "tests/sample_data/"
-          win.file_paths["trigger"] = S + "synth_ar100_vmi_DAn.dat"
-          win.file_paths["electron"] = S + "synth_ar100_vmi.lmf_elec_DAn.dat"
-          win.file_paths["ion"] = S + "synth_ar100_vmi.lmf_ion_DAn.dat"
-          win.load_cache()
-          deadline = time.time() + 120
-          while time.time() < deadline:
-              app.processEvents()
-              if win.cache is not None and not getattr(win, "_load_busy", False):
-                  break
-              time.sleep(0.05)
-          m(f"cache-ready={win.cache is not None}")
-          print("XVFB PROBE COMPLETE", flush=True)
-          PYEOF
-          PYTHONPATH=$PWD xvfb-run -a python -u /tmp/d.py
+          pip install -r requirements.txt pyarrow "PySide6==6.11.1"
+          python -c "import PySide6; print('PySide6', PySide6.__version__, flush=True)"
+      - name: Generate deterministic sample data
+        run: python tests/make_sample_data.py
+      - name: Core numerics golden tests
+        run: python -m pytest tests/test_core.py -q
+      - name: Offscreen smoke (pinned PySide6)
+        run: QT_QPA_PLATFORM=offscreen python -u tests/test_smoke.py
+        timeout-minutes: 25
