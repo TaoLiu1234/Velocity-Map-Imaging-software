@@ -65,7 +65,13 @@ jobs:
       # and first figure render; reproducible with the exact locally green
       # dependency pins, so it is environmental, not version drift).
       - name: End-to-end smoke test (xvfb)
-        run: xvfb-run -a python -u tests/test_smoke.py
+        # A big virtual screen is REQUIRED: the app window has a ~1534 px
+        # minimum width and the plot canvas a fixed 2214x705 working size.
+        # xvfb's default 640x480 (like the offscreen platform's 800x600)
+        # cannot host that layout and Qt's geometry negotiation deadlocks
+        # in the first render - the root cause behind every smoke timeout
+        # on this runner.
+        run: xvfb-run -a --server-args="-screen 0 2560x1440x24" python -u tests/test_smoke.py
         timeout-minutes: 30
 
   tests-windows-core:
