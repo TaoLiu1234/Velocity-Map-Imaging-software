@@ -18,6 +18,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgl1 libegl1 libxkbcommon0 libdbus-1-3 libfontconfig1 fonts-dejavu-core xvfb
+          sudo apt-get install -y libxcb-cursor0 libxcb-xinerama0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xkb1
           sudo apt-get install -y libglib2.0-0 || sudo apt-get install -y libglib2.0-0t64
       - name: Install Python dependencies
         run: |
@@ -94,5 +95,20 @@ jobs:
           win.show()
           app.processEvents()
           m("shown")
+          import os, sys, subprocess
+          subprocess.run([sys.executable, "tests/make_sample_data.py"], check=True)
+          S = "tests/sample_data/"
+          win.file_paths["trigger"] = S + "synth_ar100_vmi_DAn.dat"
+          win.file_paths["electron"] = S + "synth_ar100_vmi.lmf_elec_DAn.dat"
+          win.file_paths["ion"] = S + "synth_ar100_vmi.lmf_ion_DAn.dat"
+          win.load_cache()
+          deadline = time.time() + 120
+          while time.time() < deadline:
+              app.processEvents()
+              if win.cache is not None and not getattr(win, "_load_busy", False):
+                  break
+              time.sleep(0.05)
+          m(f"cache-ready={win.cache is not None}")
+          print("XVFB PROBE COMPLETE", flush=True)
           PYEOF
-          xvfb-run -a python -u /tmp/d.py
+          PYTHONPATH=$PWD xvfb-run -a python -u /tmp/d.py
