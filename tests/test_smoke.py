@@ -460,7 +460,13 @@ def _run_workflow(app, MainWindow, session_output_dirname: str, windows: list, w
     win.run_reconstruction_now()
     wait_until(
         app,
-        lambda: (win.rbasex_recon_result is not None) and (not getattr(win, "_recon_busy", False)),
+        # 16q: the completion is two-stage (light collection + deferred
+        # finalize); wait until BOTH finished.
+        lambda: (
+            (win.rbasex_recon_result is not None)
+            and (not getattr(win, "_recon_busy", False))
+            and (not getattr(win, "_recon_finalize_pending", False))
+        ),
         RECON_TIMEOUT_S,
         step,
         "rBasex reconstruction worker",
@@ -1271,7 +1277,10 @@ def check_compare_toggle_blit_invalidation(app, MainWindow, windows: list) -> No
     win.run_reconstruction_now()
     wait_until(
         app,
-        lambda: getattr(win, "rbasex_recon_result", None) is not None and not getattr(win, "_recon_busy", False),
+        # 16q: also wait for the deferred heavy finalize.
+        lambda: getattr(win, "rbasex_recon_result", None) is not None
+        and not getattr(win, "_recon_busy", False)
+        and not getattr(win, "_recon_finalize_pending", False),
         120.0,
         step,
         "rBasex reconstruction",
@@ -1397,7 +1406,10 @@ def check_compare_colorbar_no_overlap(app, MainWindow, windows: list) -> None:
     win.run_reconstruction_now()
     wait_until(
         app,
-        lambda: getattr(win, "rbasex_recon_result", None) is not None and not getattr(win, "_recon_busy", False),
+        # 16q: also wait for the deferred heavy finalize.
+        lambda: getattr(win, "rbasex_recon_result", None) is not None
+        and not getattr(win, "_recon_busy", False)
+        and not getattr(win, "_recon_finalize_pending", False),
         120.0,
         step,
         "rBasex reconstruction",
@@ -1622,7 +1634,10 @@ def check_alt_method_reconstruction(app, MainWindow, windows: list) -> None:
     win.run_reconstruction_now()
     wait_until(
         app,
-        lambda: getattr(win, "rbasex_recon_result", None) is not None and not getattr(win, "_recon_busy", False),
+        # 16q: also wait for the deferred heavy finalize.
+        lambda: getattr(win, "rbasex_recon_result", None) is not None
+        and not getattr(win, "_recon_busy", False)
+        and not getattr(win, "_recon_finalize_pending", False),
         120.0,
         step,
         "Hansen-Law reconstruction",
@@ -1901,6 +1916,210 @@ def check_recon_collect_no_pump(app, MainWindow, windows: list) -> None:
             win._recon_progress_timer.stop()
 
 
+def check_recon_finalize_no_repaint(app, MainWindow, windows: list) -> None:
+    """16q: the whole reconstruction completion must stay repaint-free.
+
+    The final crash layer of the completion freeze: matplotlib's Qt backend
+    implements every ``canvas.blit()`` as a SYNCHRONOUS ``QWidget.repaint()``
+    immediate paint (verified via ``inspect.getsource(FigureCanvasQT.blit)``:
+    it ends in ``self.repaint(l, self.rect().height() - t, w, h)``), and the
+    completion path used to fire several of them from a timer slot — the panel
+    refresh's ``_force_full_canvas_redraw_for_layout_change`` (background
+    recapture + theta-guide/overlay blits) and the
+    ``_update_circle_overlay_only`` / ``_update_ion_overlay_only`` fast paths.
+    On Qt 6.7 a ``repaint()`` landing around a canvas resize aborts the
+    backing store app-wide ("QPainter::begin: Paint device returned
+    engine == 0").
+
+    Locks in: with a counting ``canvas.repaint`` instance patch installed
+    BEFORE the completion (and the 16q geometry guard explicitly off, so the
+    completion must be blit-free by construction, not by suppression), driving
+    the light ``_collect_recon_results`` plus the deferred
+    ``_finalize_recon_collection`` (zero-delay timer, dispatched by
+    processEvents) keeps the repaint count at ZERO across the WHOLE completion,
+    while the result is stored, the combo unlocked, ``_recon_busy`` False and
+    the status/progress bar reach 100%.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    import VMI_workflow_reconstruction as vwr
+
+    step = "recon_finalize_no_repaint"
+    win = _make_binned_window(step, app, MainWindow, windows)
+    idx = win.recon_method_combo.findData("hansenlaw")
+    if idx < 0:
+        raise _fail(step, "hansenlaw missing from the method combo")
+    win.recon_method_combo.setCurrentIndex(idx)
+    app.processEvents()
+
+    real_transform = vwr.abel.Transform
+    state = {"calls": 0}
+
+    def slow_transform(*args, **kwargs):
+        state["calls"] += 1
+        time.sleep(1.5)
+        return real_transform(*args, **kwargs)
+
+    real_repaint = win.canvas.repaint
+    repaints = {"n": 0}
+
+    def counting_repaint(*args, **kwargs):
+        repaints["n"] += 1
+        return real_repaint(*args, **kwargs)
+
+    real_finalize = win._finalize_recon_collection
+    finalize = {"ran": 0}
+
+    def counting_finalize():
+        finalize["ran"] += 1
+        return real_finalize()
+
+    try:
+        vwr.abel.Transform = slow_transform
+        # Install the counting repaint patch BEFORE the completion starts.
+        win.canvas.repaint = counting_repaint
+        win.run_reconstruction_now()
+        app.processEvents()
+        wait_until(app, lambda: state["calls"] >= 1, 15.0, step, "slow Transform invocation")
+        # Stop the poll timer so the automatic completion tick cannot collect;
+        # the worker below finishes during the wait and stays uncollected.
+        win._recon_progress_timer.stop()
+        wait_until(
+            app,
+            lambda: win._recon_worker is not None and getattr(win._recon_worker, "finished", False),
+            30.0,
+            step,
+            "slow transform completion",
+        )
+        if win.rbasex_recon_result is not None:
+            raise _fail(step, "result set before the collection (poll timer not stopped?)")
+        # Wrap the deferred finalize BEFORE collecting: the zero-delay timer
+        # binds the instance attribute at schedule time.
+        win._finalize_recon_collection = counting_finalize
+        # The 16q geometry guard must be OFF here: this check locks the
+        # completion being blit-free BY CONSTRUCTION, not suppressed by the
+        # canvas-geometry window.
+        win._canvas_geometry_changing = False
+        repaints["n"] = 0
+        win._collect_recon_results(win._recon_worker)
+        # The heavy half is deferred to a zero-delay timer: dispatch it.
+        wait_until(app, lambda: finalize["ran"] >= 1, 10.0, step, "deferred _finalize_recon_collection")
+        app.processEvents()
+        if finalize["ran"] != 1:
+            raise _fail(step, f"_finalize_recon_collection ran {finalize['ran']}x, want exactly 1")
+        if repaints["n"] != 0:
+            raise _fail(step, f"completion called canvas.repaint {repaints['n']}x (synchronous blit crash class)")
+        if getattr(win, "_suspend_progress_event_pump_unconditional", False):
+            raise _fail(step, "unconditional pump suspension flag left set after the finalize")
+        if win.rbasex_recon_result is None:
+            raise _fail(step, "rbasex_recon_result missing after the completion")
+        if getattr(win, "_recon_busy", False):
+            raise _fail(step, "_recon_busy must be False after the completion")
+        if not win.recon_method_combo.isEnabled():
+            raise _fail(step, "method combo must unlock after the completion")
+        if win.progress_bar.value() != 100:
+            raise _fail(step, f"progress bar ended at {win.progress_bar.value()}, want 100")
+        status_text = str(win.status_label.text())
+        if "Reconstruction finished" not in status_text:
+            raise _fail(step, f"status did not reach the finished text: {status_text!r}")
+        print("Recon finalize no-repaint OK: zero canvas.repaint calls across collect+finalize, 100% status")
+    finally:
+        win.canvas.repaint = real_repaint
+        win._finalize_recon_collection = real_finalize
+        vwr.abel.Transform = real_transform
+        if getattr(win, "_recon_busy", False):
+            with contextlib_suppress():
+                win.recon_method_combo.setEnabled(True)
+                win._recon_busy = False
+        with contextlib_suppress():
+            win._suspend_progress_event_pump_unconditional = False
+        with contextlib_suppress():
+            win._recon_progress_timer.stop()
+
+
+def check_blit_geometry_change_guard(app, MainWindow, windows: list) -> None:
+    """16q: the canvas-geometry change window suppresses every immediate blit.
+
+    ``_configure_plot_canvas_size`` resizes the canvas (window refit), which
+    can re-create the widget's native paint surface; matplotlib's Qt backend
+    implements every ``canvas.blit()`` as a synchronous ``QWidget.repaint()``
+    that aborts app-wide there ("engine == 0", Qt 6.7). Locks in: with valid
+    blit caches and ``_canvas_geometry_changing`` set, ``_blit_theta_guides``
+    returns False and ``_blit_overlays`` takes its non-blit fallback (zero
+    ``canvas.repaint`` calls, no exception), and ``_draw_axes_immediate`` ends
+    in a SCHEDULED present (``canvas.update``) with zero repaints; with the
+    flag cleared the blit paths work again (``canvas.repaint`` called,
+    ``_blit_theta_guides`` returns True).
+    """
+    step = "blit_geometry_change_guard"
+    win = _make_binned_window(step, app, MainWindow, windows)
+    app.processEvents()
+
+    real_repaint = win.canvas.repaint
+    repaints = {"n": 0}
+
+    def counting_repaint(*args, **kwargs):
+        repaints["n"] += 1
+        return real_repaint(*args, **kwargs)
+
+    real_update = win.canvas.update
+    updates = {"n": 0}
+
+    def counting_update(*args, **kwargs):
+        updates["n"] += 1
+        return real_update(*args, **kwargs)
+
+    try:
+        win.canvas.repaint = counting_repaint
+        win.canvas.update = counting_update
+
+        # Valid caches at the current geometry (the fixture plots the panels).
+        win._capture_scatter_blit_backgrounds(electron=True, ion=True)
+        win._capture_theta_line_blit_background()
+        if win.bg_theta_centered is None or not win._blit_bg_size_matches("theta_centered"):
+            raise _fail(step, "theta background was not captured at the current canvas size")
+        if win.bg_scatter_e is None or win.bg_scatter_i is None:
+            raise _fail(step, "scatter backgrounds were not captured at the current canvas size")
+
+        # Flag set: every immediate-paint path must take its non-blit fallback.
+        win._canvas_geometry_changing = True
+        repaints["n"] = 0
+        updates["n"] = 0
+        try:
+            if win._blit_theta_guides("centered"):
+                raise _fail(step, "theta guide blit ran while _canvas_geometry_changing was set")
+            win._blit_overlays()  # must fall back to draw_idle, not raise
+            if repaints["n"] != 0:
+                raise _fail(step, "canvas.repaint called while _canvas_geometry_changing was set")
+            updates["n"] = 0
+            win._draw_axes_immediate([win.ax_scatter_e], include_tight=False)
+            if repaints["n"] != 0:
+                raise _fail(step, "_draw_axes_immediate blitted while _canvas_geometry_changing was set")
+            if updates["n"] == 0:
+                raise _fail(step, "_draw_axes_immediate did not end in a scheduled present while the flag was set")
+        finally:
+            win._canvas_geometry_changing = False
+
+        # Flag cleared: the blit paths work again (repaint called / True).
+        win._capture_scatter_blit_backgrounds(electron=True, ion=True)
+        win._capture_theta_line_blit_background()
+        repaints["n"] = 0
+        if not win._blit_theta_guides("centered"):
+            raise _fail(step, "theta guide blit did not resume after the geometry window closed")
+        if repaints["n"] == 0:
+            raise _fail(step, "theta guide blit did not reach canvas.repaint after the window closed")
+        win._blit_overlays()
+        if repaints["n"] == 0:
+            raise _fail(step, "overlay blit did not reach canvas.repaint after the window closed")
+        print("Blit geometry-change guard OK: non-blit fallbacks while resizing, blits resume after")
+    finally:
+        win.canvas.repaint = real_repaint
+        win.canvas.update = real_update
+        win._canvas_geometry_changing = False
+        with contextlib_suppress():
+            win._invalidate_blit_background()
+
+
 def contextlib_suppress():
     import contextlib
 
@@ -1923,6 +2142,8 @@ def run_regression_checks(app, MainWindow, windows: list) -> None:
     check_alt_method_reconstruction(app, MainWindow, windows)
     check_recon_busy_popup_safety(app, MainWindow, windows)
     check_recon_collect_no_pump(app, MainWindow, windows)
+    check_recon_finalize_no_repaint(app, MainWindow, windows)
+    check_blit_geometry_change_guard(app, MainWindow, windows)
 
 
 def main(argv: list[str] | None = None) -> int:

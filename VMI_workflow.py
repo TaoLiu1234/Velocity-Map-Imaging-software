@@ -898,6 +898,10 @@ class MainWindow(QMainWindow):
         self._recon_progress_timer.setInterval(120)
         self._recon_progress_timer.timeout.connect(self._poll_recon_progress)
         self._recon_busy = False
+        # 16q: True between the light collection and the deferred heavy
+        # finalize (async-completion contract: the run is fully finished only
+        # when both are done).
+        self._recon_finalize_pending = False
         self._circle_progress_timer = QTimer(self)
         self._circle_progress_timer.setInterval(120)
         self._circle_progress_timer.timeout.connect(self._poll_circle_progress)
@@ -932,6 +936,13 @@ class MainWindow(QMainWindow):
         # 16p: unconditional (all platforms) progress-pump suspension, set for
         # the whole _collect_recon_results slot (see _pump_progress_events_if_safe).
         self._suspend_progress_event_pump_unconditional = False
+        # 16q: True for a short window after every canvas resize, during which
+        # all immediate-paint (blit) fast paths must take their non-blit
+        # fallback — matplotlib's Qt backend implements canvas.blit() as a
+        # synchronous QWidget.repaint(), which crashes ("engine == 0") when it
+        # lands while the native paint surface is being re-created. See
+        # _configure_plot_canvas_size and _clear_canvas_geometry_changing.
+        self._canvas_geometry_changing = False
         self.operation_log: list[dict[str, str]] = []
         self._subplot_action_markers: dict[str, dict[str, object]] = {}
         self._axis_last_blit_extents: dict[int, tuple[float, float, float, float]] = {}
@@ -3532,6 +3543,11 @@ class MainWindow(QMainWindow):
 
     def _present_ion_tof_fit_preview_from_background(self) -> bool:
         """Present the coincidence preview from cached background without a full redraw."""
+        if bool(getattr(self, "_canvas_geometry_changing", False)):
+            # 16q: canvas just resized — no synchronous repaint blits; the
+            # caller falls back to _draw_axes_preview, whose terminal path is
+            # a full draw + scheduled present while the flag is set.
+            return False
         ax = getattr(self, "ax_ion_tof_xy", None)
         if ax is None or self.bg_ion_tof_xy_preview is None:
             return False
@@ -4760,7 +4776,23 @@ class MainWindow(QMainWindow):
 
         self.canvas.resize(preferred_w, preferred_h)
         self.canvas.setMinimumSize(max(min_w, 1), max(min_h, 1))
+        # 16q: the resize above can re-create the widget's native paint
+        # surface. For a short settling window every immediate-paint (blit)
+        # fast path must take its non-blit fallback: matplotlib's Qt backend
+        # implements canvas.blit() as a SYNCHRONOUS self.repaint(...) — a
+        # QWidget::repaint outside the paint cycle, which aborts app-wide
+        # ("QPainter::begin: Paint device returned engine == 0") when it lands
+        # right around the native-surface re-creation on Qt 6.7. 80 ms clears
+        # after matplotlib's own resize handling (30 ms debounce) and the
+        # backing-store re-creation; callers fall back to whole-axes/full
+        # redraws, so at most one frame degrades.
+        self._canvas_geometry_changing = True
+        QTimer.singleShot(80, self._clear_canvas_geometry_changing)
         self._sync_plot_canvas_host_size()
+
+    def _clear_canvas_geometry_changing(self) -> None:
+        """16q: close the canvas-geometry change window (blit paths resume)."""
+        self._canvas_geometry_changing = False
 
     def resizeEvent(self, event):  # noqa: N802 (Qt override)
         """Debounced canvas re-fit so window resizes keep the dashboard fully visible.
@@ -9103,6 +9135,10 @@ class MainWindow(QMainWindow):
 
     def _present_scatter_overlay_blit(self, axis_key: str) -> bool:
         """Blit-present one scatter overlay family from its clean cached background."""
+        if bool(getattr(self, "_canvas_geometry_changing", False)):
+            # 16q: canvas just resized — no synchronous repaint blits; the
+            # callers fall back to a whole-axes redraw (scheduled present).
+            return False
         if axis_key in getattr(self, "_overlay_blit_downgraded", set()):
             return False
         sessions = getattr(self, "_overlay_blit_sessions", {})
@@ -9230,6 +9266,10 @@ class MainWindow(QMainWindow):
 
     def _present_ion_rotation_blit(self) -> bool:
         """Blit-present the rotated direction line plus preview title suffix."""
+        if bool(getattr(self, "_canvas_geometry_changing", False)):
+            # 16q: canvas just resized — no synchronous repaint blits; the
+            # drag frame falls back to a whole-axes redraw (scheduled present).
+            return False
         if "rotation" in getattr(self, "_overlay_blit_downgraded", set()):
             return False
         if not self.dragging_ion_rotation:
@@ -9273,6 +9313,10 @@ class MainWindow(QMainWindow):
 
     def _present_rbasex_range_blit(self, ax) -> bool:
         """Blit-present the rBasex radial-profile range span + stats text."""
+        if bool(getattr(self, "_canvas_geometry_changing", False)):
+            # 16q: canvas just resized — no synchronous repaint blits; the
+            # drag frame falls back to a whole-axes redraw (scheduled present).
+            return False
         if "rbasex_range" in getattr(self, "_overlay_blit_downgraded", set()):
             return False
         if not getattr(self, "dragging_rbasex_profile_range", False):
@@ -9631,6 +9675,12 @@ class MainWindow(QMainWindow):
 
     def _blit_theta_guides(self, source: str) -> bool:
         """Blit theta guide lines on one image axis using cached background."""
+        if bool(getattr(self, "_canvas_geometry_changing", False)):
+            # 16q: the canvas was just resized and its native paint surface may
+            # be mid-re-creation; canvas.blit() is a synchronous repaint there.
+            # Take the non-blit fallback (callers fall back to whole-axes/full
+            # redraw; the theta drag path recaptures and retries).
+            return False
         if source == "centered":
             ax = self.ax_centered_bin
             bg = self.bg_theta_centered
@@ -10501,25 +10551,53 @@ class MainWindow(QMainWindow):
             if len(self.operation_log) > 5000:
                 self.operation_log = self.operation_log[-5000:]
 
+    def _full_redraw_scheduled(self) -> None:
+        """Repaint-free full-canvas redraw tail (16q).
+
+        Pure Agg ``canvas.draw()`` (with the overlay draw-event sync suspended,
+        so the draw-event hook cannot re-enter blits) + blit-cache
+        invalidation + a SCHEDULED Qt present (``canvas.update()``). Contains
+        no ``canvas.blit()``: matplotlib's Qt backend implements every blit as
+        ``self.repaint(l, t, w, h)`` — a synchronous immediate paint outside
+        the normal paint cycle that aborts the backing store ("engine == 0" /
+        "Painter not active") when it lands while the canvas native surface is
+        being resized (Qt 6.7). The invalidated caches recapture lazily at the
+        next drag press (16f/16i), so the visuals are identical one frame
+        later.
+        """
+        self._draw_canvas_without_overlay_draw_event_sync()
+        self._axis_last_blit_extents = {}
+        self._invalidate_blit_background()
+        self._present_canvas_now(request_idle_draw=False)
+
     def _force_full_canvas_redraw_for_layout_change(
         self,
         *,
         refresh_circle_overlay: bool = True,
         refresh_ion_overlay: bool = True,
     ) -> None:
-        """Force a clean full redraw and refresh blit caches after layout-sensitive changes."""
+        """Force a clean full redraw after layout-sensitive changes.
+
+        16q: this is now repaint-free (see ``_full_redraw_scheduled``). The
+        old internals captured blit backgrounds and re-presented the overlays
+        with immediate ``canvas.blit()`` calls (synchronous ``repaint()``
+        paints); every caller tolerates losing those immediate blits because
+        the scheduled full redraw renders the identical frame and the caches
+        recapture lazily. The overlay ARTISTS are still recreated here (from
+        current parameters, without any immediate paint) so callers that
+        changed circle/ion parameters or cleared panels keep exact visuals;
+        ``present=False`` turns ``_update_*_overlay_only`` into that
+        artist-only mode.
+        """
         if bool(getattr(self, "_plot_scroll_preview_active", False)):
             self._end_plot_scroll_burst()
         safe_ion_overlay = bool(refresh_ion_overlay and self._prepare_ion_overlay_for_safe_redraw())
-        self._draw_canvas_without_overlay_draw_event_sync()
-        self._axis_last_blit_extents = {}
-        self._capture_blit_background_from_current_canvas()
         if self._has_pairs():
             if refresh_circle_overlay:
-                self._update_circle_overlay_only()
+                self._update_circle_overlay_only(present=False)
             if refresh_ion_overlay and not safe_ion_overlay:
-                self._update_ion_overlay_only()
-        self._present_canvas_now(request_idle_draw=False)
+                self._update_ion_overlay_only(present=False)
+        self._full_redraw_scheduled()
 
     def _present_canvas_now(self, *, request_idle_draw: bool) -> None:
         """Schedule a safe canvas present without forcing re-entrant Qt painting.
@@ -10559,6 +10637,18 @@ class MainWindow(QMainWindow):
             seen.add(ax_id)
             unique_axes.append(ax)
         if not unique_axes:
+            return
+
+        if bool(getattr(self, "_canvas_geometry_changing", False)):
+            # 16q: the canvas was just resized and its native paint surface may
+            # be mid-re-creation; the per-axes canvas.blit() below is a
+            # synchronous repaint there. Take the terminal non-blit fallback:
+            # a full Agg draw + SCHEDULED present (canvas.update()), never
+            # another blit. At most one frame degrades to a full redraw.
+            self.canvas.draw()
+            self._axis_last_blit_extents = {}
+            self._mark_plot_scroll_preview_cache_dirty(refresh_soon=True)
+            self._present_canvas_now(request_idle_draw=False)
             return
 
         if force_full:
@@ -10645,7 +10735,13 @@ class MainWindow(QMainWindow):
         self._present_canvas_now(request_idle_draw=bool(include_tight))
 
     def _draw_axes_preview(self, axes: list | tuple) -> None:
-        """Redraw lightweight preview artists via the local blit path (60 fps)."""
+        """Redraw lightweight preview artists via the local blit path (60 fps).
+
+        16q: the blit branch inside ``_draw_axes_immediate`` is suppressed while
+        ``_canvas_geometry_changing`` is set (terminal fallback: full draw +
+        scheduled present), so this preview path can never reach
+        ``canvas.blit()`` during a canvas-geometry change either.
+        """
         self._draw_axes_immediate(axes, include_tight=False, force_full=False)
 
     def _progress_start(self, text: str, determinate: bool = True) -> None:
@@ -19587,15 +19683,21 @@ class MainWindow(QMainWindow):
         self._progress_update(pct, f"{message} ({elapsed_s:.0f} s)")
 
     def _collect_recon_results(self, worker: _ReconWorker) -> None:
-        """Apply finished worker results on the main thread and tear down."""
-        # 16p: THIS SLOT is exactly the re-entrancy window — it clears
-        # _recon_busy at the top (deliberately: the combo unlock, thread
-        # teardown and status paths below all rely on it being False), so the
-        # 16o busy guard no longer covers the two _progress_update pumps (90% /
-        # 100%) that sit around the full-canvas panel refresh. Suspend the
-        # progress pump unconditionally for the whole slot and restore it in a
-        # finally, so no step can re-enter the event loop into a half-finished
-        # render (the "QPainter: Painter not active" freeze on Qt 6.7).
+        """Apply finished worker results on the main thread and tear down.
+
+        16q: this slot is now deliberately LIGHT. The heavy part (panel
+        re-plot + full-canvas redraw) moved into ``_finalize_recon_collection``,
+        scheduled here with a zero-delay timer so it runs from a clean
+        event-loop turn instead of inside the poll slot. Rationale: the heavy
+        half used to end in ``_force_full_canvas_redraw_for_layout_change``,
+        whose immediate blits are synchronous ``QWidget.repaint()`` paints
+        under matplotlib's Qt backend (see ``_full_redraw_scheduled``) — the
+        final crash layer of the Qt 6.7 completion freeze.
+        """
+        # 16p: keep the unconditional pump suspension around what remains of
+        # the slot (the 90% progress pump below; the poll timer stop and
+        # thread teardown do not pump). It restores in the finally, exactly as
+        # before.
         previous_suspend_pump = bool(getattr(self, "_suspend_progress_event_pump_unconditional", False))
         self._suspend_progress_event_pump_unconditional = True
         try:
@@ -19625,21 +19727,56 @@ class MainWindow(QMainWindow):
                 return
             result = worker.result
             if result is None:
+                self._set_status("Reconstruction finished without a result.")
                 return
             self.rbasex_recon_result = result
-            # 16i: the recon panel image is replaced — the cached theta-guide
-            # background for that panel shows the previous content.
-            self._invalidate_theta_blit_backgrounds()
             self._progress_update(90, "Refreshing reconstruction panels...")
+            # 16q: defer the heavy refresh to the next event-loop turn. The
+            # completion path below contains ZERO canvas.blit() calls.
+            self._recon_finalize_pending = True
+            QTimer.singleShot(0, self._finalize_recon_collection)
+        finally:
+            self._suspend_progress_event_pump_unconditional = previous_suspend_pump
+
+    def _finalize_recon_collection(self) -> None:
+        """16q: deferred heavy half of the reconstruction completion.
+
+        Runs from a clean event-loop turn (scheduled by the light
+        ``_collect_recon_results``). Repaint discipline for the whole
+        completion (collect -> finalize): ZERO ``canvas.blit()`` calls —
+        matplotlib's Qt backend implements every blit as a synchronous
+        ``QWidget.repaint()`` immediate paint, which aborts the backing store
+        on Qt 6.7 when it lands around a canvas resize. The panel re-plot
+        ends in the repaint-free ``_force_full_canvas_redraw_for_layout_change``
+        (pure Agg draw + cache invalidation + scheduled present), and the tail
+        below adds no immediate capture either: the blit backgrounds stay
+        invalidated and recapture lazily at the next drag press (16f/16i).
+        """
+        # 16p: same pump suspension discipline as the collection slot — the
+        # 90%/100% progress pumps inside this deferred turn must not
+        # re-enter the event loop either.
+        previous_suspend_pump = bool(getattr(self, "_suspend_progress_event_pump_unconditional", False))
+        self._suspend_progress_event_pump_unconditional = True
+        try:
+            # 16i/16q: the recon panel image is replaced — the cached
+            # theta-guide AND scatter/rotation/range blit backgrounds show the
+            # previous content. Invalidate only; no immediate recapture here
+            # (the caches lazily recapture at the next drag press).
+            self._invalidate_theta_blit_backgrounds()
+            self._invalidate_blit_background()
             self._refresh_reconstruction_panels_only()
             self._reset_toolbar_navigation_history()
             self._progress_update(100, "Reconstruction finished.")
             rb_n = len(self.rbasex_recon_result.get("peaks", [])) if self.rbasex_recon_result else 0
-            # 16n: label from the RESULT (the combo was locked during the run, but
-            # read the result anyway so legacy/edge paths cannot mislabel).
-            method_label = abel_method_label(worker.result.get("method"))
+            # 16n: label from the RESULT dict stored by the light collection
+            # (the combo was locked during the run, so this is the producing
+            # method; legacy/edge paths cannot mislabel it).
+            method_label = ""
+            if isinstance(self.rbasex_recon_result, dict):
+                method_label = abel_method_label(self.rbasex_recon_result.get("method"))
             self._set_status(f"Reconstruction finished: {method_label} peaks={rb_n}.")
         finally:
+            self._recon_finalize_pending = False
             self._suspend_progress_event_pump_unconditional = previous_suspend_pump
 
     # ------------------------------------------------------------------
@@ -20817,6 +20954,12 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _blit_overlays(self) -> None:
         """Redraw only overlay artists (ring/rectangle) using cached backgrounds."""
+        if bool(getattr(self, "_canvas_geometry_changing", False)):
+            # 16q: canvas just resized — no synchronous repaint blits; drop the
+            # caches and take the same non-blit fallback as a stale background.
+            self._invalidate_blit_background()
+            self.canvas.draw_idle()
+            return
         if bool(getattr(self, "_plot_scroll_preview_active", False)):
             self._end_plot_scroll_burst()
         if (
@@ -20861,10 +21004,25 @@ class MainWindow(QMainWindow):
             self._invalidate_blit_background()
             self.canvas.draw_idle()
 
-    def _update_circle_overlay_only(self, *, enforce_axis: bool = True, fast_drag: bool = False) -> None:
-        """Update only electron ring overlay without recomputing data plots."""
+    def _update_circle_overlay_only(
+        self,
+        *,
+        enforce_axis: bool = True,
+        fast_drag: bool = False,
+        present: bool = True,
+    ) -> None:
+        """Update only electron ring overlay without recomputing data plots.
+
+        16q: ``present=False`` (used by the repaint-free
+        ``_force_full_canvas_redraw_for_layout_change``) stops after the
+        artist updates; the caller renders them with a scheduled full redraw
+        instead of an immediate blit/repaint.
+        """
         if self.ax_scatter_e is None:
             return
+        if not present:
+            # Artist-update-only mode: never take an immediate-paint path.
+            fast_drag = False
         safe_mode = self._use_safe_circle_overlay_redraw()
         if self._electron_scatter_polar_mode_enabled():
             self.preview_circle_center = None
@@ -20889,6 +21047,8 @@ class MainWindow(QMainWindow):
                 self._draw_axes_immediate([self.ax_scatter_e], include_tight=False)
                 return
             self._end_scatter_overlay_blit_sessions()
+            if not present:
+                return
             if safe_mode:
                 self._draw_canvas_without_overlay_draw_event_sync()
                 with contextlib.suppress(Exception):
@@ -20920,6 +21080,8 @@ class MainWindow(QMainWindow):
             self._draw_axes_immediate([self.ax_scatter_e], include_tight=False)
             return
         self._end_scatter_overlay_blit_sessions()
+        if not present:
+            return
         if safe_mode:
             # Stable path (typing / post-refresh): redraw this axes only via the
             # local primitive (full-canvas fallback inside); backgrounds are
@@ -20933,10 +21095,25 @@ class MainWindow(QMainWindow):
             return
         self._blit_overlays()
 
-    def _update_ion_overlay_only(self, *, enforce_axis: bool = True, fast_drag: bool = False) -> None:
-        """Update only ion filter overlay without recomputing data plots."""
+    def _update_ion_overlay_only(
+        self,
+        *,
+        enforce_axis: bool = True,
+        fast_drag: bool = False,
+        present: bool = True,
+    ) -> None:
+        """Update only ion filter overlay without recomputing data plots.
+
+        16q: ``present=False`` (used by the repaint-free
+        ``_force_full_canvas_redraw_for_layout_change``) stops after the
+        artist updates; the caller renders them with a scheduled full redraw
+        instead of an immediate blit/repaint.
+        """
         if self.ax_scatter_i is None:
             return
+        if not present:
+            # Artist-update-only mode: never take an immediate-paint path.
+            fast_drag = False
         if enforce_axis and (not fast_drag):
             self._enforce_square_axis(self.ax_scatter_i)
             with contextlib.suppress(Exception):
@@ -20949,6 +21126,8 @@ class MainWindow(QMainWindow):
             self._draw_axes_immediate([self.ax_scatter_i], include_tight=False)
             return
         self._end_scatter_overlay_blit_sessions()
+        if not present:
+            return
         if self._use_safe_ion_overlay_redraw():
             # Stable path (typing / post-refresh): see the electron twin above.
             self._draw_axes_immediate([self.ax_scatter_i], include_tight=True)
@@ -23430,6 +23609,7 @@ class MainWindow(QMainWindow):
         self._add_subplot_save_markers()
         # Reconstruction updates can change subplot footprints and colorbar
         # occupancy; a partial blit leaves stale placeholder pixels behind.
+        # 16q: the redraw tail below is repaint-free (no canvas.blit()).
         self._force_full_canvas_redraw_for_layout_change()
 
     def _add_scatter_plotted_count_texts(

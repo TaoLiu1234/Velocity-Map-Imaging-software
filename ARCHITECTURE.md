@@ -1000,3 +1000,136 @@ and `_suspend_progress_event_pump_unconditional` must be restored False
 afterwards (plus the collection results in `rbasex_recon_result` set and the
 method combo unlocked). On the unfixed code this fails with `collection pumped
 the event loop 2x`. All suites green in both envs; goldens byte-unchanged.
+
+### 16q. Synchronous blit repaint vs canvas resize (final crash layer) (2026-09-01)
+
+> User report (after the 16p fix): during reconstruction the app still
+> froze/crashed at the "Refreshing reconstruction panels..." (90%) stage, and
+> stderr now showed `QPainter::begin: Paint device returned engine == 0,
+> type: 1` / `QPainter::fillRect: Painter not active` /
+> `QPainter::end: Painter not active, aborted`.
+
+Root cause (verified, not re-derived): matplotlib's Qt backend implements
+`FigureCanvasQT.blit()` as a SYNCHRONOUS immediate Qt paint. `inspect.getsource`
+of `matplotlib.backends.backend_qt.FigureCanvasQT.blit` (identical in both
+envs: matplotlib 3.10.8 in the user env, 3.10.7 in the dev env) ends with
+
+```python
+l, b, w, h = (int(pt / self.device_pixel_ratio) for pt in bbox.bounds)
+t = b + h
+self.repaint(l, self.rect().height() - t, w, h)
+```
+
+`QWidget::repaint()` paints OUTSIDE the normal paint cycle, and on Qt 6.7.3 it
+aborts app-wide ("Paint device returned engine == 0" → "Painter not active" →
+backing-store aborted → freeze → `Qt6Widgets.dll` AV, the 16o offset family)
+when the widget's native paint surface is not available at that instant. The
+app's 250 ms `_canvas_refit_timer` (16j-3) resizes `self.canvas` on window
+resizes; a `repaint()` arriving right around a `canvas.resize()` /
+native-surface re-creation hits exactly that window. The completion path fired
+several such synchronous repaints from a timer slot: the panel refresh's
+`_force_full_canvas_redraw_for_layout_change` (background recapture +
+`_blit_theta_guides`, plus `_update_circle_overlay_only` /
+`_update_ion_overlay_only` → `_blit_overlays`) and the
+`_draw_axes_immediate`-based fast paths all end in `canvas.blit(...)`.
+
+Fix part 1 — completion path with ZERO immediate paints. `_collect_recon_results`
+is now LIGHT: stop the poll timer, clear `_recon_busy`, unlock the method
+combo, tear the thread down, store `self.rbasex_recon_result = result`, set the
+90% "Refreshing reconstruction panels..." status, then schedule the heavy part
+with `QTimer.singleShot(0, self._finalize_recon_collection)`. The early-return
+branches (`worker.error` / `worker.result is None`) set a status and skip the
+scheduling. The 16p unconditional pump suspension REMAINS around the light slot
+(the 90% pump still sits inside it). The new `_finalize_recon_collection` runs
+from a clean event-loop turn: invalidate the theta-guide caches
+(`_invalidate_theta_blit_backgrounds`) and the scatter/rotation/range caches
+(`_invalidate_blit_background`) — they lazily recapture at the next drag press
+(16f/16i), so NO immediate capture happens here — then
+`_refresh_reconstruction_panels_only()` (panel re-plot; its
+`_force_full_canvas_redraw_for_layout_change` tail is now repaint-free, see
+below), `_reset_toolbar_navigation_history()`, and the final 100% status. The
+async-completion contract is explicit via a new `_recon_finalize_pending` flag
+(set when the finalize is scheduled, cleared in its `finally`): the run is
+fully finished only when BOTH stages are done. A new helper
+`_full_redraw_scheduled()` implements the repaint-free redraw tail (pure Agg
+`_draw_canvas_without_overlay_draw_event_sync()` — the draw-event hook is
+suspended, so it cannot re-enter blits — plus `_axis_last_blit_extents`/
+`_invalidate_blit_background()` cache invalidation plus a SCHEDULED present
+via `_present_canvas_now` = `canvas.update()`).
+`_force_full_canvas_redraw_for_layout_change` keeps its signature but now
+delegates to it; the audit of its other callers (`_refresh_after_circle_clear`,
+`_on_electron_scatter_polar_toggled` (already deferred via singleShot),
+`_refresh_rbasex_profile_display_settings`,
+`_on_radial_profile_mode_changed`, both ion-histogram toggles,
+`_refresh_after_ion_position_transform_change`) showed every one tolerates
+losing the immediate blits (identical visuals one frame later), so no caller
+kept the immediate form. The overlay ARTISTS are still recreated by those
+callers' flags: `_update_circle_overlay_only` / `_update_ion_overlay_only`
+gained a keyword-only `present=True` argument, and `present=False` stops after
+the artist updates (parameters, cleared panels) so the scheduled full redraw
+renders them — no caller behavior change otherwise.
+
+Fix part 2 — canvas-geometry ↔ blit mutual exclusion (kills the crash class
+app-wide, for every drag/interaction path too). After
+`self.canvas.resize(...)` in `_configure_plot_canvas_size`, the app sets
+`_canvas_geometry_changing = True` and clears it via
+`QTimer.singleShot(80, ...)` (after matplotlib's own 30 ms resize debounce and
+the native-surface re-creation settle). EVERY immediate-paint fast path checks
+the flag FIRST and takes its non-blit fallback instead — `_blit_theta_guides`,
+`_blit_overlays`, `_present_scatter_overlay_blit`, `_present_ion_rotation_blit`,
+`_present_rbasex_range_blit`, `_present_ion_tof_fit_preview_from_background`,
+and `_draw_axes_immediate`'s per-axes blit branch (therefore also
+`_draw_axes_preview`, which delegates). End-to-end fallback-chain audit: with
+the flag set, `_blit_theta_guides` returns False (its callers either ignore
+the return, or — the theta drag `_preview_theta_line_only` — recapture once,
+retry, and end in `canvas.draw_idle()`); `_blit_overlays` drops the caches and
+uses `canvas.draw_idle()`; every `_present_*` returns False so the drag frame
+falls back to `_draw_axes_immediate([ax])`, whose 16q branch (and every other
+early-exit/exception branch inside it) terminates in a full `canvas.draw()` +
+`_present_canvas_now` scheduled present — never another blit. There are
+exactly seven `canvas.blit(` sites in the app (seven functions, counting the
+two blits in `_blit_overlays`); each is now behind the flag check, so no path
+can reach `canvas.blit()` while `_canvas_geometry_changing` is set. The
+capture helpers are intentionally NOT guarded: `copy_from_bbox` snapshots the
+Agg buffer (independent of the widget surface) and matplotlib resizes that
+buffer within its own resize handling inside the 80 ms window.
+
+Reproduction matrix (`_repro_final.py`, scratch driver, deleted after the run;
+user env PySide6 6.7.2 / Qt 6.7.3, ON-SCREEN, real event loop, tray OPEN,
+Hansen-Law with a 4 s-sleeping `abel.Transform`, TWO recon cycles per cell,
+each cycle with a `canvas.resize()` fired mid-busy plus the debounced
+`_configure_plot_canvas_size(fit_to_viewport=True)` refit right after;
+plain-thread heartbeat + Qt tick observers; auto-quit at 30 s; sequential
+cells, ~30 s each):
+
+| Cell | Result |
+|---|---|
+| user env (Qt 6.7), on-screen, UNFIXED (fix stashed via `git stash push`) | **fail**: cycle-1 collect began (worker finished, `error=''`, 90% stage) and `_collect_recon_results` NEVER returned; Qt ticks stopped (event loop frozen) while the heartbeat thread continued ~2 s; then the whole process died with a native access violation (shell-reported segfault, exit 139). Reproduced TWICE (also with a plain rbasex completion, before the slow-Transform patch). No `engine == 0` / "Painter not active" stderr lines (Qt dies before flushing them — the harder manifestation, as in 16p) and no WER Id=1000 record for this process |
+| user env (Qt 6.7), on-screen, FIXED (`git stash pop`, guard verified present) | **pass**: both cycles complete — light collect returns at the 90% status, the deferred finalize renders in ~0.7 s, both mid-busy resizes + refits handled, loop alive throughout (58 ticks), clean auto-quit, exit 0, stderr clean |
+
+(The two `python312.dll` Id=1000 records from `C:\App\MiniConda\python.exe`
+shortly before the cells are the dev-interpreter crash class already noted as
+a separate, unrelated event in 16o — different process, different module; no
+new Qt6Widgets.dll record appeared during any cell.)
+
+Regression coverage (offscreen; locks the invariants, since the crash itself
+is screen-only): `check_recon_finalize_no_repaint` drives a slow-Transform
+reconstruction, patches `win.canvas.repaint` with a counting instance
+wrapper BEFORE the completion (and forces `_canvas_geometry_changing = False`,
+so the completion must be blit-free by construction rather than suppressed by
+the geometry guard), then drives `_collect_recon_results` +
+`processEvents` until the deferred `_finalize_recon_collection` ran and
+asserts ZERO `canvas.repaint` calls across the WHOLE completion, the result
+stored, the combo unlocked, `_recon_busy` False, the pump-suspension flag
+restored and the 100% "Reconstruction finished" status.
+`check_blit_geometry_change_guard` sets `win._canvas_geometry_changing = True`
+with valid caches and asserts `_blit_theta_guides("centered")` returns False,
+`_blit_overlays()` takes its fallback, and `_draw_axes_immediate` ends in a
+scheduled present (`canvas.update()` counted) with zero repaint calls; clearing
+the flag restores the blit paths (repaint called, `_blit_theta_guides` True).
+All suites green in BOTH envs; goldens byte-unchanged.
+
+Note: the 16p unconditional pump suspension for the collection/finalize slots
+is deliberately kept (the 90%/100% `_progress_update` pumps still sit inside
+them); 16q removes the synchronous-immediate-paint class itself, which 16p
+could not cover.

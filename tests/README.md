@@ -164,6 +164,24 @@ baseline.
    section 16p) with an unconditional pump suspension for the whole
    collection slot; locked by `check_recon_collect_no_pump` (zero
    `QApplication.processEvents` calls during the completion, flag restored).
+5. **FIXED (2026-09-01): synchronous blit repaint vs canvas resize — final
+   crash layer ("Paint device returned engine == 0").** matplotlib's Qt
+   backend implements every `canvas.blit()` as a synchronous
+   `QWidget.repaint()` immediate paint (verified via `inspect`), and the
+   recon completion path fired several from a timer slot; a repaint landing
+   around a canvas resize / native-surface re-creation (the 16j-3 refit
+   timer) aborts the backing store on Qt 6.7 and AV-crashes the process.
+   Fixed in the app (ARCHITECTURE.md section 16q) by restructuring the
+   completion into a light `_collect_recon_results` + deferred
+   `_finalize_recon_collection` with a repaint-free redraw tail (zero
+   `canvas.blit` calls), and by a `_canvas_geometry_changing` window (80 ms
+   after every canvas resize) that forces every immediate-paint fast path
+   onto its non-blit fallback. Locked by `check_recon_finalize_no_repaint`
+   (zero `canvas.repaint` calls across the whole completion) and
+   `check_blit_geometry_change_guard` (fallbacks while the flag is set, blits
+   resume after). Note the async completion is two-stage: drive it with
+   `win.rbasex_recon_result is not None and not win._recon_busy and not
+   win._recon_finalize_pending`.
 
 ## Notes for later agents: driving the app offscreen
 
@@ -187,7 +205,10 @@ baseline.
   win._load_busy`; center -> `not win._center_busy and win._center_worker_thread
   is None`; circle -> `win.centered_hist_data is not None and not
   win._circle_busy`; recon -> `win.rbasex_recon_result is not None and not
-  win._recon_busy`. Call the public method first (e.g. `win.load_cache()`);
+  win._recon_busy and not win._recon_finalize_pending` (16q: the completion is
+  two-stage — a light collection plus a deferred heavy finalize scheduled with
+  a zero-delay `QTimer.singleShot`; the panel refresh only happens in the
+  finalize). Call the public method first (e.g. `win.load_cache()`);
   the busy flag is set synchronously before it returns.
 
 - **Modal dialogs.** Patch `QMessageBox.warning` / `QMessageBox.critical`
