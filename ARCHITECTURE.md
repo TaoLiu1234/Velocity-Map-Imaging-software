@@ -1229,3 +1229,53 @@ degree=1 plumbing the same way; (e) session save/restore roundtrip of
 `method_params` into a fresh window's widgets plus the tolerant merge
 (partial keys fall back to defaults; legacy-shaped metadata is a no-op).
 All suites green in BOTH envs; goldens byte-unchanged.
+
+### 16s. Physical-unit axis labels + screenshot refresh (2026-09-01)
+
+> User request: the radial-profile panels must name their axis units, and
+> every published screenshot predates the "rBasex Recovered Profile" title
+> (16j-1), the Fusion theme (16k) and the settings-tab reorganization
+> (16j-2/16r) and had to be regenerated from the current build.
+
+**Axis labels.** The radial-profile x axes now name their physical unit.
+The theta-slice Radial Profile of the centered map
+(`_plot_theta_radial_profile_panel`) labels x as `r (px)` (was bare `r`);
+the profile x values are the binned-pixel radius of the centered map.
+The rBasex Recovered Profile label factory `_rbasex_profile_x_axis_label`
+returned the misleading `Radial Position (mm)` for the raw-radius mode
+(`mode="r"`), although `_rbasex_profile_radius_to_display_x` passes pixel
+radii through unchanged in that mode — it now returns `r (px)`. The
+`ke`/`be` modes already carried units (`Kinetic Energy (eV)` /
+`Binding Energy (eV)`) and are unchanged; `both` delegates to the primary
+energy mode. For consistency the raw-mode naming was fixed wherever it
+surfaced: the X-axis mode combo item (`Radial Position (mm)` ->
+`Radial Position (px)`), the hard-coded mode status string, and the
+`rbasex_profile_last_axis_label` reset defaults (used by the range-integration
+status text/overlay, previously `r`/`Radial Position (mm)`). The reconstruction
+image panel (`_plot_reconstruction_panel`), the Centered Bin Map
+(`_plot_centered_bin_image`) and the exported reconstruction PNG
+(`_save_reconstruction_image`) label their axes `x centered (px)` /
+`y centered (px)` (was `x centered` / `y centered`); their extents are the
+binned-pixel coordinates of the centered map. No numerics touched: labels
+and status strings only, goldens byte-unchanged.
+
+**Screenshot refresh.** All seven published screenshots were regenerated
+offscreen from the current build with a scratch driver mirroring
+tests/test_smoke.py techniques (async workers pumped via processEvents,
+monkeypatched QMessageBox, cwd in a TEMP dir, `apply_application_theme`
+for the Fusion look, `QT_QPA_FONTDIR=C:\Windows\Fonts` so widget text
+renders offscreen). `docs/screenshot_main.png` is the post-reconstruction
+dashboard `canvas.grab()` at the canonical 2214x705; the five step grabs in
+docs/img are full-window grabs at the dashboard window size that exactly
+fits the canonical canvas (2246x854; the old 2878x916 shots predate the
+16j-3 fixed-size canvas and relied on the then-stretched canvas);
+`step3b_settings_tray.png` is a 1720x1060 window grab with the Settings
+tray open on the Electron Scatter tab. The driver asserts per shot:
+dimensions, file size and pixel variance (PIL), plus programmatically the
+`rBasex Recovered Profile` title, the new `r (px)` / `x centered (px)`
+labels, the golden center estimate and rBasex peaks. Note (observed, not
+changed): the 16j-3 resize refit derives the preferred canvas size from
+`figure.get_figwidth()`, which matplotlib keeps synced to the canvas, so
+successive window resizes ratchet the canvas down to the 1480x700 floor;
+the screenshot driver restores the design figure size
+(27.0x8.6 in) before each grab to pin the canonical 2214x705 dashboard.

@@ -52,7 +52,7 @@ After **Process and Plot** the main window shows a 2x4 grid of live panels:
 | Row | Panels (left to right) |
 |---|---|
 | Top | **Ion Histogram** — ion TOF (or m/q) histogram with coarse/fine ROI shading, peak markers and the fitted background curve. **Electron Scatter** — raw electron detector positions of the selected coincidences (the Newton spheres), with the ring-selection circle overlay. **Centered Bin Map** — the electron image after recentering and binning, with the outer-ring background density subtracted. **rBasex Recon** — the Abel-inverted image with the recovered-peak annotation. |
-| Bottom | **Ion X/Y-TOF Map** — ion detector coordinate versus TOF density map (the elongated blobs show how the ion position drifts with TOF; this is what the alignment straightens). **Ion Scatter** — raw ion detector positions, with the rectangular ion filter overlay. **Radial Profile** — theta-slice (or angular-integrated) radial profile of the centered image. **Radial Position (mm)** — radial profile of the rBasex reconstruction, optionally on kinetic-/binding-energy axes. |
+| Bottom | **Ion X/Y-TOF Map** — ion detector coordinate versus TOF density map (the elongated blobs show how the ion position drifts with TOF; this is what the alignment straightens). **Ion Scatter** — raw ion detector positions, with the rectangular ion filter overlay. **Radial Profile** — theta-slice (or angular-integrated) radial profile of the centered image (x axis `r (px)`). **Radial Position (px)** — radial profile of the rBasex reconstruction, x axis `r (px)` in the binned-pixel units of the centered map, optionally switched to physical kinetic-/binding-energy axes (eV) via the ke/be conversion on the Reconstruction tab. |
 
 Every panel carries two small buttons in its top-right corner: **[copy]**
 copies the panel image to the clipboard and **[raw]** saves the underlying
@@ -307,7 +307,8 @@ The **Ion Scatter** tab limits which ion events define the coincidences.
   (`removed total` is reported). The **Radial Profile** panel shows the
   theta slice at **Theta (deg)** with width **dTheta (deg)**
   (**Update Theta Profile**; **Profile mode** switches to an
-  angular-integrated 2pi profile, **Radial bin** sets its binning). Dragging
+  angular-integrated 2pi profile, **Radial bin** sets its binning; the x
+  axis is `r (px)`, the binned-pixel radius of the centered map). Dragging
   on the Centered Bin Map or the rBasex panel moves the theta guide line.
   The panel header reports `counts=…  pixels=565x565`.
 
@@ -356,11 +357,13 @@ The **Ion Scatter** tab limits which ion events define the coincidences.
   2. r=112, beta=0.2, intensity=6037
   ```
 
-  `r` is the ring radius in mm (bin size x px), `beta` the anisotropy
-  parameter of that ring, `intensity` its integrated strength. The bottom
+  `r` is the ring radius in px (the binned-pixel x-axis units of the
+  radial profile, `r (px)`), `beta` the anisotropy parameter of that ring,
+  `intensity` its integrated strength. The bottom
   right panel shows the same information as the radial profile; **Profile r
   tags** (Ctrl+click on the profile or type `10, 15.5`), **X axis** switching
-  to **Kinetic Energy (eV)** / **Binding Energy (eV)** via **Energy c**,
+  from `r (px)` to a physical energy axis in meV/eV — **Kinetic Energy (eV)** /
+  **Binding Energy (eV)** — via **Energy c**,
   **Energy b**, **Photon hv**, and **Pick Range on Plot** (drag to integrate
   one x-range) are available for quantitative reading.
 
@@ -412,7 +415,7 @@ The **Ion Scatter** tab limits which ion events define the coincidences.
 | Ion Scatter (with main direction line on) | drag | live rotation preview; commits the angle on release |
 | Centered Bin Map / rBasex Recon | drag | move the theta guide line (updates **Theta (deg)**) |
 | Radial Profile (theta) | click / Ctrl+click | set / add a radius cursor |
-| Radial Position (mm) | Pick Range on Plot, then drag | select the integration range (snaps to bins); Ctrl+click adds r tags |
+| Radial Position (px) | Pick Range on Plot, then drag | select the integration range (snaps to bins); Ctrl+click adds r tags |
 | Any panel | right-click | cancel the active interaction |
 
 ### Wheel, keyboard, panel buttons

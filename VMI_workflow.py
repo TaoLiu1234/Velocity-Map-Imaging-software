@@ -903,7 +903,7 @@ class MainWindow(QMainWindow):
         self.rbasex_profile_last_y_measure = np.zeros(0, dtype=np.float64)
         self.rbasex_profile_last_y_plot = np.zeros(0, dtype=np.float64)
         self.rbasex_profile_last_bin_counts = np.zeros(0, dtype=np.int64)
-        self.rbasex_profile_last_axis_label = "r"
+        self.rbasex_profile_last_axis_label = "r (px)"
         self.rbasex_profile_last_beta = np.zeros(0, dtype=np.float64)
         self.rbasex_profile_selected_xrange: tuple[float, float] | None = None
         self.rbasex_profile_selected_stats: dict[str, float | int | tuple[float, float]] | None = None
@@ -1811,7 +1811,7 @@ class MainWindow(QMainWindow):
 
         recon_profile_axes_grid.addWidget(QLabel("X axis"), 2, 0)
         self.rbasex_profile_xmode_combo = QComboBox()
-        self.rbasex_profile_xmode_combo.addItem("Radial Position (mm)", "r")
+        self.rbasex_profile_xmode_combo.addItem("Radial Position (px)", "r")
         self.rbasex_profile_xmode_combo.addItem("Kinetic Energy (eV)", "ke")
         self.rbasex_profile_xmode_combo.addItem("Binding Energy (eV)", "be")
         self.rbasex_profile_xmode_combo.addItem("Both (top KE / bottom BE)", "both")
@@ -7550,7 +7550,7 @@ class MainWindow(QMainWindow):
             return "Kinetic Energy (eV)"
         if mode_now == "be":
             return "Binding Energy (eV)"
-        return "Radial Position (mm)"
+        return "r (px)"
 
     def _update_rbasex_profile_dual_axis_swap_affordance(self) -> None:
         """Enable the top/bottom swap checkbox only when dual-energy mode is active."""
@@ -8232,7 +8232,9 @@ class MainWindow(QMainWindow):
                     f"{self._format_rbasex_profile_formula_text(mode, c, b, hv)}."
                 )
                 return
-        self._refresh_rbasex_profile_display_settings("rBasex radial x-axis: Radial Position (mm).")
+        self._refresh_rbasex_profile_display_settings(
+            f"rBasex radial x-axis: {self._rbasex_profile_x_axis_label('r')}."
+        )
 
     def _on_rbasex_profile_ke_formula_changed(self) -> None:
         """Apply updated radial-energy formula when the rBasex profile uses an energy axis."""
@@ -11380,7 +11382,7 @@ class MainWindow(QMainWindow):
         self.rbasex_profile_last_y_measure = np.zeros(0, dtype=np.float64)
         self.rbasex_profile_last_y_plot = np.zeros(0, dtype=np.float64)
         self.rbasex_profile_last_bin_counts = np.zeros(0, dtype=np.int64)
-        self.rbasex_profile_last_axis_label = "r"
+        self.rbasex_profile_last_axis_label = "r (px)"
         self.rbasex_profile_last_beta = np.zeros(0, dtype=np.float64)
         self.rbasex_profile_selected_xrange = None
         self.rbasex_profile_selected_stats = None
@@ -12680,8 +12682,8 @@ class MainWindow(QMainWindow):
         ax = fig.add_subplot(111)
         try:
             ax.set_title(title)
-            ax.set_xlabel("x centered")
-            ax.set_ylabel("y centered")
+            ax.set_xlabel("x centered (px)")
+            ax.set_ylabel("y centered (px)")
             if result is None:
                 ax.text(0.5, 0.5, "No reconstruction output", transform=ax.transAxes, ha="center", va="center")
             else:
@@ -22904,7 +22906,7 @@ class MainWindow(QMainWindow):
         integrated = self._radial_profile_is_angular_integrated()
         theta_deg, dtheta_deg = self._get_theta_profile_params()
         ax.set_title("Radial Profile")
-        ax.set_xlabel("r")
+        ax.set_xlabel("r (px)")
         ax.set_ylabel("Intensity")
         use_log_y = self._current_radial_profile_yscale() == "log"
         ax.set_yscale("log" if use_log_y else "linear")
@@ -23037,8 +23039,8 @@ class MainWindow(QMainWindow):
         ax.clear()
         scale_mode = self._current_centered_bin_scale()
         ax.set_title("Centered Bin Map")
-        ax.set_xlabel("x centered")
-        ax.set_ylabel("y centered")
+        ax.set_xlabel("x centered (px)")
+        ax.set_ylabel("y centered (px)")
         ax.grid(alpha=0.15)
         self._enforce_square_axis(ax)
 
@@ -23292,8 +23294,8 @@ class MainWindow(QMainWindow):
             self.rbasex_profile_line_lo = None
             self.rbasex_profile_line_hi = None
         ax.set_title(title)
-        ax.set_xlabel("x centered")
-        ax.set_ylabel("y centered")
+        ax.set_xlabel("x centered (px)")
+        ax.set_ylabel("y centered (px)")
         ax.grid(alpha=0.15)
         self._enforce_square_axis(ax)
         if result is None:
@@ -23612,7 +23614,7 @@ class MainWindow(QMainWindow):
         self.rbasex_profile_last_y_measure = np.zeros(0, dtype=np.float64)
         self.rbasex_profile_last_y_plot = np.zeros(0, dtype=np.float64)
         self.rbasex_profile_last_bin_counts = np.zeros(0, dtype=np.int64)
-        self.rbasex_profile_last_axis_label = "r"
+        self.rbasex_profile_last_axis_label = "r (px)"
         self.rbasex_profile_last_beta = np.zeros(0, dtype=np.float64)
         self.rbasex_profile_selected_stats = None
         integrated = self._radial_profile_is_angular_integrated()
