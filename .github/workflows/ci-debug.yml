@@ -6,7 +6,7 @@ on:
 
 jobs:
   probe:
-    name: offscreen hang pinpoint + xvfb fallback test
+    name: matplotlib text-render hang isolation
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -14,7 +14,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install system libraries (incl. xvfb)
+      - name: Install system libraries
         run: |
           sudo apt-get update
           sudo apt-get install -y libgl1 libegl1 libxkbcommon0 libdbus-1-3 libfontconfig1 fonts-dejavu-core xvfb
@@ -23,40 +23,68 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyarrow
-      - name: Fine-grained offscreen probe
+      - name: "A - pure matplotlib text render (no app, no Qt)"
+        timeout-minutes: 2
+        continue-on-error: true
+        run: |
+          cat > /tmp/a.py << 'PYEOF'
+          import time, matplotlib
+          matplotlib.use("Agg")
+          print("mpl", matplotlib.__version__, flush=True)
+          t0 = time.time()
+          import matplotlib.figure
+          f = matplotlib.figure.Figure(figsize=(6, 4))
+          f.text(0.1, 0.1, "hello title")
+          ax = f.add_subplot(111)
+          ax.set_title("panel title")
+          f.savefig("/tmp/a.png", dpi=72)
+          print(f"A-OK text render {time.time()-t0:.1f}s", flush=True)
+          PYEOF
+          python -u /tmp/a.py
+      - name: "B - font cache prebuild timing"
         timeout-minutes: 3
+        continue-on-error: true
+        run: |
+          cat > /tmp/b.py << 'PYEOF'
+          import time
+          t0 = time.time()
+          import matplotlib.font_manager as fm
+          print(f"B fonts known: {len(fm.fontManager.ttflist)} in {time.time()-t0:.1f}s", flush=True)
+          t0 = time.time()
+          f = fm.findfont("DejaVu Sans")
+          print(f"B findfont -> {f} in {time.time()-t0:.1f}s", flush=True)
+          PYEOF
+          python -u /tmp/b.py
+      - name: "C - offscreen app probe after cache prebuild"
+        timeout-minutes: 4
         continue-on-error: true
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          python -u - << 'PYEOF'
+          python -u -c "import matplotlib.font_manager; print('cache prebuilt', flush=True)"
+          cat > /tmp/c.py << 'PYEOF'
           import time
-          def m(tag): print(f"MILESTONE {tag} t={time.time():.0f}", flush=True)
-          from PySide6 import QtWidgets, QtCore
+          def m(t): print(f"C {t} t={time.time():.0f}", flush=True)
+          from PySide6 import QtWidgets
           app = QtWidgets.QApplication([])
           m("qapp")
-          plain = QtWidgets.QWidget(); plain.resize(400, 300); plain.show()
-          app.processEvents()
-          m("plain-widget-shown")
           import VMI_workflow as vw
           win = vw.MainWindow()
           m("constructed")
           win.figure.savefig("/tmp/fig.png", dpi=50)
-          m("figure-savefig-render")
+          m("savefig-ok")
           win.show()
-          m("win-show-returned")
-          deadline = time.time() + 20
-          while time.time() < deadline:
-              app.processEvents(); time.sleep(0.02)
-          m("20s-processevents-survived")
+          app.processEvents()
+          m("shown")
           PYEOF
-      - name: xvfb-run probe (same milestones, xcb platform)
-        timeout-minutes: 6
+          python -u /tmp/c.py
+      - name: "D - xvfb app probe (script file, xcb)"
+        timeout-minutes: 5
         continue-on-error: true
         run: |
-          xvfb-run -a python -u - << 'PYEOF'
+          cat > /tmp/d.py << 'PYEOF'
           import time
-          def m(tag): print(f"XVFB MILESTONE {tag} t={time.time():.0f}", flush=True)
+          def m(t): print(f"D {t} t={time.time():.0f}", flush=True)
           from PySide6 import QtWidgets
           app = QtWidgets.QApplication([])
           m("qapp")
@@ -64,31 +92,7 @@ jobs:
           win = vw.MainWindow()
           m("constructed")
           win.show()
+          app.processEvents()
           m("shown")
-          deadline = time.time() + 60
-          while time.time() < deadline:
-              app.processEvents(); time.sleep(0.02)
-          m("60s-processevents-survived")
-          import os, sys, subprocess
-          os.makedirs("tests/sample_data", exist_ok=True)
-          subprocess.run([sys.executable, "tests/make_sample_data.py"], check=True)
-          m("sample-data")
-          S = "tests/sample_data/"
-          win.file_paths["trigger"] = S + "synth_ar100_vmi_DAn.dat"
-          win.file_paths["electron"] = S + "synth_ar100_vmi.lmf_elec_DAn.dat"
-          win.file_paths["ion"] = S + "synth_ar100_vmi.lmf_ion_DAn.dat"
-          win.load_cache()
-          deadline = time.time() + 120
-          while time.time() < deadline:
-              app.processEvents()
-              if win.cache is not None and not getattr(win, "_load_busy", False):
-                  break
-              time.sleep(0.05)
-          m(f"cache-ready={win.cache is not None}")
-          win.trigger_mode_combo.setCurrentIndex(win.trigger_mode_combo.findData("coincidence"))
-          app.processEvents()
-          win.process_and_plot()
-          app.processEvents()
-          m("process_and_plot-returned")
-          print("XVFB PROBE COMPLETE", flush=True)
           PYEOF
+          xvfb-run -a python -u /tmp/d.py
