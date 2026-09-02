@@ -31,6 +31,11 @@ Newton-sphere rings), so you can reproduce every figure yourself.
 
 ## 1. Overview
 
+> The experiment behind this software is **PEPICO** (photoelectron–photoion
+> coincidence) with a **VMI spectrometer** on the electron side; see
+> [hardware.md](hardware.md) for the measurement principle and how the data
+> files map onto the hardware.
+
 VMI_workflow is an interactive workstation for velocity-map-imaging (VMI)
 photoelectron / photoion coincidence analysis. It takes the event lists
 exported by your acquisition software and walks you through the complete

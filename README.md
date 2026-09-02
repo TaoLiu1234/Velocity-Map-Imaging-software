@@ -12,6 +12,8 @@ projection with noise-subtracted binning, and rBasex Abel inversion (via
 angular-anisotropy (beta) distributions. Analysis sessions can be saved and
 restored.
 
+This is a **PEPICO** workstation (photoelectron–photoion coincidence): the photoelectron is imaged by a VMI spectrometer while the photoion is measured in time of flight, and the coincidence table from the TDC acquisition ties the two together. See [docs/hardware.md](docs/hardware.md) for the measurement principle, the spectrometer electrodes, and how the data files map onto the hardware.
+
 ## Features
 
 - **Seven-step guided workflow** matching the UI tabs: load data, process and
