@@ -1,0 +1,72 @@
+name: CI Debug
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  smoke-stall-probe:
+    name: find where the smoke stalls (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Qt system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libegl1 libxkbcommon0 libdbus-1-3 libfontconfig1 fonts-dejavu-core
+          sudo apt-get install -y libglib2.0-0 || sudo apt-get install -y libglib2.0-0t64
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyarrow
+      - name: Milestone probe
+        timeout-minutes: 8
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -u - << 'PYEOF'
+          import sys, time
+          def m(tag):
+              print(f"MILESTONE {tag} t={time.time():.0f}", flush=True)
+          m("start")
+          import PySide6
+          m("pyside6-imported")
+          from PySide6 import QtWidgets
+          app = QtWidgets.QApplication([])
+          m("qapp-created")
+          import VMI_workflow as vw
+          m("vmi-imported")
+          win = vw.MainWindow()
+          m("mainwindow-constructed")
+          win.show()
+          app.processEvents()
+          m("shown")
+          import os
+          os.makedirs("tests/sample_data", exist_ok=True)
+          import subprocess
+          subprocess.run([sys.executable, "tests/make_sample_data.py"], check=True)
+          m("sample-data-generated")
+          S = "tests/sample_data/"
+          win.file_paths["trigger"] = S + "synth_ar100_vmi_DAn.dat"
+          win.file_paths["electron"] = S + "synth_ar100_vmi.lmf_elec_DAn.dat"
+          win.file_paths["ion"] = S + "synth_ar100_vmi.lmf_ion_DAn.dat"
+          win.load_cache()
+          m("load_cache-returned")
+          deadline = time.time() + 90
+          while time.time() < deadline:
+              app.processEvents()
+              if win.cache is not None and not getattr(win, "_load_busy", False):
+                  break
+              time.sleep(0.05)
+          m(f"cache-ready={win.cache is not None}")
+          win.trigger_mode_combo.setCurrentIndex(win.trigger_mode_combo.findData("coincidence"))
+          app.processEvents()
+          win.process_and_plot()
+          app.processEvents()
+          m("process_and_plot-returned")
+          print("PROBE COMPLETE", flush=True)
+          PYEOF
