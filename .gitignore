@@ -7,3 +7,6 @@ Refence data/
 tests/sample_data/
 *.dat
 *.npz
+
+# 本地留存的 CI 运行日志
+*_ci*.log
